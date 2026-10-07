@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+    <title>School Pay Manager - Simple School Payments. Smarter School Management.</title>
+    <script>
+      // Suppress benign Vite dev server HMR WebSocket close warning in cloud iframe environments
+      window.addEventListener('error', function (e) {
+        if (e.message && e.message.includes('WebSocket')) {
+          e.stopImmediatePropagation();
+          e.preventDefault();
+        }
+      }, true);
+      const _origConsoleError = console.error;
+      console.error = function (...args) {
+        if (args.some(a => typeof a === 'string' && (a.includes('WebSocket') || a.includes('[vite]')))) {
+          return;
+        }
+        _origConsoleError.apply(console, args);
+      };
+    </script>
+    <meta name="description" content="Commercial multi-tenant SaaS platform for Nigerian schools. Simple school payments. Smarter school management." />
+    <meta property="og:title" content="School Pay Manager" />
+    <meta property="og:description" content="Commercial multi-tenant SaaS platform for Nigerian schools. Simple school payments. Smarter school management." />
+    <meta property="og:type" content="website" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="theme-color" content="#0F172A" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="SchoolPay" />
+    <link rel="icon" type="image/svg+xml" href="/icon.svg" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  </head>
+  <body class="bg-slate-50 text-slate-900 antialiased selection:bg-emerald-500 selection:text-white min-h-screen">
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
+

@@ -1,0 +1,9 @@
+{
+  "name": "School Pay Manager",
+  "description": "Commercial multi-tenant SaaS platform for Nigerian schools. Simple school payments. Smarter school management.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
+
