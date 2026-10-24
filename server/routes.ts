@@ -181,44 +181,40 @@ apiRouter.post(['/v1/auth/register-school', '/v1/auth/register'], async (req, re
     });
   }
 
-  // Check if school email or owner email already exists in authoritative Neon PostgreSQL
-  const pgPool = getPgPool();
-  if (pgPool && isPgConnected()) {
-    try {
-      const checkSchool = await pgPool.query('SELECT id FROM schools WHERE LOWER(email) = $1', [schoolEmail.toLowerCase()]);
-      if (checkSchool.rows.length > 0) {
-        return res.status(409).json({
-          error: 'SCHOOL_EXISTS',
-          message: 'A school with this official email address is already registered.',
-        });
-      }
-      const checkUser = await pgPool.query('SELECT id FROM users WHERE LOWER(email) = $1', [ownerEmail.toLowerCase()]);
-      if (checkUser.rows.length > 0) {
-        return res.status(409).json({
-          error: 'USER_EXISTS',
-          message: 'A user account with this proprietor email address already exists. Please log in or use another email.',
-        });
-      }
-    } catch (e: any) {
-      console.warn('[Registration Pre-Check Warning]', e.message);
+  // Check if school email or owner email already exists in authoritative Neon PostgreSQL (MANDATORY)
+  const pool = getPgPool();
+  if (!pool) {
+    return res.status(503).json({
+      error: 'DATABASE_UNAVAILABLE',
+      message: 'Database service is currently initializing. Please retry in a moment.',
+    });
+  }
+
+  let pgCheckClient: any = null;
+  try {
+    pgCheckClient = await pool.connect();
+    const checkSchool = await pgCheckClient.query('SELECT id FROM schools WHERE LOWER(email) = $1', [schoolEmail.toLowerCase()]);
+    if (checkSchool.rows.length > 0) {
+      return res.status(409).json({
+        error: 'SCHOOL_EXISTS',
+        message: 'A school with this official email address is already registered.',
+      });
     }
-  }
-
-  // Fallback check in local cache
-  const existingSchool = db.prepare('SELECT id FROM schools WHERE email = ?').get(schoolEmail.toLowerCase());
-  if (existingSchool) {
-    return res.status(409).json({
-      error: 'SCHOOL_EXISTS',
-      message: 'A school with this official email address is already registered.',
+    const checkUser = await pgCheckClient.query('SELECT id FROM users WHERE LOWER(email) = $1', [ownerEmail.toLowerCase()]);
+    if (checkUser.rows.length > 0) {
+      return res.status(409).json({
+        error: 'USER_EXISTS',
+        message: 'A user account with this proprietor email address already exists. Please log in or use another email.',
+      });
+    }
+  } catch (e: any) {
+    console.error('[Registration Pre-Check Error]', e.message);
+    return res.status(503).json({
+      error: 'DATABASE_ERROR',
+      message: 'Unable to verify email availability with the authoritative cloud database: ' + (e?.message || 'Database error'),
     });
-  }
-
-  const existingUser = db.prepare('SELECT id FROM users WHERE email = ?').get(ownerEmail.toLowerCase());
-  if (existingUser) {
-    return res.status(409).json({
-      error: 'USER_EXISTS',
-      message: 'A user account with this proprietor email address already exists. Please log in or use another email.',
-    });
+  } finally {
+    if (pgCheckClient) pgCheckClient.release();
   }
 
   const schoolId = 'sch_' + crypto.randomUUID().slice(0, 8);
@@ -240,7 +236,6 @@ apiRouter.post(['/v1/auth/register-school', '/v1/auth/register'], async (req, re
   const answerHash2 = hashPassword(normalizeAns(answer2), salt2);
 
   // STEP 1: Authoritative Neon PostgreSQL Persistence First
-  const pool = getPgPool();
   if (!pool) {
     return res.status(503).json({
       error: 'DATABASE_UNAVAILABLE',
