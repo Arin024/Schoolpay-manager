@@ -1,0 +1,9 @@
+{
+  "name": "School Pay Manager",
+  "description": "BursarIQ - Nigeria's trusted school fee management and bursary portal. Simple school payments. Smarter bursary management.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
+

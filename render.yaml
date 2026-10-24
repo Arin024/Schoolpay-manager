@@ -1,0 +1,27 @@
+services:
+  - type: web
+    name: bursariq
+    env: node
+    plan: free
+    region: frankfurt # Low-latency EU region close to Neon's eu-west-2 cluster
+    buildCommand: npm install && npm run build
+    startCommand: MALLOC_ARENA_MAX=2 node --max-old-space-size=300 --optimize-for-size server.ts
+    healthCheckPath: /api/health
+    autoDeploy: true
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 10000
+      - key: NODE_OPTIONS
+        value: --max-old-space-size=300 --optimize-for-size
+      - key: MALLOC_ARENA_MAX
+        value: "2" 
+      - key: NEON_DATABASE_URL
+        sync: false # Set securely in Render dashboard
+      - key: DATABASE_URL
+        sync: false # Set securely in Render dashboard
+      - key: JWT_SECRET
+        generateValue: true
+      - key: APP_URL
+        value: https://bursariq.com.ng

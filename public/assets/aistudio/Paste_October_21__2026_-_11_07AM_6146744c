@@ -1,0 +1,827 @@
+BURSARIQ MASTER PRODUCTION HARDENING AND QUALITY UPGRADE
+
+Act as a principal software engineer, application security specialist, PostgreSQL database architect, DevOps engineer, SaaS product designer, QA engineer, and disaster-recovery specialist.
+
+Your assignment is to perform a comprehensive, evidence-based audit and upgrade of my existing production application:
+
+Product: BursarIQ
+Production domain: https://bursariq.com.ng
+Purpose: Multi-tenant school management, school fee collection, payment tracking, financial reporting, student records, staff management, subscriptions, and administrative operations.
+
+The existing project uses a React/Vite frontend and Node.js/Express backend. Previous versions have involved SQLite and Neon PostgreSQL, with deployment through Google Cloud Run and a Cloudflare frontend/proxy setup.
+
+These are historical findings, not permission to assume that the current deployment still uses the same architecture. Inspect the actual repository, configuration, database connections, deployment configuration, and production runtime before making decisions.
+
+My goal is to turn BursarIQ into a secure, dependable, professional SaaS product that can support substantial growth without losing customer information or exposing one school's records to another.
+
+NON-NEGOTIABLE RULES
+
+1. Preserve all existing legitimate users, schools, students, staff, invoices, payments, subscriptions, settings, audit logs, and other business records.
+2. Never drop, truncate, reset, replace, overwrite, or recreate the production database as a shortcut.
+3. Never introduce a fresh empty database as an automatic fallback when the production database is unavailable.
+4. Never claim that data is safe, a vulnerability is fixed, a backup exists, or a deployment succeeded without verifiable evidence.
+5. Do not replace the existing application with a newly generated demo or an unrelated template.
+6. Do not remove working features merely to make the audit easier.
+7. Do not expose passwords, database connection strings, API keys, session secrets, access tokens, or other credentials in logs, frontend code, reports, screenshots, or Git history.
+8. Do not disable security checks to make tests pass.
+9. Do not silently discard data when an operation fails.
+10. Do not make destructive production changes without first explaining the risk, providing a verified backup, and obtaining my explicit approval.
+11. Do not assume that a successful local build proves that production is correct.
+12. Do not assume that HTTP 200 means that registration, authentication, or database persistence works correctly.
+13. Maintain compatibility with the existing application wherever reasonably possible.
+14. Make actual code changes, run appropriate tests, and report the results. Do not merely provide recommendations.
+15. If a task requires credentials, account access, permissions, or a manual action that you cannot perform, explain exactly what is required and continue with everything else that can safely be completed.
+16. Do not expose private production data in test output. Use synthetic test records where possible.
+
+PHASE 1: ESTABLISH THE REAL PRODUCTION ARCHITECTURE
+
+Before editing code, investigate the entire existing project.
+
+Inspect:
+
+- Frontend entry points and routing.
+- Authentication context and session management.
+- Registration, login, logout, and account recovery.
+- API clients and request interceptors.
+- Express routes, middleware, and controllers.
+- Database drivers and connection pools.
+- Database schemas and migration files.
+- Environment variable resolution.
+- Tenant identification and authorization.
+- Payment processing and webhook handlers.
+- Service workers and PWA caching.
+- Cloudflare configuration and routing.
+- Cloud Run service configuration and runtime.
+- GitHub deployment configuration.
+- Backup and recovery implementations.
+- Existing automated tests.
+- Logging and error handling.
+
+Identify the actual production deployment behind bursariq.com.ng.
+
+Determine whether the live frontend, API, backend version, and database connection belong to the same intended production environment.
+
+Verify the current production database using read-only inspection wherever possible.
+
+Determine:
+
+1. Which database the deployed application actually reads from.
+2. Which database the deployed application actually writes to.
+3. Whether registration and login use the same database.
+4. Whether database initialization creates empty databases unexpectedly.
+5. Whether any code silently falls back to SQLite, an in-memory database, local storage, or mock data.
+6. Whether old and new application versions use different schemas.
+7. Whether migrations have been applied consistently.
+8. Whether the running application is the latest intended version.
+9. Whether any scheduled job, deployment script, startup routine, or initialization function can erase or overwrite data.
+10. Whether the frontend can display stale, cached, or fabricated account information.
+
+Search for destructive database commands, schema recreation, hardcoded fallback connections, duplicate database clients, unsafe initialization logic, and unguarded data-reset functions.
+
+Create a clear architecture diagram or written architecture description showing the frontend, API, authentication, production database, payment provider, and backup destination.
+
+Produce an evidence-based findings report with severity ratings.
+
+Do not perform destructive remediation during this discovery phase.
+
+PHASE 2: MAKE PRODUCTION DATA PERSISTENT
+
+This is the highest-priority requirement.
+
+Establish one authoritative production database.
+
+If Neon PostgreSQL is the intended production database, make it the authoritative source for all persistent business records after verifying the existing database, schema, and data.
+
+Do not assume that switching a connection string alone completes the migration.
+
+Requirements:
+
+- All production registration operations must write to the authoritative database.
+- All login and account lookup operations must use the intended persistent identity store.
+- All school, user, student, staff, invoice, payment, subscription, and reporting operations must use the correct persistent database.
+- All application instances must access the same authoritative production records.
+- Restarting the server must not remove data.
+- Redeploying the application must not remove data.
+- Scaling to another server instance must not create a separate set of user records.
+- Logging out must not delete the account.
+- Clearing a browser cache must not delete server-side business records.
+- Installing or updating the PWA must not erase accounts or database records.
+- Temporary database failures must not cause the application to initialize an empty replacement database.
+- A failed save must never be reported to the user as a successful save.
+- A failed database query must never be converted into a fabricated empty result.
+- Database migrations must preserve existing records.
+- Application startup must not automatically reset production data.
+- Local development databases must never be used as silent production fallbacks.
+
+If SQLite-to-PostgreSQL migration is still incomplete, inspect and document the current state before migrating.
+
+Create a safe, repeatable migration plan.
+
+Before any production migration:
+
+1. Verify a recent backup.
+2. Record existing table names, row counts, and relevant integrity checks.
+3. Inspect schema differences.
+4. Map existing records to the target schema.
+5. Preserve primary keys and relationships where required.
+6. Handle duplicate records and conflicting identifiers explicitly.
+7. Use transactions and appropriate migration safeguards.
+8. Verify record counts and critical relationships after migration.
+9. Keep the original data recoverable until migration acceptance.
+10. Document the rollback procedure.
+
+Never delete the original records simply because the migration script completed.
+
+Remove dual-write behavior where it can cause inconsistent databases. Do not remove it until a safe transition has been implemented and verified.
+
+Do not introduce any automatic database reset if a migration fails.
+
+PHASE 3: FIX REGISTRATION, LOGIN, AND ACCOUNT PERSISTENCE
+
+Investigate the previous issue in which users could register, leave the application, and later find that their account or records appeared to have disappeared.
+
+Trace the complete path:
+
+Registration form → frontend validation → API request → backend route → authentication service → database write → response → subsequent login → database lookup → authenticated session → user profile and dashboard.
+
+Add automated regression tests for this entire path.
+
+Test the following:
+
+1. A new user registers successfully.
+2. The server confirms that the account has been durably saved.
+3. The user logs out.
+4. The user closes and reopens the browser.
+5. The user logs in again.
+6. The original account and profile are retrieved.
+7. The user's existing records remain available.
+8. The server restarts.
+9. The user logs in again.
+10. A new application version is deployed to a test environment.
+11. The user logs in again and retrieves the same records.
+12. A temporary network failure occurs during an API request.
+13. A temporary database connection failure occurs.
+14. An authenticated session expires.
+15. The user attempts to access a protected page.
+16. The user opens an old bookmarked URL or refreshes a deep link.
+
+Ensure that temporary errors never silently convert an existing account into an apparently empty account.
+
+Do not clear authentication state for every API error.
+
+Only invalidate authentication when the response and session-validation rules establish that the session is genuinely invalid or expired.
+
+Handle authentication errors, permission errors, validation errors, rate limits, server errors, and network failures separately.
+
+If a profile request fails because the server is temporarily unavailable, display an honest recoverable error state instead of fabricating a new user profile.
+
+Inspect URL hash routing and ensure that login and registration routes cannot trap authenticated users or unnecessarily destroy a valid session.
+
+The frontend must never be the authority for whether an account exists. The server-side identity store is authoritative.
+
+PHASE 4: BUILD A DEFENSIVE BACKUP AND RECOVERY SYSTEM
+
+Implement or improve a production-grade backup system.
+
+Requirements:
+
+- Scheduled database backups.
+- Backups stored separately from the primary database.
+- Encryption in transit and at rest.
+- Restricted backup access.
+- Protection against unauthorized backup deletion.
+- Backup retention policies.
+- Backup creation timestamps.
+- Schema and application version metadata.
+- Backup manifests and integrity verification.
+- Checksums or cryptographic hashes for detecting corruption.
+- Backup completion and failure notifications.
+- Monitoring of missed backup schedules.
+- Documented restoration procedures.
+- Regular restoration tests in a separate environment.
+- Verification that restored records match the backup.
+- Protection against accidental restoration into production.
+- Clear recovery instructions if the primary database becomes unavailable.
+
+If Google Cloud Storage is already configured for backups, inspect and reuse the existing configuration where appropriate.
+
+Do not create a new bucket or change production permissions without checking existing resources and obtaining any necessary authorization.
+
+If the existing backup endpoint supports scheduled OIDC authentication or a scheduler secret, review it for correctness rather than replacing it unnecessarily.
+
+Use the principle of least privilege for backup service accounts.
+
+A successful backup must mean more than a successful HTTP response. Verify that the backup artifact exists, is readable, passes integrity checks, and can be restored.
+
+Never claim that recovery is guaranteed until a restoration test has succeeded.
+
+PHASE 5: PREVENT DATA CORRUPTION AND ACCIDENTAL DELETION
+
+Inspect all operations that create, update, archive, restore, or delete records.
+
+Implement:
+
+- Database transactions for operations involving multiple related records.
+- Foreign-key constraints where appropriate.
+- Unique constraints for identifiers that must not be duplicated.
+- Input validation on the backend.
+- Safe concurrent-update handling.
+- Idempotency for retryable operations.
+- Atomic invoice and payment state transitions.
+- Appropriate audit trails.
+- Explicit authorization for destructive actions.
+- Soft deletion or archival for suitable business records.
+- A documented retention and permanent-deletion policy.
+- Clear user-facing error messages when a save fails.
+
+For financial records, preserve an audit trail of relevant changes.
+
+Never allow a payment retry or repeated webhook delivery to create duplicate financial transactions.
+
+Do not treat a browser-side optimistic update as proof that a database write succeeded.
+
+Where appropriate, show a clear save status and confirm success only after the backend confirms persistence.
+
+For important operations, use appropriate transaction isolation and concurrency controls.
+
+Prevent an ordinary school administrator from permanently deleting platform-level data or records belonging to other schools.
+
+PHASE 6: SECURE MULTI-TENANT ARCHITECTURE
+
+BursarIQ is a multi-tenant SaaS product.
+
+Each school must have an isolated data environment logically enforced by the backend and database.
+
+Review every relevant table, including:
+
+- schools
+- users
+- students
+- parents
+- staff
+- classes
+- fee structures
+- invoices
+- payments
+- subscriptions
+- notifications
+- reports
+- audit_logs
+- sessions
+- any additional tenant-owned records discovered in the actual schema.
+
+Determine which records are platform-wide and which belong to individual schools.
+
+Ensure that every tenant-owned record has a reliable ownership relationship to the correct school.
+
+Requirements:
+
+1. Derive the authenticated user's school permissions from trusted server-side identity and authorization data.
+2. Never trust a school_id or tenant_id supplied by the browser without authorization checks.
+3. Apply tenant-scoped authorization to every read, write, update, export, download, and delete operation.
+4. Prevent insecure direct object reference attacks.
+5. Prevent users from changing identifiers to access another school's records.
+6. Protect nested relationships, such as invoices belonging to students in another school.
+7. Ensure reports, counts, search results, exports, and dashboard totals are tenant-scoped.
+8. Ensure file uploads and downloads are authorized for the relevant tenant.
+9. Ensure background jobs and scheduled tasks respect tenant boundaries.
+10. Ensure cached data cannot leak between schools.
+11. Ensure error messages do not reveal private information from other tenants.
+12. Apply database-level row security where appropriate and compatible with the existing architecture.
+13. If row-level security is implemented, verify that the application's database role and connection-pooling model cannot bypass the intended tenant restrictions.
+14. Test the platform super-admin separately from ordinary school administrators.
+15. Keep platform-level administration available only to explicitly authorized platform administrators.
+
+Create at least two synthetic schools with separate test users and records.
+
+Attempt cross-tenant access using the second school's identifiers.
+
+Verify that unauthorized requests are rejected without revealing protected records.
+
+Run these tests against the backend, not merely the frontend.
+
+PHASE 7: HARDEN AUTHENTICATION AND APPLICATION SECURITY
+
+Use established security practices appropriate for a production SaaS application.
+
+Inspect and improve the following.
+
+Authentication
+
+- Secure password hashing using a suitable modern password-hashing algorithm.
+- Password policy appropriate to the authentication method.
+- Protection against account enumeration.
+- Login rate limiting and abuse detection.
+- Secure password reset with expiring, single-use tokens.
+- Secure session invalidation.
+- Session rotation after authentication and privilege changes.
+- Appropriate session expiration.
+- Multi-factor authentication support for privileged accounts where feasible.
+- Protection against brute-force attacks.
+- Reauthentication for sensitive account operations.
+
+Never store plaintext passwords or reusable password-reset tokens.
+
+Session security
+
+If cookie-based sessions are used, review Secure, HttpOnly, SameSite, domain, path, and expiration settings.
+
+Use CSRF protection appropriate to the application's authentication and request architecture.
+
+Do not place long-lived sensitive credentials in localStorage when a safer architecture is practical.
+
+If bearer tokens are used, review token expiration, storage, rotation, revocation, and refresh-token handling.
+
+Ensure that logging out invalidates the appropriate server-side session or refresh credentials.
+
+API security
+
+- Validate and normalize inputs on the server.
+- Apply appropriate request-size limits.
+- Prevent mass assignment of sensitive fields.
+- Prevent unauthorized role changes.
+- Prevent arbitrary modification of subscription status.
+- Apply rate limits to authentication and expensive endpoints.
+- Enforce request method and content-type expectations.
+- Use safe SQL queries and parameterized database operations.
+- Prevent injection vulnerabilities.
+- Configure CORS with explicit allowed origins.
+- Review security headers and Content Security Policy.
+- Prevent open redirects.
+- Prevent unsafe file uploads.
+- Protect against SSRF where server-side URL fetching exists.
+- Prevent stack traces and secrets from appearing in production responses.
+
+Do not assume frontend validation protects the API.
+
+Authorization
+
+Enforce permissions on the backend for:
+
+- Platform super-admins.
+- School owners.
+- School administrators.
+- Bursars and finance staff.
+- Teachers and other staff.
+- Parents and students, if supported.
+
+Use deny-by-default authorization for protected resources.
+
+A hidden button is not an authorization control.
+
+Secrets and configuration
+
+- Inspect environment-variable handling.
+- Remove hardcoded credentials and fallback secrets.
+- Keep database URLs and API keys on the server.
+- Ensure Vite-exposed environment variables contain no secrets.
+- Review Git history and repository files for exposed credentials.
+- Use the deployment platform's secret-management facilities where available.
+- Rotate any credential that is confirmed to have been exposed.
+- Do not print secret values during diagnosis.
+- Do not disable TLS certificate verification to make database connections succeed.
+
+Do not change production credentials without a safe migration plan and the required authorization.
+
+PHASE 8: SECURE PAYMENTS AND FINANCIAL RECORDS
+
+Inspect the actual payment provider and implementation before making changes.
+
+Protect:
+
+- Payment initiation.
+- Payment verification.
+- Provider callbacks and webhooks.
+- Invoice generation.
+- Receipt generation.
+- Partial payments.
+- Outstanding balances.
+- Refunds and reversals, if supported.
+- Duplicate payment prevention.
+- Payment reconciliation.
+- Subscription activation and expiration.
+
+Verify payment status on the server using the payment provider's trusted verification mechanism.
+
+Never trust a frontend success message as proof of payment.
+
+Verify webhook signatures according to the provider's documented process.
+
+Use idempotency controls so that retries cannot create duplicate payments or activate the same subscription incorrectly.
+
+Keep invoice totals, payment totals, and outstanding balances consistent.
+
+Use database transactions for related financial updates.
+
+Do not silently change historical payment records when calculating corrected balances.
+
+Maintain auditable financial events.
+
+Do not store raw payment-card details unless the system is specifically designed and authorized to handle them.
+
+PHASE 9: PREVENT PWA AND CACHING PROBLEMS
+
+Inspect the service worker, cache configuration, application update process, and offline behaviour.
+
+Requirements:
+
+- Do not cache sensitive API responses indiscriminately.
+- Do not allow one user's private information to appear in another user's session.
+- Do not let stale HTML or JavaScript silently keep users on incompatible application versions.
+- Use appropriate network-first or network-only strategies for authenticated API requests.
+- Do not treat cached data as proof that a server-side operation succeeded.
+- Ensure that authentication failures and server errors are handled correctly.
+- Provide a clear, safe application-update flow.
+- Avoid deleting important local drafts or unsynchronized work without warning.
+- Ensure that browser storage is not treated as the authoritative database.
+- Ensure that service-worker updates cannot cause accounts or server-side records to disappear.
+
+If a user is offline, explain which operations are unavailable and preserve any supported unsynchronized draft safely.
+
+Do not make the application appear to have saved a financial transaction when the server has not confirmed it.
+
+PHASE 10: REDESIGN THE INTERFACE TO PROFESSIONAL COMMERCIAL QUALITY
+
+Improve the existing interface without destroying working functionality.
+
+The result must look like a polished, deliberately designed enterprise SaaS application built by an experienced product team.
+
+Do not simply ask another AI to generate a generic dashboard.
+
+First inspect the existing application and identify its actual users, workflows, components, and navigation.
+
+Visual direction
+
+Create a restrained, professional visual identity suitable for a trusted school finance platform.
+
+Use:
+
+- Consistent typography.
+- A coherent colour system.
+- Clear visual hierarchy.
+- Deliberate spacing.
+- Consistent iconography.
+- Well-designed tables.
+- Readable financial figures.
+- Strong alignment.
+- Appropriate contrast.
+- Responsive layouts.
+- Subtle, purposeful interactions.
+- Clear status indicators.
+- Thoughtful empty, loading, error, and success states.
+
+Avoid excessive gradients, random decorative shapes, unnecessary animations, oversized headings, inconsistent card radii, and generic AI-generated layouts.
+
+Do not add visual effects that reduce performance or accessibility.
+
+Do not use fake customer testimonials, fabricated school logos, invented usage statistics, or misleading claims.
+
+Professional dashboard
+
+Design a useful dashboard around real business tasks.
+
+Where the existing data supports them, include:
+
+- Total fees invoiced.
+- Total payments received.
+- Outstanding balances.
+- Recent transactions.
+- Unpaid students.
+- Pending and failed payments.
+- Payment reconciliation.
+- Recent activity.
+- Relevant subscription status.
+- Clear shortcuts to common tasks.
+
+All financial figures must come from real authorized database queries.
+
+Never replace failed queries with attractive sample numbers.
+
+Tables and records
+
+Improve the usability of student, invoice, payment, and staff tables.
+
+Include appropriate:
+
+- Search.
+- Filtering.
+- Sorting.
+- Pagination.
+- Clear column labels.
+- Mobile-friendly layouts.
+- Export controls.
+- Loading states.
+- Empty states.
+- Error states.
+- Confirmation dialogs for destructive actions.
+
+Do not load an unlimited number of records into the browser.
+
+Ensure exported records respect tenant permissions.
+
+Forms
+
+Make registration, onboarding, student creation, invoice creation, and payment entry clear and reliable.
+
+Use appropriate field validation, helpful labels, understandable error messages, keyboard accessibility, and visible save status.
+
+Prevent accidental duplicate submissions.
+
+Do not clear a form containing unsaved information after an unrelated server error.
+
+Mobile quality
+
+Test common Android screen sizes and narrow browser widths.
+
+Ensure:
+
+- Navigation works on mobile.
+- Tables remain usable.
+- Forms fit the screen.
+- Modals are accessible.
+- Buttons have appropriate touch targets.
+- Important financial figures remain readable.
+- The interface does not overflow horizontally without a good reason.
+
+Product identity
+
+Maintain BursarIQ's identity.
+
+Where appropriate, include the established product attribution:
+
+"Build and design by Arinz e chukwu Christian" — use the correct spelling: "Build and design by Arinz echukwu Christian" only if verified from the existing branding.
+
+The intended exact credit is:
+
+"Build and design by Arinz echukwu Christian" is NOT the required wording.
+
+Use exactly:
+
+"Build and design by Arinz echukwu Christian" only if the source project's established spelling says so.
+
+Otherwise, use the following confirmed branding exactly:
+
+"Build and design by Arinz echukwu Christian" is not acceptable if it introduces a spelling error.
+
+The intended attribution is:
+
+"Build and design by Arinz echukwu Christian" should be corrected to:
+
+"Build and design by Arinz echukwu Christian"
+
+Before implementing, verify the existing project's author attribution and use the correct identity, with the following intended wording:
+
+"Build and design by Arinz echukwu Christian" must not be invented.
+
+Use the established brand credits already configured in the repository. Do not introduce misspelled names or duplicate footer credits.
+
+PHASE 11: DATABASE INTEGRITY AND MIGRATION SAFETY
+
+Inspect all database migrations and schemas.
+
+Requirements:
+
+- Version-controlled migrations.
+- Repeatable migration tracking.
+- Appropriate primary and foreign keys.
+- Appropriate unique constraints.
+- Correct decimal or integer-based monetary representations.
+- Consistent timestamp handling.
+- Transactional data modifications where supported.
+- Safe connection pooling.
+- Connection timeouts and recovery.
+- Query timeouts where appropriate.
+- Database least-privilege permissions.
+- Detection of orphaned or inconsistent records.
+- Safe indexes for frequently used queries.
+- Appropriate limits on expensive queries.
+
+Never use floating-point arithmetic for authoritative financial calculations.
+
+Ensure that financial values cannot silently overflow or be rounded incorrectly.
+
+Use safe pagination and indexed filters.
+
+Do not automatically modify production schema based on an unreviewed startup routine.
+
+PHASE 12: LOGGING, MONITORING, AND INCIDENT RESPONSE
+
+Implement structured production logging that supports diagnosis without exposing sensitive data.
+
+Monitor:
+
+- Registration failures.
+- Authentication failures.
+- Database connection failures.
+- Failed writes.
+- Repeated API errors.
+- Payment verification failures.
+- Webhook failures.
+- Unexpected tenant authorization failures.
+- Backup failures.
+- Abnormal application restarts.
+- Migration failures.
+
+Use request IDs or correlation IDs to trace requests across the frontend, backend, and database operations where appropriate.
+
+Never log passwords, authentication tokens, session cookies, full payment credentials, or unnecessary personal data.
+
+Provide clear operational alerts for serious failures.
+
+Ensure that errors are visible to administrators and developers without revealing internal stack traces to ordinary users.
+
+PHASE 13: TESTING AND SECURITY VERIFICATION
+
+Run appropriate automated checks and security tests.
+
+At minimum, include:
+
+A. Authentication tests
+
+- Registration.
+- Login.
+- Logout.
+- Session expiration.
+- Account recovery.
+- Invalid credentials.
+- Rate limiting.
+
+B. Persistence tests
+
+- Register, log out, and log in again.
+- Restart the application.
+- Deploy a new application version in a test environment.
+- Verify the original user and records still exist.
+- Simulate temporary database failures.
+- Verify that failed writes are never reported as successful.
+
+C. Tenant-isolation tests
+
+- Cross-tenant student access.
+- Cross-tenant invoice access.
+- Cross-tenant payment access.
+- Cross-tenant exports.
+- Unauthorized role escalation.
+- Unauthorized subscription changes.
+
+D. Financial tests
+
+- Full payment.
+- Partial payment.
+- Outstanding balance.
+- Duplicate payment attempts.
+- Repeated webhook delivery.
+- Failed payment verification.
+- Concurrent payment requests.
+
+E. Database tests
+
+- Migration safety.
+- Referential integrity.
+- Duplicate identifiers.
+- Transaction rollback.
+- Backup integrity.
+- Restoration in an isolated test environment.
+
+F. Frontend tests
+
+- Registration.
+- Login.
+- Navigation.
+- Mobile layouts.
+- Loading states.
+- Error states.
+- Empty states.
+- Form validation.
+- Session restoration.
+- PWA update behaviour.
+
+G. Application security tests
+
+- Injection attempts.
+- Broken access control.
+- Insecure direct object references.
+- Cross-site scripting.
+- CSRF where relevant.
+- Unsafe file uploads.
+- Rate-limit bypass attempts.
+- Security-header checks.
+- Secret exposure checks.
+
+Use authorized testing against controlled environments. Do not conduct destructive tests against production.
+
+Fix verified vulnerabilities rather than merely listing them.
+
+Do not claim the application is unhackable. The objective is to reduce risk through layered controls and verify that important security properties hold.
+
+PHASE 14: PERFORMANCE, ACCESSIBILITY, AND RELIABILITY
+
+Review performance under realistic workloads.
+
+Optimize:
+
+- Database queries.
+- Frontend bundle size.
+- Table pagination.
+- API response size.
+- Repeated network requests.
+- Unnecessary component re-renders.
+- Connection-pool configuration.
+- Resource usage.
+
+Check keyboard navigation, accessible labels, colour contrast, form errors, and screen-reader compatibility.
+
+Do not optimize by weakening security or consistency.
+
+Document practical scaling limits and identify bottlenecks that may appear as the number of schools grows.
+
+Do not claim that BursarIQ supports thousands of schools until load testing supports that conclusion.
+
+PHASE 15: DEPLOYMENT AND RELEASE SAFETY
+
+Before production deployment:
+
+1. Verify the source branch and intended commit.
+2. Verify environment variables without printing secret values.
+3. Confirm the correct production database connection.
+4. Confirm that migrations are compatible with existing data.
+5. Verify a recoverable backup.
+6. Run automated tests.
+7. Run the production build.
+8. Review the deployment configuration.
+9. Confirm that the intended frontend and backend versions will be served.
+10. Prepare rollback instructions.
+11. Deploy using a safe rollout procedure.
+12. Perform post-deployment smoke tests.
+13. Verify registration and login.
+14. Verify a real database-backed create/read/update workflow using authorized test data.
+15. Verify tenant isolation.
+16. Verify that production financial records remain intact.
+17. Verify that the domain routes to the intended deployment.
+
+If production credentials or permissions are unavailable, do not pretend the deployment was completed. Prepare the required changes and identify the exact remaining steps.
+
+Do not redirect the live domain to an unverified or empty application.
+
+Do not remove the existing working deployment until the replacement has been verified and a rollback path exists.
+
+PHASE 16: FINAL DELIVERABLES
+
+When the work is complete, provide:
+
+1. An executive summary.
+2. The original problems discovered.
+3. Evidence supporting each important finding.
+4. A list of code files changed.
+5. A list of database migrations created or applied.
+6. A description of authentication and authorization improvements.
+7. A description of tenant-isolation protections.
+8. A description of backup and recovery improvements.
+9. A summary of UI and UX improvements.
+10. Test results with actual pass/fail counts.
+11. Any unresolved vulnerabilities.
+12. Any remaining deployment blockers.
+13. Any required manual actions.
+14. A safe deployment procedure.
+15. A rollback procedure.
+16. A backup and restoration verification report.
+17. A data-persistence regression test report.
+18. A tenant-isolation test report.
+19. A list of production changes that require my approval.
+20. A final assessment of whether the application is ready for production.
+
+Separate findings into:
+
+- Confirmed and fixed.
+- Confirmed but not yet fixed.
+- Potential risks requiring further investigation.
+- Not tested because access or permissions were unavailable.
+
+For every critical issue, state the evidence used to verify the fix.
+
+FINAL EXECUTION INSTRUCTION
+
+Begin by inspecting the existing project and determining the real production architecture.
+
+Then proceed through the phases in priority order:
+
+1. Protect existing data.
+2. Identify and fix the persistence problem.
+3. Secure authentication and authorization.
+4. Enforce tenant isolation.
+5. Establish verified backups and recovery.
+6. Protect financial operations.
+7. Improve the user interface.
+8. Test and prepare a safe deployment.
+
+Make real, targeted improvements to the existing application.
+
+Do not stop after generating an audit report if safe code changes can be completed.
+
+Do not invent test results.
+
+Do not reset the database.
+
+Do not sacrifice existing user data for a cleaner implementation.
+
+The ultimate acceptance criterion is that BursarIQ operates as a coherent, secure, maintainable production SaaS application whose existing records remain intact across supported restarts, deployments, and login sessions, with a verified recovery process for serious failures.

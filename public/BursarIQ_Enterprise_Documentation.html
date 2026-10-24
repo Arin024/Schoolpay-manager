@@ -1,0 +1,679 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>BursarIQ - Official Enterprise System & Technical Documentation</title>
+  <link rel="icon" href="/favicon.ico" />
+  <style>
+    :root {
+      --primary: #0f172a;
+      --primary-accent: #2563eb;
+      --secondary-accent: #059669;
+      --warning: #d97706;
+      --border: #e2e8f0;
+      --bg-light: #f8fafc;
+      --text-main: #1e293b;
+      --text-muted: #64748b;
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+      line-height: 1.65;
+      color: var(--text-main);
+      background-color: #f1f5f9;
+      padding: 2rem 1rem;
+    }
+
+    .doc-container {
+      max-width: 960px;
+      margin: 0 auto;
+      background: #ffffff;
+      padding: 3.5rem 4rem;
+      border-radius: 12px;
+      box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.05), 0 8px 10px -6px rgba(0, 0, 0, 0.03);
+      position: relative;
+    }
+
+    /* Print & Export Bar */
+    .action-bar {
+      position: sticky;
+      top: 1rem;
+      z-index: 100;
+      display: flex;
+      justify-content: flex-end;
+      gap: 0.75rem;
+      margin-bottom: 2rem;
+    }
+
+    .btn-print {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.5rem;
+      background: var(--primary-accent);
+      color: #ffffff;
+      padding: 0.75rem 1.25rem;
+      font-size: 0.95rem;
+      font-weight: 600;
+      border-radius: 8px;
+      border: none;
+      cursor: pointer;
+      box-shadow: 0 4px 6px -1px rgba(37, 99, 235, 0.25);
+      transition: all 0.2s ease;
+    }
+
+    .btn-print:hover {
+      background: #1d4ed8;
+      transform: translateY(-1px);
+    }
+
+    .btn-outline {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.5rem;
+      background: #ffffff;
+      color: var(--primary);
+      padding: 0.75rem 1.25rem;
+      font-size: 0.95rem;
+      font-weight: 600;
+      border-radius: 8px;
+      border: 1px solid var(--border);
+      text-decoration: none;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.05);
+    }
+
+    .btn-outline:hover {
+      background: var(--bg-light);
+    }
+
+    /* Document Header */
+    .doc-header {
+      border-bottom: 2px solid var(--border);
+      padding-bottom: 2rem;
+      margin-bottom: 2.5rem;
+    }
+
+    .badge-enterprise {
+      display: inline-block;
+      font-size: 0.75rem;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      font-weight: 700;
+      padding: 0.35rem 0.75rem;
+      background: #eff6ff;
+      color: var(--primary-accent);
+      border: 1px solid #bfdbfe;
+      border-radius: 9999px;
+      margin-bottom: 0.75rem;
+    }
+
+    h1.doc-title {
+      font-size: 2.4rem;
+      font-weight: 800;
+      color: var(--primary);
+      line-height: 1.2;
+      margin-bottom: 0.5rem;
+    }
+
+    p.doc-subtitle {
+      font-size: 1.15rem;
+      color: var(--text-muted);
+      margin-bottom: 1.5rem;
+    }
+
+    .meta-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+      gap: 1rem;
+      background: var(--bg-light);
+      padding: 1.25rem;
+      border-radius: 8px;
+      border: 1px solid var(--border);
+      font-size: 0.9rem;
+    }
+
+    .meta-item strong {
+      display: block;
+      color: var(--text-muted);
+      font-size: 0.75rem;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+
+    /* Typography & Hierarchy */
+    h2 {
+      font-size: 1.6rem;
+      font-weight: 700;
+      color: var(--primary);
+      margin-top: 2.75rem;
+      margin-bottom: 1rem;
+      padding-bottom: 0.5rem;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+
+    h3 {
+      font-size: 1.25rem;
+      font-weight: 600;
+      color: #334155;
+      margin-top: 1.75rem;
+      margin-bottom: 0.6rem;
+    }
+
+    p {
+      margin-bottom: 1rem;
+      color: #334155;
+    }
+
+    ul, ol {
+      margin-left: 1.5rem;
+      margin-bottom: 1.25rem;
+      color: #334155;
+    }
+
+    li {
+      margin-bottom: 0.4rem;
+    }
+
+    /* Callout & Highlights */
+    .callout {
+      padding: 1.25rem 1.5rem;
+      border-left: 4px solid var(--primary-accent);
+      background: #f0fdf4;
+      border-color: var(--secondary-accent);
+      border-radius: 0 8px 8px 0;
+      margin: 1.5rem 0;
+      font-size: 0.95rem;
+    }
+
+    .callout.info {
+      background: #eff6ff;
+      border-color: var(--primary-accent);
+    }
+
+    .callout.warning {
+      background: #fffbeb;
+      border-color: var(--warning);
+    }
+
+    /* Tables */
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 1.5rem 0;
+      font-size: 0.92rem;
+    }
+
+    th, td {
+      padding: 0.75rem 1rem;
+      border: 1px solid var(--border);
+      text-align: left;
+    }
+
+    th {
+      background: var(--bg-light);
+      font-weight: 600;
+      color: var(--primary);
+    }
+
+    tr:nth-child(even) td {
+      background: #fafafa;
+    }
+
+    /* Code Blocks */
+    code {
+      background: #f1f5f9;
+      padding: 0.2rem 0.4rem;
+      border-radius: 4px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      font-size: 0.88em;
+      color: #0f172a;
+    }
+
+    pre {
+      background: #0f172a;
+      color: #f8fafc;
+      padding: 1.25rem;
+      border-radius: 8px;
+      overflow-x: auto;
+      margin: 1.25rem 0;
+      font-size: 0.88rem;
+      line-height: 1.5;
+    }
+
+    pre code {
+      background: transparent;
+      color: inherit;
+      padding: 0;
+    }
+
+    /* Badges */
+    .badge {
+      display: inline-block;
+      padding: 0.2rem 0.5rem;
+      font-size: 0.75rem;
+      font-weight: 600;
+      border-radius: 4px;
+      margin-right: 0.25rem;
+    }
+    .badge-success { background: #dcfce7; color: #15803d; }
+    .badge-blue { background: #dbeafe; color: #1e40af; }
+    .badge-amber { background: #fef3c7; color: #b45309; }
+
+    /* Footer */
+    .doc-footer {
+      margin-top: 4rem;
+      padding-top: 2rem;
+      border-top: 1px solid var(--border);
+      font-size: 0.85rem;
+      color: var(--text-muted);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 1rem;
+    }
+
+    /* Print Styles */
+    @media print {
+      body {
+        background: #ffffff;
+        padding: 0;
+      }
+
+      .doc-container {
+        box-shadow: none;
+        padding: 0;
+        max-width: 100%;
+        border-radius: 0;
+      }
+
+      .action-bar {
+        display: none !important;
+      }
+
+      .page-break {
+        page-break-before: always;
+      }
+
+      h1, h2, h3 {
+        page-break-after: avoid;
+      }
+
+      table, pre, .callout {
+        page-break-inside: avoid;
+      }
+    }
+  </style>
+</head>
+<body>
+
+  <div class="doc-container">
+    
+    <!-- Top Action Bar for PDF Generation -->
+    <div class="action-bar">
+      <a href="/" class="btn-outline">← Back to App</a>
+      <button onclick="window.print()" class="btn-print">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <polyline points="6 9 6 2 18 2 18 9"></polyline>
+          <path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"></path>
+          <rect x="6" y="14" width="12" height="8"></rect>
+        </svg>
+        Download / Save as PDF
+      </button>
+    </div>
+
+    <!-- Document Header -->
+    <header class="doc-header">
+      <span class="badge-enterprise">Enterprise Technical Specification & User Manual</span>
+      <h1 class="doc-title">BursarIQ System Documentation</h1>
+      <p class="doc-subtitle">Nigeria's Enterprise School Fee Management, Bursary Reconciliation & Parent Portal Platform</p>
+      
+      <div class="meta-grid">
+        <div class="meta-item">
+          <strong>Application Name</strong>
+          BursarIQ (School Pay Manager)
+        </div>
+        <div class="meta-item">
+          <strong>Production Domain</strong>
+          https://bursariq.com.ng
+        </div>
+        <div class="meta-item">
+          <strong>Developer & Engineering Studio</strong>
+          Christian Arinze / Arinze Web Studio
+        </div>
+        <div class="meta-item">
+          <strong>Version & Release Date</strong>
+          v1.0.0 Enterprise (October 2026)
+        </div>
+      </div>
+    </header>
+
+    <!-- Table of Contents -->
+    <nav style="background: var(--bg-light); border: 1px solid var(--border); border-radius: 8px; padding: 1.5rem; margin-bottom: 2rem;">
+      <h3 style="margin-top: 0; margin-bottom: 0.75rem;">Document Table of Contents</h3>
+      <ol style="margin-bottom: 0; padding-left: 1.25rem;">
+        <li><a href="#executive-summary">Executive Summary & System Vision</a></li>
+        <li><a href="#core-capabilities">System Architecture & Core Capabilities</a></li>
+        <li><a href="#technical-stack">Technology Stack & Engineering Architecture</a></li>
+        <li><a href="#multi-tenancy">Multi-Tenancy & Zero-Trust IDOR Security</a></li>
+        <li><a href="#payment-financial">Payment Gateways & Double-Entry Financial Engine</a></li>
+        <li><a href="#roles-permissions">Role-Based Access Control (RBAC) Matrix</a></li>
+        <li><a href="#custom-domain">Custom Domain, DNS, Cloudflare & Cloud Run Setup</a></li>
+        <li><a href="#backup-recovery">Data Backup, Disaster Recovery & NDPR Compliance</a></li>
+        <li><a href="#operations-manual">Operating Guide for Bursars & School Administrators</a></li>
+        <li><a href="#limitations-roadmap">System Constraints & Future Roadmap</a></li>
+      </ol>
+    </nav>
+
+    <!-- 1. Executive Summary -->
+    <section id="executive-summary">
+      <h2>1. Executive Summary & System Vision</h2>
+      <p>
+        <strong>BursarIQ</strong> is a purpose-built, enterprise multi-tenant financial and administrative software designed specifically to solve the unique operational challenges of educational institutions in Nigeria. From Nursery and Primary schools to large multi-campus K-12 secondary colleges, Nigerian schools routinely suffer from severe revenue leakage, manual paper receipt tampering, delayed fee reconciliation, unverified bank transfer alerts, and hostile parent disputes at the bursary counter.
+      </p>
+      <p>
+        BursarIQ digitizes and unifies the end-to-end fee lifecycle into a transparent, secure, cloud-native portal. Schools gain 100% real-time visibility into collection rates, outstanding debtor ledgers, automated discount logic (scholarships, sibling rebates, staff wards), and cryptographically verified digital receipts with instant parent notification.
+      </p>
+      <div class="callout">
+        <strong>Strategic Mission:</strong> Eliminate revenue leakage, eradicate manual teller forgery, automate installment tracking, and equip school proprietors with instantaneous financial clarity.
+      </div>
+    </section>
+
+    <!-- 2. Core Capabilities -->
+    <section id="core-capabilities">
+      <h2>2. System Architecture & Core Capabilities</h2>
+      <p>BursarIQ provides an integrated suite of modules organized into distinct operational tiers:</p>
+
+      <table>
+        <thead>
+          <tr>
+            <th>Module</th>
+            <th>Target Users</th>
+            <th>Primary Capabilities & Business Impact</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><strong>Fee & Invoice Engine</strong></td>
+            <td>Bursar, Accountant</td>
+            <td>Automated term-by-term billing, fee component breakdown (Tuition, Uniform, Bus, Hostel, Exams), installment payment schedules, and partial payments tracking.</td>
+          </tr>
+          <tr>
+            <td><strong>Payment Gateway & Webhook</strong></td>
+            <td>Parents, Bursar</td>
+            <td>Real-time multi-channel collection via Paystack, Flutterwave, and Monnify with automated cryptographic webhook callback verification. Instant settlement.</td>
+          </tr>
+          <tr>
+            <td><strong>Bank Lodgement & Reconciliation</strong></td>
+            <td>Bursar, Auditor</td>
+            <td>Verification queue for direct bank transfers/teller lodgements. Bursars match bank narration before approving receipt issuance.</td>
+          </tr>
+          <tr>
+            <td><strong>Anti-Forgery Digital Receipts</strong></td>
+            <td>Parents, Bursar, Security</td>
+            <td>Instant tamper-proof PDF receipts with unique serialized reference numbers and scannable QR verification badges.</td>
+          </tr>
+          <tr>
+            <td><strong>Debtors & Recovery Ledger</strong></td>
+            <td>Proprietor, Bursar</td>
+            <td>Automated aging debtor reports, class-by-class delinquency rates, and automated SMS/WhatsApp fee reminder triggers.</td>
+          </tr>
+          <tr>
+            <td><strong>Student & Parent Roster</strong></td>
+            <td>Admin, Registrar</td>
+            <td>Comprehensive student records, class allocations, multi-child parent linking, and session-by-session academic promotions.</td>
+          </tr>
+          <tr>
+            <td><strong>Multi-Tenant Super Admin</strong></td>
+            <td>Platform Owner</td>
+            <td>Tenant provisioning, school subscription status control, global audit trails, tenant quota management, and platform analytics.</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <!-- 3. Tech Stack -->
+    <section id="technical-stack">
+      <h2>3. Technology Stack & Engineering Architecture</h2>
+      <p>
+        BursarIQ is engineered as a modern, high-performance, full-stack single-page application with a resilient backend API server:
+      </p>
+      <ul>
+        <li><strong>Frontend Framework:</strong> React 19 with TypeScript, utilizing strict functional components and custom React Context hooks for application state.</li>
+        <li><strong>Styling & Design System:</strong> Tailwind CSS v4 with custom responsive design tokens, high-contrast accessible typography, and smooth micro-animations powered by <code>motion</code>.</li>
+        <li><strong>Icons & UI Assets:</strong> Lucide React for consistent, crisp SVG iconography.</li>
+        <li><strong>Backend Server:</strong> Node.js with Express 4, compiled and executed with high-speed <code>tsx</code> in development and optimized Node runtime in production.</li>
+        <li><strong>Data Layer:</strong> SQLite relational engine with zero external network latency, WAL (Write-Ahead Logging) mode enabled for high-concurrency read/write operations.</li>
+        <li><strong>Security & Middleware:</strong> In-memory sliding-window rate limiters, anti-IDOR tenant isolation guards, strict HTTP security headers (nosniff, XSS protection, strict referrer).</li>
+        <li><strong>PWA & Offline Awareness:</strong> Service worker registered with <code>vite-plugin-pwa</code>, offline cache fallback, and real-time offline status banners.</li>
+      </ul>
+    </section>
+
+    <!-- 4. Multi-Tenancy & Security -->
+    <section id="multi-tenancy">
+      <h2>4. Multi-Tenancy & Zero-Trust IDOR Security</h2>
+      <p>
+        In a financial software environment, tenant leakage represents a catastrophic vulnerability. BursarIQ adheres to a strict <strong>Zero-Trust Multi-Tenant Architecture</strong>:
+      </p>
+
+      <h3>Tenant Isolation Middleware</h3>
+      <p>
+        Every incoming HTTP request to <code>/api/*</code> passes through <code>tenantMiddleware.ts</code>:
+      </p>
+      <ul>
+        <li>The tenant identity is resolved securely from the authenticated session token and verified against the request's school domain or header.</li>
+        <li>All SQL queries mandate an explicit <code>WHERE school_id = ?</code> constraint at the database adapter level.</li>
+        <li>Any attempt by an authenticated user from School A to query or mutate an entity (student, invoice, transaction) belonging to School B triggers an instantaneous <strong>403 FORBIDDEN / IDOR_VIOLATION</strong> exception.</li>
+      </ul>
+
+      <div class="callout warning">
+        <strong>Automated Audit Alerting:</strong> Any detected IDOR attempt writes an immutable entry into the platform security log and flags the suspect IP address for automated rate limiting.
+      </div>
+    </section>
+
+    <!-- 5. Payment & Financial Engine -->
+    <section id="payment-financial">
+      <h2>5. Payment Gateways & Double-Entry Financial Engine</h2>
+      <p>
+        BursarIQ integrates Nigeria's foremost payment gateways alongside traditional bank cash lodgements:
+      </p>
+
+      <h3>Supported Payment Channels</h3>
+      <ol>
+        <li><strong>Debit Cards & USSD:</strong> Instant online checkout via Paystack and Flutterwave.</li>
+        <li><strong>Dedicated Virtual Accounts:</strong> Automated Dynamic Virtual Account generation for each student/invoice.</li>
+        <li><strong>Direct Bank Transfer / Cash:</strong> Bursar verification module with mandatory proof-of-payment upload.</li>
+      </ol>
+
+      <h3>Cryptographic Webhook Handlers</h3>
+      <p>
+        Payment verification does not rely on client-side browser callbacks (which can be manipulated). All final payment validations are handled via cryptographically signed webhooks:
+      </p>
+      <pre><code>// HMAC-SHA512 Webhook Verification Pattern
+const hash = crypto
+  .createHmac('sha512', process.env.PAYSTACK_SECRET_KEY)
+  .update(req.rawBody)
+  .digest('hex');
+
+if (hash !== req.headers['x-paystack-signature']) {
+  return res.status(401).json({ error: 'INVALID_SIGNATURE' });
+}</code></pre>
+      <p>
+        The server preserves the raw UTF-8 request buffer before JSON parsing to ensure byte-perfect cryptographic verification.
+      </p>
+    </section>
+
+    <!-- 6. Roles & Permissions -->
+    <section id="roles-permissions">
+      <h2>6. Role-Based Access Control (RBAC) Matrix</h2>
+      <p>BursarIQ enforces granular access controls across 5 distinct operational tiers:</p>
+
+      <table>
+        <thead>
+          <tr>
+            <th>Role</th>
+            <th>Accessible Modules</th>
+            <th>Permissions & Restrictions</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><span class="badge badge-amber">Super Admin</span></td>
+            <td>Platform Hub, All Tenants, System Health, Billing</td>
+            <td>Global root permissions, tenant suspension, global audit logs, subscription overrides. (Account: <code>SchoolPay28@gmail.com</code>)</td>
+          </tr>
+          <tr>
+            <td><span class="badge badge-blue">School Admin / Proprietor</span></td>
+            <td>School Dashboard, Staff, Classes, Sessions, Finance</td>
+            <td>Full tenant control, staff account creation, term closure, fee configuration, financial dashboards.</td>
+          </tr>
+          <tr>
+            <td><span class="badge badge-blue">Bursar / Chief Accountant</span></td>
+            <td>Finance, Invoicing, Lodgement Verification, Debtors</td>
+            <td>Issue invoices, verify bank payments, generate receipts, record refunds, export reconciliation sheets.</td>
+          </tr>
+          <tr>
+            <td><span class="badge badge-success">Cashier / Assistant</span></td>
+            <td>Payment Intake, Receipt Search</td>
+            <td>Record walk-in payments, reprint receipts. Cannot alter fee templates or delete financial records.</td>
+          </tr>
+          <tr>
+            <td><span class="badge badge-success">Parent / Guardian</span></td>
+            <td>Parent Portal, Invoices, Payment History</td>
+            <td>View wards' invoices, pay online, download historical tax & payment receipts.</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <!-- 7. Custom Domain & DNS Setup -->
+    <section id="custom-domain">
+      <h2>7. Custom Domain, DNS, Cloudflare & Cloud Run Setup</h2>
+      <p>
+        BursarIQ is hosted on high-availability Google Cloud Run infrastructure with Cloudflare edge proxying for DDOS protection, edge caching, and SSL termination.
+      </p>
+
+      <h3>Live Production DNS Configuration for <code>bursariq.com.ng</code>:</h3>
+      <table>
+        <thead>
+          <tr>
+            <th>Type</th>
+            <th>Name (Host)</th>
+            <th>Target (Content)</th>
+            <th>Proxy Status</th>
+            <th>TTL</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><strong>CNAME</strong></td>
+            <td><code>@</code> (root)</td>
+            <td><code>ais-pre-eoqypgqka7gqp6j4a5fwme-696474482089.europe-west2.run.app</code></td>
+            <td>Proxied (Orange Cloud ON)</td>
+            <td>Auto</td>
+          </tr>
+          <tr>
+            <td><strong>CNAME</strong></td>
+            <td><code>www</code></td>
+            <td><code>ais-pre-eoqypgqka7gqp6j4a5fwme-696474482089.europe-west2.run.app</code></td>
+            <td>Proxied (Orange Cloud ON)</td>
+            <td>Auto</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <div class="callout info">
+        <strong>Important Cloudflare Setting:</strong> Ensure Cloudflare SSL/TLS encryption mode is set to <strong>Full</strong> or <strong>Full (strict)</strong> to prevent redirect loops between Cloudflare and Google Cloud Run.
+      </div>
+    </section>
+
+    <!-- 8. Backup & Disaster Recovery -->
+    <section id="backup-recovery">
+      <h2>8. Data Backup, Disaster Recovery & NDPR Compliance</h2>
+      <p>
+        Under the Nigeria Data Protection Regulation (NDPR) and international standards, schools are legally obligated to safeguard student and parent financial records:
+      </p>
+      <ul>
+        <li><strong>Automated Database Snapshots:</strong> Managed SQLite snapshots generated periodically with point-in-time recovery capabilities.</li>
+        <li><strong>Recycle Bin & Soft Deletion:</strong> Deleting a student, class, or invoice does not erase data permanently. It is routed to the <em>School Recycle Bin</em> where it can be inspected and restored by an authorized administrator.</li>
+        <li><strong>Immutable Financial Ledger:</strong> Confirmed payment transactions cannot be edited or deleted. Corrections require issuing a reversing credit memo or recorded refund to maintain auditing integrity.</li>
+        <li><strong>Audit Logging:</strong> Every authentication attempt, password reset, role assignment, and financial action records the user ID, timestamp, and IP address.</li>
+      </ul>
+    </section>
+
+    <!-- 9. Operations Manual -->
+    <section id="operations-manual">
+      <h2>9. Operating Guide for Bursars & School Administrators</h2>
+      
+      <h3>Step 1: Setting up an Academic Session & Term</h3>
+      <ol>
+        <li>Navigate to <strong>Academic Sessions</strong> on the sidebar.</li>
+        <li>Create the new session (e.g., <em>2026/2027 Academic Session</em>).</li>
+        <li>Set the active term (e.g., <em>First Term</em>). All subsequent billing automatically associates with this active period.</li>
+      </ol>
+
+      <h3>Step 2: Configuring Class Fee Schedules</h3>
+      <ol>
+        <li>Navigate to <strong>Finance &gt; Fee Templates</strong>.</li>
+        <li>Select the class grade (e.g., <em>JSS 1</em> or <em>Primary 4</em>).</li>
+        <li>Add component line items: Tuition, Development Levy, Computer Lab, Uniform, PTA.</li>
+        <li>Click <strong>Generate Term Invoices</strong>. The system automatically populates personalized invoices for all enrolled students in that class.</li>
+      </ol>
+
+      <h3>Step 3: Verifying Walk-In Bank Lodgements</h3>
+      <ol>
+        <li>When a parent brings a physical bank teller or mobile transfer screenshot, open <strong>Finance &gt; Lodgement Approvals</strong>.</li>
+        <li>Locate the student by Name, Admission Number, or Invoice Code.</li>
+        <li>Verify the amount against the school's bank statement, enter the bank transaction reference, and click <strong>Approve & Issue Receipt</strong>.</li>
+        <li>The parent receives an immediate SMS/Email alert with a download link to their official receipt.</li>
+      </ol>
+    </section>
+
+    <!-- 10. Limitations & Roadmap -->
+    <section id="limitations-roadmap">
+      <h2>10. System Constraints & Future Roadmap</h2>
+      <h3>Current Operational Constraints</h3>
+      <ul>
+        <li>SMS delivery relies on Nigerian telecommunication network availability and DND (Do Not Disturb) settings.</li>
+        <li>Automated card recurring debits require parent authorization on their respective bank cards.</li>
+      </ul>
+
+      <h3>Scheduled Roadmap Features (v1.1 - v1.3)</h3>
+      <ul>
+        <li>Biometric school gate pass verification linked directly to fee clearance status.</li>
+        <li>Integrated payroll disbursement module for school teaching and non-teaching staff.</li>
+        <li>Direct integration with Nigeria Inter-Bank Settlement System (NIBSS) Instant Payment (NIP).</li>
+      </ul>
+    </section>
+
+    <!-- Document Footer -->
+    <footer class="doc-footer">
+      <div>
+        <strong>BursarIQ Enterprise Platform</strong> &bull; Developed by <a href="https://arinze-web-studio.netlify.app/" target="_blank" style="color: var(--primary-accent); text-decoration: none;">Christian Arinze / Arinze Web Studio</a>
+      </div>
+      <div>
+        Official Portal: <a href="https://bursariq.com.ng" style="color: var(--primary-accent); text-decoration: none;">bursariq.com.ng</a>
+      </div>
+    </footer>
+
+  </div>
+
+  <script>
+    // Auto-detect print intent if URL contains ?print=true
+    if (window.location.search.includes('print=true')) {
+      window.addEventListener('load', () => {
+        setTimeout(() => window.print(), 500);
+      });
+    }
+  </script>
+</body>
+</html>

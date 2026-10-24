@@ -1,0 +1,141 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+    <title>BursarIQ - Simple School Payments. Smarter Bursary Management.</title>
+    <script>
+      // Suppress and handle benign Vite dev server HMR WebSocket close warnings in cloud iframe environments
+      (function () {
+        const OrigWebSocket = window.WebSocket;
+        if (OrigWebSocket) {
+          window.WebSocket = function (url, protocols) {
+            const isViteHmr =
+              protocols === 'vite-hmr' ||
+              (typeof url === 'string' && (url.includes('token=') || url.includes('/@vite/')));
+            if (isViteHmr) {
+              const target = new EventTarget();
+              target.OPEN = 1;
+              target.CONNECTING = 0;
+              target.CLOSING = 2;
+              target.CLOSED = 3;
+              target.readyState = 1;
+              target.binaryType = 'blob';
+              target.bufferedAmount = 0;
+              target.extensions = '';
+              target.protocol = 'vite-hmr';
+              target.url = String(url);
+              target.send = function () {};
+              target.close = function () {
+                target.readyState = 3;
+                target.dispatchEvent(new Event('close'));
+              };
+              setTimeout(() => {
+                target.dispatchEvent(new Event('open'));
+              }, 0);
+              return target;
+            }
+            return new OrigWebSocket(url, protocols);
+          };
+          window.WebSocket.prototype = OrigWebSocket.prototype;
+          window.WebSocket.CONNECTING = 0;
+          window.WebSocket.OPEN = 1;
+          window.WebSocket.CLOSING = 2;
+          window.WebSocket.CLOSED = 3;
+        }
+
+        window.addEventListener('unhandledrejection', function (e) {
+          const reasonStr = String(e?.reason?.message || e?.reason || '');
+          if (reasonStr.includes('WebSocket') || reasonStr.includes('vite')) {
+            e.stopImmediatePropagation();
+            e.preventDefault();
+          }
+        }, true);
+
+        window.addEventListener('error', function (e) {
+          const msgStr = String(e?.message || e?.error?.message || '');
+          if (msgStr.includes('WebSocket') || msgStr.includes('vite')) {
+            e.stopImmediatePropagation();
+            e.preventDefault();
+            return true;
+          }
+        }, true);
+
+        const _origConsoleError = console.error;
+        console.error = function (...args) {
+          if (args.some(a => typeof a === 'string' && (a.includes('WebSocket') || a.includes('[vite]')))) {
+            return;
+          }
+          _origConsoleError.apply(console, args);
+        };
+      })();
+    </script>
+    <meta name="description" content="Nigeria's trusted school fee management and bursary portal. Eliminate payment disputes, issue instant verified receipts, automate class debtor tracking, and give parents complete peace of mind." />
+    <meta name="author" content="Arinzechukwu Christian" />
+    <link rel="canonical" href="https://bursariq.com.ng/" />
+    <meta property="og:title" content="BursarIQ - Simple School Payments. Smarter Bursary Management." />
+    <meta property="og:description" content="Nigeria's trusted school fee management and bursary portal. Eliminate payment disputes, issue instant verified receipts, automate class debtor tracking, and give parents complete peace of mind." />
+    <meta property="og:type" content="website" />
+    <meta property="og:url" content="https://bursariq.com.ng/" />
+    <meta property="og:site_name" content="BursarIQ" />
+    <meta property="og:image" content="/og-image.png" />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta property="og:image:alt" content="BursarIQ - School fee management and bursary platform for Nigerian schools" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="BursarIQ - Simple School Payments. Smarter Bursary Management." />
+    <meta name="twitter:description" content="Nigeria's trusted school fee management and bursary portal. Eliminate payment disputes, issue instant verified receipts, automate class debtor tracking, and give parents complete peace of mind." />
+    <meta name="twitter:image" content="/og-image.png" />
+    <meta name="twitter:image:alt" content="BursarIQ Platform" />
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <meta name="theme-color" content="#0F172A" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="BursarIQ" />
+    <!-- Favicon Set & Google Search Icon Directives -->
+    <link rel="icon" href="/favicon.ico" sizes="48x48" />
+    <link rel="icon" type="image/png" sizes="48x48" href="/favicon-48x48.png" />
+    <link rel="icon" type="image/png" sizes="96x96" href="/favicon-96x96.png" />
+    <link rel="icon" type="image/png" sizes="192x192" href="/pwa-192x192.png" />
+    <link rel="icon" type="image/svg+xml" href="/icon.svg" />
+    <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png" />
+    <link rel="shortcut icon" href="/favicon.ico" />
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <!-- Structured Data (Schema.org) for Rich Google Search Snippets -->
+    <script type="application/ld+json">
+    {
+      "@context": "https://schema.org",
+      "@type": "SoftwareApplication",
+      "name": "BursarIQ",
+      "applicationCategory": "BusinessApplication, EducationalApplication",
+      "operatingSystem": "All",
+      "url": "https://bursariq.com.ng",
+      "description": "Smart school fee management and bursary portal for Nigerian schools. Effortless tuition collections, instant receipts, and reconciliation.",
+      "offers": {
+        "@type": "Offer",
+        "price": "0",
+        "priceCurrency": "NGN",
+        "description": "30-day full access free trial for Nigerian schools"
+      },
+      "creator": {
+        "@type": "Organization",
+        "name": "BursarIQ Global Ltd",
+        "telephone": "+2348160754659",
+        "email": "support@bursariq.com.ng",
+        "address": {
+          "@type": "PostalAddress",
+          "addressCountry": "NG"
+        }
+      }
+    }
+    </script>
+  </head>
+  <body class="bg-slate-50 text-slate-900 antialiased selection:bg-emerald-500 selection:text-white min-h-screen">
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
+

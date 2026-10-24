@@ -1,0 +1,41 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <linearGradient id="bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0F172A" />
+      <stop offset="100%" stop-color="#1E293B" />
+    </linearGradient>
+    <linearGradient id="emeraldGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#10B981" />
+      <stop offset="100%" stop-color="#059669" />
+    </linearGradient>
+    <filter id="glow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="8" stdDeviation="12" flood-color="#059669" flood-opacity="0.35"/>
+    </filter>
+  </defs>
+
+  <!-- Background Base -->
+  <rect width="512" height="512" rx="128" fill="url(#bgGrad)" />
+
+  <!-- Shield Base -->
+  <path d="M 256 80 L 390 135 C 390 260 330 360 256 425 C 182 360 122 260 122 135 Z" 
+        fill="#0B132B" stroke="#334155" stroke-width="6" />
+
+  <!-- Inner Emerald Shield Accent -->
+  <path d="M 256 104 L 370 151 C 370 255 318 340 256 398 C 194 340 142 255 142 151 Z" 
+        fill="url(#emeraldGrad)" opacity="0.12" filter="url(#glow)" />
+
+  <!-- Graduation Cap / Mortarboard (Education) -->
+  <polygon points="256,160 360,205 256,250 152,205" fill="#FFFFFF" />
+  <polygon points="256,250 360,205 340,240 256,275 172,240 152,205" fill="#CBD5E1" opacity="0.8" />
+  <path d="M 335 220 L 335 285 A 15 15 0 0 1 320 300" stroke="#FFFFFF" stroke-width="4" fill="none" stroke-linecap="round" />
+  <circle cx="320" cy="300" r="5" fill="#10B981" />
+
+  <!-- Nigerian Naira Symbol / Security Lock Accent (School Pay) -->
+  <g transform="translate(196, 270)">
+    <rect x="15" y="40" width="90" height="70" rx="14" fill="url(#emeraldGrad)" filter="url(#glow)"/>
+    <!-- Lock shackle -->
+    <path d="M 35 40 V 24 A 25 25 0 0 1 85 24 V 40" fill="none" stroke="#FFFFFF" stroke-width="10" stroke-linecap="round"/>
+    <!-- Naira N monogram inside lock -->
+    <text x="60" y="88" font-family="Arial, sans-serif" font-weight="900" font-size="38" fill="#FFFFFF" text-anchor="middle">₦</text>
+  </g>
+</svg>
