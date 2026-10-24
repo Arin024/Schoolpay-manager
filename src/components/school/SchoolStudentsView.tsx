@@ -1248,14 +1248,19 @@ export const SchoolStudentsView: React.FC<SchoolStudentsViewProps> = ({
             </div>
 
             <div className="p-6 space-y-4 text-xs">
-              <div className="p-3 bg-emerald-50/70 border border-emerald-200 rounded-xl text-emerald-950 space-y-1">
-                <p className="font-bold">Required CSV Columns:</p>
-                <p className="text-[11px] font-mono">
-                  admission_number, first_name, last_name, middle_name, gender, class_name, arm, phone, email
+              <div className="p-3 bg-emerald-50/70 border border-emerald-200 rounded-xl text-emerald-950 space-y-1.5">
+                <div className="flex items-center gap-2">
+                  <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-600 text-white">REVISED & FLEXIBLE</span>
+                  <p className="font-bold">CSV Import Column Guidelines:</p>
+                </div>
+                <p className="text-[11px]">
+                  <strong>Strictly Required:</strong> <span className="font-mono bg-white px-1.5 py-0.5 rounded border border-emerald-300">first_name, last_name</span>
                 </p>
-                <p className="text-[11px] text-emerald-800">
-                  All rows are automatically bound to tenant: <strong>{activeSchool?.name}</strong>. Existing admission
-                  numbers are safely detected and skipped.
+                <p className="text-[11px] text-slate-700">
+                  <strong>Optional:</strong> <span className="font-mono text-[10px]">admission_number, middle_name, gender, class_name, arm, phone, email</span>
+                </p>
+                <p className="text-[11px] text-emerald-900 leading-relaxed">
+                  Admission numbers are <strong>fully optional</strong>. If omitted, students receive a durable internal ID. If provided, duplicate numbers in <strong>{activeSchool?.name}</strong> are safely detected and skipped without rejecting the entire file.
                 </p>
               </div>
 
@@ -1273,7 +1278,7 @@ export const SchoolStudentsView: React.FC<SchoolStudentsViewProps> = ({
                   rows={4}
                   value={csvText}
                   onChange={(e) => handleCsvTextChange(e.target.value)}
-                  placeholder="admission_number,first_name,last_name,class_name,gender&#10;LPC/2024/010,Emmanuel,Afolabi,SSS 1,Male&#10;LPC/2024/011,Blessing,Amadi,SSS 1,Female"
+                  placeholder="first_name,last_name,admission_number,class_name,gender&#10;Emmanuel,Afolabi,LPC/2024/010,SSS 1,Male&#10;Blessing,Amadi,,SSS 1,Female&#10;Chinedu,Okafor,,,Male"
                   className="w-full p-3 font-mono text-[11px] bg-slate-50 border border-slate-300 rounded-xl focus:bg-white"
                 />
               </div>
@@ -1296,7 +1301,7 @@ export const SchoolStudentsView: React.FC<SchoolStudentsViewProps> = ({
                       <tbody className="divide-y divide-slate-100">
                         {parsedRows.slice(0, 8).map((r, i) => (
                           <tr key={i}>
-                            <td className="p-2 font-mono font-bold text-slate-800">{r.admission_number || 'MISSING'}</td>
+                            <td className="p-2 font-mono text-slate-700">{r.admission_number || <span className="text-slate-400 italic">None (Auto)</span>}</td>
                             <td className="p-2">{r.first_name} {r.last_name}</td>
                             <td className="p-2">{r.class_name || '—'}</td>
                             <td className="p-2">{r.class_arm_name || '—'}</td>

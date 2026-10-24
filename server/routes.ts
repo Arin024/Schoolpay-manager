@@ -876,7 +876,7 @@ apiRouter.put(
   requireAuth,
   requireTenant,
   requireRole(['SCHOOL_OWNER', 'SCHOOL_ADMIN', 'BURSAR']),
-  (req: AuthenticatedRequest, res) => {
+  async (req: AuthenticatedRequest, res) => {
     const schoolId = req.targetSchoolId!;
     const {
       current_academic_session,
@@ -1138,10 +1138,10 @@ apiRouter.post(
       medical_notes,
     } = body;
 
-    if (!admission_number || !first_name || !last_name) {
+    if (!first_name || !last_name) {
       return res.status(400).json({
         error: 'MISSING_FIELDS',
-        message: 'Admission number, first name, and last name are required.',
+        message: 'First name and last name are required.',
       });
     }
 
@@ -1164,13 +1164,16 @@ apiRouter.post(
       });
     }
 
-    // Check duplicate admission number in THIS school
-    const existing = db.prepare('SELECT id FROM students WHERE school_id = ? AND admission_number = ?').get(schoolId, admission_number.trim());
-    if (existing) {
-      return res.status(409).json({
-        error: 'DUPLICATE_ADMISSION_NUMBER',
-        message: `Admission number "${admission_number}" already exists in your school.`,
-      });
+    // Check duplicate admission number in THIS school if provided
+    const cleanAdm = admission_number ? admission_number.trim() : null;
+    if (cleanAdm) {
+      const existing = db.prepare('SELECT id FROM students WHERE school_id = ? AND admission_number = ?').get(schoolId, cleanAdm);
+      if (existing) {
+        return res.status(409).json({
+          error: 'DUPLICATE_ADMISSION_NUMBER',
+          message: `Admission number "${cleanAdm}" already exists in your school.`,
+        });
+      }
     }
 
     const id = 'stu_' + crypto.randomUUID().slice(0, 10);
@@ -1186,7 +1189,7 @@ apiRouter.post(
     `).run(
       id,
       schoolId,
-      admission_number.trim(),
+      cleanAdm,
       first_name.trim(),
       middle_name.trim(),
       last_name.trim(),
@@ -1261,7 +1264,7 @@ apiRouter.put(
   requireAuth,
   requireTenant,
   requireRole(['SCHOOL_OWNER', 'SCHOOL_ADMIN', 'BURSAR']),
-  (req: AuthenticatedRequest, res) => {
+  async (req: AuthenticatedRequest, res) => {
     const schoolId = req.targetSchoolId!;
     const { id } = req.params;
 
@@ -1420,7 +1423,7 @@ apiRouter.post(
   requireAuth,
   requireTenant,
   requireRole(['SCHOOL_OWNER', 'SCHOOL_ADMIN', 'BURSAR']),
-  (req: AuthenticatedRequest, res) => {
+  async (req: AuthenticatedRequest, res) => {
     const schoolId = req.targetSchoolId!;
     const { students: rawRows } = req.body;
 
@@ -1430,67 +1433,183 @@ apiRouter.post(
 
     let importedCount = 0;
     let failedCount = 0;
-    const errors: { row: number; admission_number?: string; error: string }[] = [];
+    let skippedCount = 0;
+    const errors: { row: number; admission_number?: string; student_name?: string; error: string; isDuplicate?: boolean }[] = [];
 
-    // Get existing admission numbers for this school
-    const existingAdmissions = new Set(
-      (db.prepare('SELECT admission_number FROM students WHERE school_id = ?').all(schoolId) as any[]).map((r) => r.admission_number)
-    );
+    const { getPgPool } = await import('./db.ts');
+    const pool = getPgPool();
 
-    for (let i = 0; i < rawRows.length; i++) {
-      const row = rawRows[i];
-      const adm = (row.admission_number || row['Admission No'] || row['Admission Number'] || '').toString().trim();
-      const fn = (row.first_name || row['First Name'] || '').toString().trim();
-      const ln = (row.last_name || row['Last Name'] || '').toString().trim();
-      const mn = (row.middle_name || row['Middle Name'] || '').toString().trim();
-      const gender = (row.gender || row['Gender'] || 'Male').toString().trim();
-      const className = (row.class_name || row['Class'] || '').toString().trim();
-      const armName = (row.class_arm_name || row['Arm'] || row['Stream'] || '').toString().trim();
-      const phone = (row.phone || row['Phone'] || '').toString().trim();
-      const email = (row.email || row['Email'] || '').toString().trim();
+    // Load existing admission numbers and full student identifiers for this school tenant
+    const existingAdmissions = new Set<string>();
+    const existingStudentKeys = new Set<string>(); // key: `cleanFullName|cleanClass`
 
-      if (!adm || !fn || !ln) {
-        failedCount++;
-        errors.push({ row: i + 1, admission_number: adm, error: 'Missing required admission number, first name, or last name' });
-        continue;
-      }
-
-      if (existingAdmissions.has(adm)) {
-        failedCount++;
-        errors.push({ row: i + 1, admission_number: adm, error: `Admission number "${adm}" already exists in this school` });
-        continue;
-      }
-
+    if (pool) {
       try {
-        const id = 'stu_' + crypto.randomUUID().slice(0, 10);
-        const fullName = `${fn} ${mn ? mn + ' ' : ''}${ln}`.trim();
-
-        db.prepare(`
-          INSERT INTO students (
-            id, school_id, admission_number, first_name, middle_name, last_name, full_name,
-            gender, phone, email, class_name, class_arm_name, student_status
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ACTIVE')
-        `).run(
-          id,
-          schoolId,
-          adm,
-          fn,
-          mn,
-          ln,
-          fullName,
-          gender,
-          phone || null,
-          email ? email.toLowerCase() : null,
-          className || null,
-          armName || null
+        const stuRes = await pool.query(
+          'SELECT admission_number, LOWER(full_name) as clean_name, LOWER(COALESCE(class_name, "")) as clean_class FROM students WHERE school_id = $1 AND is_deleted = 0',
+          [schoolId]
         );
-
-        existingAdmissions.add(adm);
-        importedCount++;
-      } catch (err: any) {
-        failedCount++;
-        errors.push({ row: i + 1, admission_number: adm, error: err?.message || 'Database insert failed' });
+        for (const r of stuRes.rows) {
+          if (r.admission_number) existingAdmissions.add(r.admission_number.trim().toLowerCase());
+          if (r.clean_name) existingStudentKeys.add(`${r.clean_name}|${r.clean_class}`);
+        }
+      } catch (e: any) {
+        console.warn('[Bulk Import PG Load Notice]', e.message);
       }
+    }
+
+    // Also sync local cache existing set
+    try {
+      const localStudents = db.prepare('SELECT admission_number, LOWER(full_name) as clean_name, LOWER(COALESCE(class_name, "")) as clean_class FROM students WHERE school_id = ?').all(schoolId) as any[];
+      for (const r of localStudents) {
+        if (r.admission_number) existingAdmissions.add(r.admission_number.trim().toLowerCase());
+        if (r.clean_name) existingStudentKeys.add(`${r.clean_name}|${r.clean_class}`);
+      }
+    } catch (e) {}
+
+    let pgClient: any = null;
+    if (pool) {
+      try {
+        pgClient = await pool.connect();
+        await pgClient.query('BEGIN');
+      } catch (connErr) {
+        console.warn('[Bulk Import PG Connect Notice]', connErr);
+      }
+    }
+
+    try {
+      for (let i = 0; i < rawRows.length; i++) {
+        const row = rawRows[i];
+        const rawAdm = (row.admission_number || row['Admission No'] || row['Admission Number'] || '').toString().trim();
+        const fn = (row.first_name || row['First Name'] || '').toString().trim();
+        const ln = (row.last_name || row['Last Name'] || '').toString().trim();
+        const mn = (row.middle_name || row['Middle Name'] || '').toString().trim();
+        const rawGender = (row.gender || row['Gender'] || '').toString().trim();
+        const gender = rawGender ? (rawGender.toLowerCase().startsWith('f') ? 'Female' : 'Male') : null;
+        const className = (row.class_name || row['Class'] || '').toString().trim();
+        const armName = (row.class_arm_name || row['Arm'] || row['Stream'] || '').toString().trim();
+        const phone = (row.phone || row['Phone'] || '').toString().trim();
+        const email = (row.email || row['Email'] || '').toString().trim();
+
+        // VALIDATION RULE: Only first_name and last_name are strictly required!
+        if (!fn || !ln) {
+          failedCount++;
+          errors.push({
+            row: i + 1,
+            admission_number: rawAdm || undefined,
+            student_name: `${fn} ${ln}`.trim() || 'Unknown',
+            error: 'Missing required student name (First Name and Last Name are required)',
+          });
+          continue;
+        }
+
+        const fullName = `${fn} ${mn ? mn + ' ' : ''}${ln}`.trim();
+        const studentDedupKey = `${fullName.toLowerCase()}|${className.toLowerCase()}`;
+
+        // DUPLICATE RULE 1: If admission number is supplied, check for collision within this school
+        if (rawAdm && existingAdmissions.has(rawAdm.toLowerCase())) {
+          skippedCount++;
+          errors.push({
+            row: i + 1,
+            admission_number: rawAdm,
+            student_name: fullName,
+            error: `Skipped: Admission number "${rawAdm}" already registered in this school.`,
+            isDuplicate: true,
+          });
+          continue;
+        }
+
+        // DUPLICATE RULE 2: If admission number is NOT supplied, prevent duplicate student with exact same full name and class
+        if (!rawAdm && existingStudentKeys.has(studentDedupKey)) {
+          skippedCount++;
+          errors.push({
+            row: i + 1,
+            student_name: fullName,
+            error: `Skipped: Student "${fullName}" in class "${className || 'Unassigned'}" already exists.`,
+            isDuplicate: true,
+          });
+          continue;
+        }
+
+        const studentId = 'stu_' + crypto.randomUUID().slice(0, 10);
+        const effectiveAdm = rawAdm || null;
+
+        // 1. Authoritative Neon PostgreSQL Persistence
+        if (pgClient) {
+          try {
+            await pgClient.query(`SAVEPOINT sp_stu_${i}`);
+            await pgClient.query(
+              `INSERT INTO students (
+                id, school_id, admission_number, first_name, middle_name, last_name, full_name,
+                gender, phone, email, class_name, class_arm_name, student_status, is_deleted
+              ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, 'ACTIVE', 0)`,
+              [
+                studentId,
+                schoolId,
+                effectiveAdm,
+                fn,
+                mn || null,
+                ln,
+                fullName,
+                gender || 'Male',
+                phone || null,
+                email ? email.toLowerCase() : null,
+                className || null,
+                armName || null,
+              ]
+            );
+            await pgClient.query(`RELEASE SAVEPOINT sp_stu_${i}`);
+          } catch (pgErr: any) {
+            await pgClient.query(`ROLLBACK TO SAVEPOINT sp_stu_${i}`);
+            failedCount++;
+            errors.push({
+              row: i + 1,
+              admission_number: rawAdm || undefined,
+              student_name: fullName,
+              error: `Cloud database write failed: ${pgErr.message}`,
+            });
+            continue;
+          }
+        }
+
+        // 2. Local SQLite Engine Cache
+        try {
+          db.prepare(`
+            INSERT INTO students (
+              id, school_id, admission_number, first_name, middle_name, last_name, full_name,
+              gender, phone, email, class_name, class_arm_name, student_status
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ACTIVE')
+          `).run(
+            studentId,
+            schoolId,
+            effectiveAdm,
+            fn,
+            mn || null,
+            ln,
+            fullName,
+            gender || 'Male',
+            phone || null,
+            email ? email.toLowerCase() : null,
+            className || null,
+            armName || null
+          );
+        } catch (sqErr) {
+          console.warn('[Bulk Import Local Cache Notice]', sqErr);
+        }
+
+        if (rawAdm) existingAdmissions.add(rawAdm.toLowerCase());
+        existingStudentKeys.add(studentDedupKey);
+        importedCount++;
+      }
+
+      if (pgClient) {
+        await pgClient.query('COMMIT');
+      }
+    } catch (globalErr: any) {
+      if (pgClient) await pgClient.query('ROLLBACK');
+      console.error('[Bulk Import Fatal Error]', globalErr);
+    } finally {
+      if (pgClient) pgClient.release();
     }
 
     logAudit({
@@ -1500,15 +1619,16 @@ apiRouter.post(
       action: 'BULK_IMPORT_STUDENTS',
       entity: 'STUDENTS',
       ipAddress: req.ip || '127.0.0.1',
-      metadata: { importedCount, failedCount, totalRows: rawRows.length },
+      metadata: { importedCount, failedCount, skippedCount, totalRows: rawRows.length },
     });
 
     return res.json({
       success: true,
       importedCount,
       failedCount,
+      skippedCount,
       errors,
-      message: `Successfully imported ${importedCount} student(s). ${failedCount} record(s) failed or were duplicates.`,
+      message: `Successfully imported ${importedCount} student(s). ${skippedCount} duplicate(s) safely skipped. ${failedCount} row(s) failed validation.`,
     });
   }
 );
@@ -1519,7 +1639,7 @@ apiRouter.get(
   requireAuth,
   requireTenant,
   requireRole(['SCHOOL_OWNER', 'SCHOOL_ADMIN', 'BURSAR']),
-  (req: AuthenticatedRequest, res) => {
+  async (req: AuthenticatedRequest, res) => {
     const schoolId = req.targetSchoolId!;
     const students = db.prepare(`
       SELECT admission_number, first_name, middle_name, last_name, full_name, gender,
@@ -1599,7 +1719,7 @@ apiRouter.post(
   requireAuth,
   requireTenant,
   requireRole(['SCHOOL_OWNER', 'SCHOOL_ADMIN', 'BURSAR']),
-  (req: AuthenticatedRequest, res) => {
+  async (req: AuthenticatedRequest, res) => {
     const schoolId = req.targetSchoolId!;
     const { first_name, last_name, phone, email, address, occupation, relationship, emergency_contact, student_ids } = req.body;
 
@@ -1649,7 +1769,7 @@ apiRouter.put(
   requireAuth,
   requireTenant,
   requireRole(['SCHOOL_OWNER', 'SCHOOL_ADMIN', 'BURSAR']),
-  (req: AuthenticatedRequest, res) => {
+  async (req: AuthenticatedRequest, res) => {
     const schoolId = req.targetSchoolId!;
     const { id } = req.params;
 
