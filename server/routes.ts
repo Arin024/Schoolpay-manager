@@ -575,12 +575,26 @@ apiRouter.post('/v1/auth/login', async (req, res) => {
   const clientIp = req.ip || (req.headers['x-forwarded-for'] as string) || '127.0.0.1';
   const token = await createSessionAsync(user.id, activeSchoolId, clientIp, req.headers['user-agent']);
 
-  // Pre-load active school and settings to guarantee immediate frontend hydration
+  // Pre-load active school and settings authoritatively from Neon PostgreSQL
   let activeSchool = null;
   let activeSettings = null;
   if (activeSchoolId) {
-    activeSchool = db.prepare('SELECT * FROM schools WHERE id = ?').get(activeSchoolId);
-    activeSettings = db.prepare('SELECT * FROM school_settings WHERE school_id = ?').get(activeSchoolId);
+    if (pgPool && isPgConnected()) {
+      try {
+        const schRes = await pgPool.query('SELECT * FROM schools WHERE id = $1', [activeSchoolId]);
+        if (schRes.rows.length > 0) activeSchool = schRes.rows[0];
+        const setRes = await pgPool.query('SELECT * FROM school_settings WHERE school_id = $1', [activeSchoolId]);
+        if (setRes.rows.length > 0) activeSettings = setRes.rows[0];
+      } catch (err: any) {
+        console.warn('[Login School Hydration PG Notice]', err?.message);
+      }
+    }
+    if (!activeSchool) {
+      activeSchool = db.prepare('SELECT * FROM schools WHERE id = ?').get(activeSchoolId) || null;
+    }
+    if (!activeSettings) {
+      activeSettings = db.prepare('SELECT * FROM school_settings WHERE school_id = ?').get(activeSchoolId) || null;
+    }
   }
 
   // Audit log login

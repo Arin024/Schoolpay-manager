@@ -48,23 +48,26 @@ export async function createSessionAsync(userId: string, schoolId?: string | nul
   const token = crypto.randomBytes(32).toString('hex');
   const sessionId = 'ses_' + crypto.randomUUID();
 
-  // 1. Authoritative Neon PostgreSQL Persistence First
+  // 1. Authoritative Neon PostgreSQL Persistence First (MANDATORY)
+  const { getPgPool } = await import('./db.ts');
+  const pool = getPgPool();
+  if (!pool) {
+    throw new Error('Database pool unavailable for session creation');
+  }
+
+  const client = await pool.connect();
   try {
-    const { getPgPool, isPgConnected } = await import('./db.ts');
-    const pool = getPgPool();
-    if (pool && isPgConnected()) {
-      await pool.query(
-        `INSERT INTO sessions (id, token, user_id, school_id, ip_address, user_agent, expires_at)
-         VALUES ($1, $2, $3, $4, $5, $6, CURRENT_TIMESTAMP + INTERVAL '7 days')
-         ON CONFLICT (id) DO UPDATE SET
-           token = EXCLUDED.token,
-           school_id = EXCLUDED.school_id,
-           expires_at = EXCLUDED.expires_at`,
-        [sessionId, token, userId, schoolId || null, ip || null, userAgent || null]
-      );
-    }
-  } catch (err: any) {
-    console.error('[createSessionAsync PG Error]', err?.message);
+    await client.query(
+      `INSERT INTO sessions (id, token, user_id, school_id, ip_address, user_agent, expires_at)
+       VALUES ($1, $2, $3, $4, $5, $6, CURRENT_TIMESTAMP + INTERVAL '7 days')
+       ON CONFLICT (id) DO UPDATE SET
+         token = EXCLUDED.token,
+         school_id = EXCLUDED.school_id,
+         expires_at = EXCLUDED.expires_at`,
+      [sessionId, token, userId, schoolId || null, ip || null, userAgent || null]
+    );
+  } finally {
+    client.release();
   }
 
   // 2. Local cache write
