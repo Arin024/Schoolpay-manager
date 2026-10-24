@@ -514,7 +514,19 @@ adminRouter.delete('/schools/:schoolId', requireAuth, requireSuperAdmin, async (
   const { schoolId } = req.params;
   const { confirmationName } = req.body || {};
 
-  const school = db.prepare('SELECT * FROM schools WHERE id = ?').get(schoolId) as any;
+  // Find school authoritatively from Neon PG first, fallback to SQLite
+  let school: any = null;
+  const { getPgPool } = await import('./db.ts');
+  const pool = getPgPool();
+  if (pool) {
+    try {
+      const schCheck = await pool.query('SELECT * FROM schools WHERE id = $1', [schoolId]);
+      if (schCheck.rows.length > 0) school = schCheck.rows[0];
+    } catch {}
+  }
+  if (!school) {
+    school = db.prepare('SELECT * FROM schools WHERE id = ?').get(schoolId) as any;
+  }
   if (!school) {
     return res.status(404).json({ error: 'NOT_FOUND', message: 'School not found' });
   }

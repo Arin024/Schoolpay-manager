@@ -2205,3 +2205,92 @@ apiRouter.post('/v1/test/simulate-idor', requireAuth, (req: AuthenticatedRequest
     });
   });
 });
+
+// Explicit fallback route for school deletion: DELETE /api/v1/admin/schools/:schoolId
+apiRouter.delete(['/v1/admin/schools/:schoolId', '/admin/schools/:schoolId'], requireAuth, requireSuperAdmin, async (req: AuthenticatedRequest, res) => {
+  const { schoolId } = req.params;
+  const { confirmationName } = req.body || {};
+
+  const { getPgPool } = await import('./db.ts');
+  const pool = getPgPool();
+  let school: any = null;
+
+  if (pool) {
+    try {
+      const schCheck = await pool.query('SELECT * FROM schools WHERE id = $1', [schoolId]);
+      if (schCheck.rows.length > 0) school = schCheck.rows[0];
+    } catch {}
+  }
+  if (!school) {
+    school = db.prepare('SELECT * FROM schools WHERE id = ?').get(schoolId) as any;
+  }
+  if (!school) {
+    return res.status(404).json({ error: 'NOT_FOUND', message: 'School not found' });
+  }
+
+  if (confirmationName && confirmationName.trim().toLowerCase() !== school.name.trim().toLowerCase()) {
+    return res.status(400).json({
+      error: 'CONFIRMATION_MISMATCH',
+      message: `To delete this school, please confirm by typing its exact name "${school.name}".`,
+    });
+  }
+
+  // 1. Authoritative Neon PostgreSQL Purge
+  if (pool) {
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      const uRes = await client.query('SELECT user_id FROM user_roles WHERE school_id = $1', [schoolId]);
+      const userIds = uRes.rows.map(r => r.user_id);
+
+      await client.query('DELETE FROM payments WHERE school_id = $1', [schoolId]);
+      await client.query('DELETE FROM invoices WHERE school_id = $1', [schoolId]);
+      await client.query('DELETE FROM students WHERE school_id = $1', [schoolId]);
+      await client.query('DELETE FROM classes WHERE school_id = $1', [schoolId]);
+      await client.query('DELETE FROM staff WHERE school_id = $1', [schoolId]);
+      await client.query('DELETE FROM school_subscriptions WHERE school_id = $1', [schoolId]);
+      await client.query('DELETE FROM user_roles WHERE school_id = $1', [schoolId]);
+      if (userIds.length > 0) {
+        await client.query('DELETE FROM users WHERE id = ANY($1::text[]) AND is_platform_admin = 0', [userIds]);
+      }
+      await client.query('DELETE FROM school_settings WHERE school_id = $1', [schoolId]);
+      await client.query('DELETE FROM schools WHERE id = $1', [schoolId]);
+      await client.query('COMMIT');
+    } catch (err: any) {
+      await client.query('ROLLBACK');
+      console.error('[Purge PG Error]', err);
+    } finally {
+      client.release();
+    }
+  }
+
+  // 2. Local SQLite Purge
+  try {
+    const uRows = db.prepare('SELECT user_id FROM user_roles WHERE school_id = ?').all(schoolId) as any[];
+    db.prepare('DELETE FROM payments WHERE school_id = ?').run(schoolId);
+    db.prepare('DELETE FROM invoices WHERE school_id = ?').run(schoolId);
+    db.prepare('DELETE FROM students WHERE school_id = ?').run(schoolId);
+    db.prepare('DELETE FROM classes WHERE school_id = ?').run(schoolId);
+    db.prepare('DELETE FROM staff WHERE school_id = ?').run(schoolId);
+    db.prepare('DELETE FROM school_subscriptions WHERE school_id = ?').run(schoolId);
+    db.prepare('DELETE FROM user_roles WHERE school_id = ?').run(schoolId);
+    for (const u of uRows) {
+      db.prepare('DELETE FROM users WHERE id = ? AND is_platform_admin = 0').run(u.user_id);
+    }
+    db.prepare('DELETE FROM school_settings WHERE school_id = ?').run(schoolId);
+    db.prepare('DELETE FROM schools WHERE id = ?').run(schoolId);
+  } catch (e) {}
+
+  logAudit({
+    actorId: req.user!.id,
+    actorEmail: req.user!.email,
+    schoolId,
+    action: 'PURGE_SCHOOL',
+    entity: 'SCHOOL',
+    entityId: schoolId,
+    ipAddress: req.ip || '127.0.0.1',
+    metadata: { schoolName: school.name },
+  });
+
+  return res.json({ success: true, message: `School ${school.name} permanently purged from all databases.` });
+});
