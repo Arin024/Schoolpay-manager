@@ -557,54 +557,54 @@ adminRouter.delete('/schools/:schoolId', requireAuth, requireSuperAdmin, async (
         );
         const userIds = usersRes.rows.map((r: any) => r.user_id);
 
-        // Cascade delete all child tables tied to this school
+        // Cascade delete all existing child tables safely using SAVEPOINTS so non-existent tables do not abort the transaction
         const tenantTables = [
-          'payment_receipts',
+          'receipts',
           'payments',
           'invoice_items',
           'invoices',
-          'discount_assignments',
-          'discounts',
           'fee_structure_items',
           'fee_structures',
           'fee_categories',
-          'student_parents',
           'parents',
-          'student_enrollments',
           'students',
           'class_arms',
           'classes',
           'staff',
           'terms',
           'academic_sessions',
-          'school_bank_accounts',
-          'school_payment_configs',
           'school_subscriptions',
           'school_settings',
-          'recycle_bin',
           'notifications',
           'sessions',
         ];
 
         for (const tbl of tenantTables) {
           try {
+            await client.query(`SAVEPOINT sp_${tbl}`);
             await client.query(`DELETE FROM ${tbl} WHERE school_id = $1`, [schoolId]);
-          } catch (e) {}
+            await client.query(`RELEASE SAVEPOINT sp_${tbl}`);
+          } catch (e) {
+            await client.query(`ROLLBACK TO SAVEPOINT sp_${tbl}`);
+          }
         }
 
         // Delete user roles for this school
         await client.query('DELETE FROM user_roles WHERE school_id = $1', [schoolId]);
 
-        // Delete users if they have no other schools and are not platform admins
+        // Delete users safely using SAVEPOINT
         for (const uid of userIds) {
           try {
+            await client.query(`SAVEPOINT sp_user_${uid}`);
             const otherRoles = await client.query('SELECT id FROM user_roles WHERE user_id = $1', [uid]);
             if (otherRoles.rows.length === 0) {
               await client.query('DELETE FROM sessions WHERE user_id = $1', [uid]);
-              await client.query('DELETE FROM password_resets WHERE email IN (SELECT email FROM users WHERE id = $1)', [uid]);
               await client.query('DELETE FROM users WHERE id = $1 AND is_platform_admin = 0', [uid]);
             }
-          } catch (e) {}
+            await client.query(`RELEASE SAVEPOINT sp_user_${uid}`);
+          } catch (e) {
+            await client.query(`ROLLBACK TO SAVEPOINT sp_user_${uid}`);
+          }
         }
 
         // Delete school record itself
