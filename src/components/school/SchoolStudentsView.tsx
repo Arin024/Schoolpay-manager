@@ -807,14 +807,13 @@ export const SchoolStudentsView: React.FC<SchoolStudentsViewProps> = ({
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                 <div>
                   <label className="block font-semibold text-slate-700 mb-1">
-                    Admission Number <span className="text-red-500">*</span>
+                    Admission Number <span className="text-slate-400 font-normal">(Optional)</span>
                   </label>
                   <input
                     type="text"
-                    required
                     value={formData.admission_number}
                     onChange={(e) => setFormData({ ...formData, admission_number: e.target.value })}
-                    placeholder="e.g. SCH/2024/005"
+                    placeholder="Auto-generated if blank"
                     className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl font-mono"
                   />
                 </div>
@@ -825,6 +824,7 @@ export const SchoolStudentsView: React.FC<SchoolStudentsViewProps> = ({
                     onChange={(e) => setFormData({ ...formData, gender: e.target.value })}
                     className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl"
                   >
+                    <option value="">Select Gender (Optional)...</option>
                     <option value="Male">Male</option>
                     <option value="Female">Female</option>
                   </select>
@@ -1032,12 +1032,14 @@ export const SchoolStudentsView: React.FC<SchoolStudentsViewProps> = ({
 
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                 <div>
-                  <label className="block font-semibold text-slate-700 mb-1">Admission Number</label>
+                  <label className="block font-semibold text-slate-700 mb-1">
+                    Admission Number <span className="text-slate-400 font-normal">(Optional)</span>
+                  </label>
                   <input
                     type="text"
-                    required
                     value={formData.admission_number}
                     onChange={(e) => setFormData({ ...formData, admission_number: e.target.value })}
+                    placeholder="Auto-generated if blank"
                     className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl font-mono"
                   />
                 </div>
@@ -1063,6 +1065,7 @@ export const SchoolStudentsView: React.FC<SchoolStudentsViewProps> = ({
                     onChange={(e) => setFormData({ ...formData, gender: e.target.value })}
                     className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl"
                   >
+                    <option value="">Select Gender (Optional)...</option>
                     <option value="Male">Male</option>
                     <option value="Female">Female</option>
                   </select>
@@ -1356,8 +1359,25 @@ export const SchoolStudentsView: React.FC<SchoolStudentsViewProps> = ({
               {importSummary && (
                 <div className="p-3 rounded-xl bg-slate-100 border border-slate-200 space-y-1">
                   <p className="font-bold text-slate-900">{importSummary.message}</p>
+                  {importSummary.warnings && importSummary.warnings.length > 0 && (
+                    <div className="text-[10px] text-amber-800 bg-amber-50 p-2.5 rounded-lg border border-amber-200 space-y-1 mt-1.5">
+                      <p className="font-bold text-amber-950 flex items-center gap-1">
+                        <span>Notice ({importSummary.warnings.length} warning{importSummary.warnings.length > 1 ? 's' : ''}):</span>
+                      </p>
+                      <div className="space-y-0.5 max-h-24 overflow-y-auto">
+                        {importSummary.warnings.slice(0, 5).map((w: any, idx: number) => (
+                          <p key={idx}>
+                            • Row {w.row || '?'}: {w.warning || w.message || JSON.stringify(w)}
+                          </p>
+                        ))}
+                        {importSummary.warnings.length > 5 && (
+                          <p className="italic text-amber-700 text-[9px]">...and {importSummary.warnings.length - 5} more warning(s)</p>
+                        )}
+                      </div>
+                    </div>
+                  )}
                   {importSummary.errors && importSummary.errors.length > 0 && (
-                    <div className="text-[10px] text-rose-700 space-y-0.5">
+                    <div className="text-[10px] text-rose-700 space-y-0.5 mt-1">
                       {importSummary.errors.slice(0, 3).map((e: any, idx: number) => (
                         <p key={idx}>
                           Row {e.row}: {e.error}
@@ -1403,7 +1423,7 @@ export const SchoolStudentsView: React.FC<SchoolStudentsViewProps> = ({
               <h3 className="font-bold text-sm text-slate-900">Archive / Delete Student Record</h3>
               <p className="text-slate-500">
                 Are you sure you want to remove <strong>{studentToDelete.full_name}</strong> (Admission No:{' '}
-                <code>{studentToDelete.admission_number}</code>)?
+                <code>{studentToDelete.admission_number || 'None'}</code>)?
               </p>
             </div>
             <div className="pt-2 flex items-center justify-end gap-2">

@@ -20,7 +20,7 @@ process.env.DISABLE_HMR = 'true';
 import express from 'express';
 // Note: Vite dev server is dynamically loaded only in development mode to save ~50MB RAM in production
 import path from 'node:path';
-import { initDatabase, isPgConnected, getPgStatus } from './server/db.ts';
+import { initDatabase, isPgConnected, ensurePgConnected, getPgStatus, getPgEndpointHostPrefix } from './server/db.ts';
 import { apiRouter } from './server/routes.ts';
 
 async function startServer() {
@@ -80,17 +80,22 @@ async function startServer() {
   app.use(express.urlencoded({ extended: true }));
 
   // Durable Database Protection Guard
-  // In production/configured environment, reject modifying operations if Neon PostgreSQL is offline
-  app.use((req, res, next) => {
-    // If running in production or REQUIRE_POSTGRES is enabled or DATABASE_URL is configured, block mutations if PostgreSQL is offline
-    const mustBeOnPostgres = process.env.NODE_ENV === 'production' || process.env.REQUIRE_POSTGRES === 'true' || Boolean(process.env.DATABASE_URL);
+  // In production/configured environment, attempt reconnection on cold wake-up before rejecting mutations
+  app.use(async (req, res, next) => {
+    const mustBeOnPostgres =
+      process.env.NODE_ENV === 'production' ||
+      process.env.REQUIRE_POSTGRES === 'true' ||
+      Boolean(process.env.NEON_DATABASE_URL || process.env.DATABASE_URL || process.env.POSTGRES_URL);
     if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method)) {
       if (mustBeOnPostgres && !isPgConnected()) {
-        return res.status(503).json({
-          error: 'DATABASE_UNAVAILABLE',
-          message: 'Durable database connection to Neon PostgreSQL is offline. Modifying operations are strictly blocked to prevent uncommitted or divergent state.',
-          code: 'DURABLE_STORAGE_OFFLINE',
-        });
+        const reconnected = await ensurePgConnected();
+        if (!reconnected) {
+          return res.status(503).json({
+            error: 'DATABASE_UNAVAILABLE',
+            message: 'Durable database connection to Neon PostgreSQL is temporarily unavailable. Modifying operations are blocked to prevent uncommitted state. Please retry in a moment.',
+            code: 'DURABLE_STORAGE_OFFLINE',
+          });
+        }
       }
     }
     next();
@@ -154,14 +159,20 @@ async function startServer() {
   }, 15 * 60 * 1000);
   if (memMonitorInterval.unref) memMonitorInterval.unref();
 
-  // Health check endpoint with lightweight memory telemetry
-  app.get(['/api/health', '/health'], (req, res) => {
+  // Health check endpoint with lightweight memory telemetry (zero credentials/secrets exposed)
+  app.get(['/api/health', '/health'], async (_req, res) => {
+    if (!isPgConnected()) {
+      await ensurePgConnected();
+    }
     const mem = process.memoryUsage();
     res.json({
       status: 'healthy',
       service: 'BursarIQ API',
       version: '1.0.0',
+      commit: process.env.RENDER_GIT_COMMIT || 'local',
       database: isPgConnected() ? 'Neon PostgreSQL (Durable Serverless)' : 'SQLite (Local Engine)',
+      neonConnected: isPgConnected(),
+      neonEndpoint: getPgEndpointHostPrefix(),
       neonStatus: getPgStatus(),
       memory: {
         rssMb: Math.round(mem.rss / 1024 / 1024),

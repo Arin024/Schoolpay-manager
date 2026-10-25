@@ -1,6 +1,5 @@
 import crypto from 'node:crypto';
-import { db, getPgPool, isPgConnected } from './db.ts';
-import { createSessionPg } from './postgresAuthService.ts';
+import { db, cacheDb, getPgPool, markPgConnected } from './db.ts';
 
 export interface UserRecord {
   id: string;
@@ -48,40 +47,44 @@ export async function createSessionAsync(userId: string, schoolId?: string | nul
   const token = crypto.randomBytes(32).toString('hex');
   const sessionId = 'ses_' + crypto.randomUUID();
 
-  // 1. Authoritative Neon PostgreSQL Persistence First (MANDATORY)
-  const { getPgPool } = await import('./db.ts');
+  // 1. Authoritative Neon PostgreSQL Persistence First (MANDATORY when pool configured)
   const pool = getPgPool();
-  if (!pool) {
+  if (pool) {
+    const client = await pool.connect();
+    try {
+      await client.query(
+        `INSERT INTO sessions (id, token, user_id, school_id, ip_address, user_agent, expires_at)
+         VALUES ($1, $2, $3, $4, $5, $6, CURRENT_TIMESTAMP + INTERVAL '7 days')
+         ON CONFLICT (id) DO UPDATE SET
+           token = EXCLUDED.token,
+           school_id = EXCLUDED.school_id,
+           expires_at = EXCLUDED.expires_at`,
+        [sessionId, token, userId, schoolId || null, ip || null, userAgent || null]
+      );
+      markPgConnected();
+    } finally {
+      client.release();
+    }
+  } else if (process.env.NODE_ENV === 'production' || process.env.DATABASE_URL) {
     throw new Error('Database pool unavailable for session creation');
   }
 
-  const client = await pool.connect();
-  try {
-    await client.query(
-      `INSERT INTO sessions (id, token, user_id, school_id, ip_address, user_agent, expires_at)
-       VALUES ($1, $2, $3, $4, $5, $6, CURRENT_TIMESTAMP + INTERVAL '7 days')
-       ON CONFLICT (id) DO UPDATE SET
-         token = EXCLUDED.token,
-         school_id = EXCLUDED.school_id,
-         expires_at = EXCLUDED.expires_at`,
-      [sessionId, token, userId, schoolId || null, ip || null, userAgent || null]
-    );
-  } finally {
-    client.release();
-  }
-
-  // 2. Local cache write
+  // 2. Local SQLite read-cache write (using cacheDb so we don't duplicate PG insert)
   try {
     let validSchoolId: string | null = null;
     if (schoolId) {
       try {
-        const row = db.prepare('SELECT id FROM schools WHERE id = ?').get(schoolId);
+        const row = cacheDb.prepare('SELECT id FROM schools WHERE id = ?').get(schoolId);
         if (row) validSchoolId = schoolId;
       } catch {}
     }
-    db.prepare(`
+    cacheDb.prepare(`
       INSERT INTO sessions (id, token, user_id, school_id, ip_address, user_agent, expires_at)
       VALUES (?, ?, ?, ?, ?, ?, datetime('now', '+7 days'))
+      ON CONFLICT(id) DO UPDATE SET
+        token = excluded.token,
+        school_id = excluded.school_id,
+        expires_at = excluded.expires_at
     `).run(sessionId, token, userId, validSchoolId, ip || null, userAgent || null);
   } catch {}
 
@@ -92,24 +95,29 @@ export function createSession(userId: string, schoolId?: string | null, ip?: str
   const token = crypto.randomBytes(32).toString('hex');
   const sessionId = 'ses_' + crypto.randomUUID();
 
-  // Validate schoolId existence in SQLite to prevent FK constraint failures
   let validSchoolId: string | null = null;
   if (schoolId) {
     try {
-      const row = db.prepare('SELECT id FROM schools WHERE id = ?').get(schoolId);
+      const row = cacheDb.prepare('SELECT id FROM schools WHERE id = ?').get(schoolId);
       if (row) validSchoolId = schoolId;
     } catch {}
   }
 
-  db.prepare(`
-    INSERT INTO sessions (id, token, user_id, school_id, ip_address, user_agent, expires_at)
-    VALUES (?, ?, ?, ?, ?, ?, datetime('now', '+7 days'))
-  `).run(sessionId, token, userId, validSchoolId, ip || null, userAgent || null);
+  try {
+    cacheDb.prepare(`
+      INSERT INTO sessions (id, token, user_id, school_id, ip_address, user_agent, expires_at)
+      VALUES (?, ?, ?, ?, ?, ?, datetime('now', '+7 days'))
+      ON CONFLICT(id) DO UPDATE SET
+        token = excluded.token,
+        school_id = excluded.school_id,
+        expires_at = excluded.expires_at
+    `).run(sessionId, token, userId, validSchoolId, ip || null, userAgent || null);
+  } catch {}
 
   // Replicate to Neon PostgreSQL immediately
   try {
     const pool = getPgPool();
-    if (pool && isPgConnected()) {
+    if (pool) {
       pool.query(
         `INSERT INTO sessions (id, token, user_id, school_id, ip_address, user_agent, expires_at)
           VALUES ($1, $2, $3, $4, $5, $6, CURRENT_TIMESTAMP + INTERVAL '7 days')
@@ -118,7 +126,7 @@ export function createSession(userId: string, schoolId?: string | null, ip?: str
             school_id = EXCLUDED.school_id,
             expires_at = EXCLUDED.expires_at`,
         [sessionId, token, userId, schoolId || null, ip || null, userAgent || null]
-      ).catch((err: any) => {
+      ).then(() => markPgConnected()).catch((err: any) => {
         console.error('[PostgreSQL Session Replication Error]', err.message);
       });
     }
@@ -139,10 +147,24 @@ export function createImpersonationSession(
   const token = 'imp_' + crypto.randomBytes(32).toString('hex');
   const sessionId = 'ses_imp_' + crypto.randomUUID();
 
-  db.prepare(`
-    INSERT INTO sessions (id, token, user_id, school_id, impersonated_by, ip_address, user_agent, expires_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now', '+2 hours'))
-  `).run(sessionId, token, targetUserId, targetSchoolId, superAdminId, ip || null, userAgent || null);
+  try {
+    cacheDb.prepare(`
+      INSERT INTO sessions (id, token, user_id, school_id, impersonated_by, ip_address, user_agent, expires_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now', '+2 hours'))
+    `).run(sessionId, token, targetUserId, targetSchoolId, superAdminId, ip || null, userAgent || null);
+  } catch {}
+
+  try {
+    const pool = getPgPool();
+    if (pool) {
+      pool.query(
+        `INSERT INTO sessions (id, token, user_id, school_id, impersonated_by, ip_address, user_agent, expires_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, CURRENT_TIMESTAMP + INTERVAL '2 hours')
+         ON CONFLICT (id) DO NOTHING`,
+        [sessionId, token, targetUserId, targetSchoolId, superAdminId, ip || null, userAgent || null]
+      ).then(() => markPgConnected()).catch(() => {});
+    }
+  } catch {}
 
   return token;
 }
@@ -155,11 +177,10 @@ export async function validateSessionAsync(token: string): Promise<{
 } | null> {
   if (!token) return null;
 
-  // 1. Authoritative Neon PostgreSQL check first
+  // 1. Authoritative Neon PostgreSQL check first whenever pool exists
   try {
-    const { getPgPool, isPgConnected } = await import('./db.ts');
     const pool = getPgPool();
-    if (pool && isPgConnected()) {
+    if (pool) {
       const { validateSessionPg } = await import('./postgresAuthService.ts');
       const pgData = await validateSessionPg(token);
       if (pgData) {
@@ -175,8 +196,11 @@ export async function validateSessionAsync(token: string): Promise<{
     console.warn('[validateSessionAsync PG warning]', err?.message);
   }
 
-  // 2. Synchronous local cache fallback
-  return validateSession(token);
+  // 2. Synchronous local cache fallback (only when PG is not configured)
+  if (!getPgPool()) {
+    return validateSession(token);
+  }
+  return null;
 }
 
 export function validateSession(token: string): {
@@ -200,7 +224,6 @@ export function validateSession(token: string): {
 
   if (!user) return null;
 
-  // Retrieve user roles joined with school details (prioritize primary active roles)
   const roles = db.prepare(`
     SELECT ur.*, r.name as role_name, r.display_name as role_display_name, r.scope as role_scope,
            s.name as school_name, s.status as school_status
@@ -211,30 +234,24 @@ export function validateSession(token: string): {
     ORDER BY ur.is_primary DESC, ur.created_at ASC
   `).all(user.id) as unknown as UserRoleRecord[];
 
-  // Authoritatively derive school tenant context
   let resolvedSchoolId = session.school_id;
   if (!resolvedSchoolId && user.is_platform_admin !== 1 && roles.length > 0) {
     const primarySchoolRole = roles.find((r) => r.school_id !== null);
     if (primarySchoolRole && primarySchoolRole.school_id) {
       resolvedSchoolId = primarySchoolRole.school_id;
       try {
-        db.prepare('UPDATE sessions SET school_id = ? WHERE id = ?').run(resolvedSchoolId, session.id);
-      } catch (e) {
-        // quiet catch
-      }
+        cacheDb.prepare('UPDATE sessions SET school_id = ? WHERE id = ?').run(resolvedSchoolId, session.id);
+      } catch {}
     }
   }
 
-  // Sliding session extension: If session has less than 5 days remaining, bump back to 7 days on active use
   try {
-    db.prepare(`
+    cacheDb.prepare(`
       UPDATE sessions 
       SET expires_at = datetime('now', '+7 days')
       WHERE id = ? AND datetime(expires_at) < datetime('now', '+5 days')
     `).run(session.id);
-  } catch (e) {
-    // quiet catch
-  }
+  } catch {}
 
   return {
     user,
@@ -244,15 +261,32 @@ export function validateSession(token: string): {
   };
 }
 
+export async function destroySessionAsync(token: string): Promise<void> {
+  try {
+    cacheDb.prepare('DELETE FROM sessions WHERE token = ?').run(token);
+  } catch {}
+  const pool = getPgPool();
+  if (pool) {
+    try {
+      await pool.query('DELETE FROM sessions WHERE token = $1', [token]);
+      markPgConnected();
+    } catch (err: any) {
+      console.error('[PostgreSQL destroySessionAsync Warning]', err?.message);
+    }
+  }
+}
+
 export function destroySession(token: string) {
-  db.prepare('DELETE FROM sessions WHERE token = ?').run(token);
-  // Also remove from Neon PostgreSQL authoritative sessions table
+  try {
+    cacheDb.prepare('DELETE FROM sessions WHERE token = ?').run(token);
+  } catch {}
   try {
     const pool = getPgPool();
-    if (pool && isPgConnected()) {
-      pool.query('DELETE FROM sessions WHERE token = $1', [token]).catch((err) => {
+    if (pool) {
+      pool.query('DELETE FROM sessions WHERE token = $1', [token]).then(() => markPgConnected()).catch((err) => {
         console.error('[PostgreSQL destroySession Warning]', err.message);
       });
     }
   } catch {}
 }
+

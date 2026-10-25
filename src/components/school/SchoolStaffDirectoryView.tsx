@@ -389,14 +389,13 @@ export const SchoolStaffDirectoryView: React.FC = () => {
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
                   <label className="block font-semibold text-slate-700 mb-1">
-                    Staff ID / Number <span className="text-red-500">*</span>
+                    Staff ID / Number <span className="text-slate-400 font-normal">(Optional)</span>
                   </label>
                   <input
                     type="text"
-                    required
                     value={formData.staff_number}
                     onChange={(e) => setFormData({ ...formData, staff_number: e.target.value })}
-                    placeholder="e.g. STF/001"
+                    placeholder="Auto-generated if blank (e.g. STF/001)"
                     className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl font-mono"
                   />
                 </div>
@@ -407,6 +406,7 @@ export const SchoolStaffDirectoryView: React.FC = () => {
                     onChange={(e) => setFormData({ ...formData, gender: e.target.value })}
                     className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl"
                   >
+                    <option value="">Select Gender (Optional)...</option>
                     <option value="Male">Male</option>
                     <option value="Female">Female</option>
                   </select>
@@ -416,11 +416,10 @@ export const SchoolStaffDirectoryView: React.FC = () => {
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
                   <label className="block font-semibold text-slate-700 mb-1">
-                    Email <span className="text-red-500">*</span>
+                    Email <span className="text-slate-400 font-normal">(Optional)</span>
                   </label>
                   <input
                     type="email"
-                    required
                     value={formData.email}
                     onChange={(e) => setFormData({ ...formData, email: e.target.value })}
                     placeholder="e.g. staff@school.edu.ng"
@@ -429,11 +428,10 @@ export const SchoolStaffDirectoryView: React.FC = () => {
                 </div>
                 <div>
                   <label className="block font-semibold text-slate-700 mb-1">
-                    Phone <span className="text-red-500">*</span>
+                    Phone <span className="text-slate-400 font-normal">(Optional)</span>
                   </label>
                   <input
                     type="tel"
-                    required
                     value={formData.phone}
                     onChange={(e) => setFormData({ ...formData, phone: e.target.value })}
                     placeholder="e.g. 08031234567"

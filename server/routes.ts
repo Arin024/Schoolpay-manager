@@ -2,13 +2,25 @@ import { superAdminBackupRouter } from './superAdminExportDownload.ts';
 import { cloudSchedulerRouter } from './cloudSchedulerEndpoint.ts';
 import express from 'express';
 import crypto from 'node:crypto';
-import { db, getPgPool, isPgConnected, getPgStatus } from './db.ts';
+import {
+  db,
+  cacheDb,
+  getPgPool,
+  isPgConnected,
+  getPgStatus,
+  queryPg,
+  ensurePgConnected,
+  getPgEndpointHostPrefix,
+  markPgConnected,
+} from './db.ts';
 import {
   hashPassword,
   generateSalt,
   verifyPassword,
-  createSession, createSessionAsync,
+  createSession,
+  createSessionAsync,
   destroySession,
+  destroySessionAsync,
   type UserRecord,
 } from './auth.ts';
 import {
@@ -31,20 +43,11 @@ import { handlePaymentWebhook, handleBachsWebhook, handleBachsDemoCheckout, hand
 export const apiRouter = express.Router();
 
 // Public Health Check Endpoint (No Auth Required)
-apiRouter.get('/health', (req, res) => {
-  const rawUrl = (process.env.NEON_DATABASE_URL || process.env.DATABASE_URL || '').trim();
-  // Safe hash/fingerprint of the password without exposing the full secret:
-  let pwdLen = 0;
-  let pwdFingerprint = 'NONE';
-  if (rawUrl.includes('@') && rawUrl.includes('://')) {
+apiRouter.get('/health', async (_req, res) => {
+  if (getPgPool() && !isPgConnected()) {
     try {
-      const up = rawUrl.split('@')[0].split('://')[1];
-      if (up.includes(':')) {
-        const p = up.split(':')[1];
-        pwdLen = p.length;
-        pwdFingerprint = p.slice(0, 5) + '...' + p.slice(-4);
-      }
-    } catch (e) {}
+      await ensurePgConnected();
+    } catch {}
   }
   return res.json({
     status: 'healthy',
@@ -53,12 +56,13 @@ apiRouter.get('/health', (req, res) => {
       provider: isPgConnected() ? 'Neon PostgreSQL' : 'Local SQLite',
       connected: isPgConnected(),
       pgStatus: getPgStatus(),
-      hasEnvUrl: Boolean(process.env.DATABASE_URL),
-      pwdFingerprint,
-      pwdLength: pwdLen,
+      hasEnvUrl: Boolean(process.env.DATABASE_URL || process.env.NEON_DATABASE_URL),
+      neonEndpoint: getPgEndpointHostPrefix(),
     },
+    neonConnected: isPgConnected(),
+    neonEndpoint: getPgEndpointHostPrefix(),
     service: 'BursarIQ Backend Engine',
-    commit: process.env.RENDER_GIT_COMMIT || '3cfd680-pgfirst'
+    commit: process.env.RENDER_GIT_COMMIT || 'local',
   });
 });
 
@@ -77,8 +81,9 @@ apiRouter.use('/auth', recoveryRouter);
 // Dedicated Bachs.io Webhook Endpoint: POST /api/webhooks/bachs
 apiRouter.post('/webhooks/bachs', handleBachsWebhook);
 
-// Mount Step 5 Platform Super Admin module
+// Mount Step 5 Platform Super Admin module on both /v1/admin and /admin
 apiRouter.use('/v1/admin', adminRouter);
+apiRouter.use('/admin', adminRouter);
 
 // Mount SaaS School Billing & Subscription module
 apiRouter.use('/v1/school/billing', schoolBillingRouter);
@@ -183,38 +188,39 @@ apiRouter.post(['/v1/auth/register-school', '/v1/auth/register'], async (req, re
 
   // Check if school email or owner email already exists in authoritative Neon PostgreSQL (MANDATORY)
   const pool = getPgPool();
-  if (!pool) {
+  if (pool) {
+    if (!isPgConnected()) {
+      try {
+        await ensurePgConnected();
+      } catch {}
+    }
+    try {
+      const checkSchool = await queryPg('SELECT id FROM schools WHERE LOWER(email) = $1', [schoolEmail.toLowerCase()]);
+      if (checkSchool.rows.length > 0) {
+        return res.status(409).json({
+          error: 'SCHOOL_EXISTS',
+          message: 'A school with this official email address is already registered.',
+        });
+      }
+      const checkUser = await queryPg('SELECT id FROM users WHERE LOWER(email) = $1', [ownerEmail.toLowerCase()]);
+      if (checkUser.rows.length > 0) {
+        return res.status(409).json({
+          error: 'USER_EXISTS',
+          message: 'A user account with this proprietor email address already exists. Please log in or use another email.',
+        });
+      }
+    } catch (e: any) {
+      console.error('[Registration Pre-Check Error]', e.message);
+      return res.status(503).json({
+        error: 'DATABASE_ERROR',
+        message: 'Unable to verify email availability with the authoritative cloud database: ' + (e?.message || 'Database error'),
+      });
+    }
+  } else if (process.env.NODE_ENV === 'production' || process.env.DATABASE_URL || process.env.NEON_DATABASE_URL) {
     return res.status(503).json({
       error: 'DATABASE_UNAVAILABLE',
-      message: 'Database service is currently initializing. Please retry in a moment.',
+      message: 'Authoritative database service is currently initializing. Please retry in a moment.',
     });
-  }
-
-  let pgCheckClient: any = null;
-  try {
-    pgCheckClient = await pool.connect();
-    const checkSchool = await pgCheckClient.query('SELECT id FROM schools WHERE LOWER(email) = $1', [schoolEmail.toLowerCase()]);
-    if (checkSchool.rows.length > 0) {
-      return res.status(409).json({
-        error: 'SCHOOL_EXISTS',
-        message: 'A school with this official email address is already registered.',
-      });
-    }
-    const checkUser = await pgCheckClient.query('SELECT id FROM users WHERE LOWER(email) = $1', [ownerEmail.toLowerCase()]);
-    if (checkUser.rows.length > 0) {
-      return res.status(409).json({
-        error: 'USER_EXISTS',
-        message: 'A user account with this proprietor email address already exists. Please log in or use another email.',
-      });
-    }
-  } catch (e: any) {
-    console.error('[Registration Pre-Check Error]', e.message);
-    return res.status(503).json({
-      error: 'DATABASE_ERROR',
-      message: 'Unable to verify email availability with the authoritative cloud database: ' + (e?.message || 'Database error'),
-    });
-  } finally {
-    if (pgCheckClient) pgCheckClient.release();
   }
 
   const schoolId = 'sch_' + crypto.randomUUID().slice(0, 8);
@@ -235,128 +241,151 @@ apiRouter.post(['/v1/auth/register-school', '/v1/auth/register'], async (req, re
   const salt2 = generateSalt();
   const answerHash2 = hashPassword(normalizeAns(answer2), salt2);
 
-  // STEP 1: Authoritative Neon PostgreSQL Persistence First
-  if (!pool) {
-    return res.status(503).json({
-      error: 'DATABASE_UNAVAILABLE',
-      message: 'Authoritative database service is currently unavailable. Please retry in a few moments.',
-    });
-  }
-
   const subId = `sub_${crypto.randomBytes(6).toString('hex')}`;
   const subEnd = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
 
-  let pgClient: any = null;
-  try {
-    pgClient = await pool.connect();
-  } catch (connErr: any) {
-    console.error('[Registration Neon PG Connection Failed]', connErr?.message);
-    return res.status(503).json({
-      error: 'DATABASE_CONNECT_FAILED',
-      message: 'Could not connect to the authoritative cloud database. Registration aborted to protect your account from loss.',
-    });
+  // STEP 1: Authoritative Neon PostgreSQL Persistence First
+  if (pool) {
+    let pgClient: any = null;
+    try {
+      pgClient = await pool.connect();
+    } catch (connErr: any) {
+      console.error('[Registration Neon PG Connection Failed]', connErr?.message);
+      return res.status(503).json({
+        error: 'DATABASE_CONNECT_FAILED',
+        message: 'Could not connect to the authoritative cloud database. Registration aborted to protect your account from loss.',
+      });
+    }
+
+    try {
+      await pgClient.query('BEGIN');
+
+      // 1. Schools (Tenant)
+      await pgClient.query(
+        `INSERT INTO schools (id, name, slug, type, status, address, state, lga, phone, email, website, current_plan_id)
+          VALUES ($1, $2, $3, $4, 'TRIAL', $5, $6, $7, $8, $9, $10, 'plan_trial')
+          ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name, status = EXCLUDED.status, current_plan_id = 'plan_trial'`,
+        [schoolId, schoolName.trim(), slug, schoolType, address || '', state, lga, phone, schoolEmail.toLowerCase(), req.body.website || null]
+      );
+
+      // 2. School Settings
+      await pgClient.query(
+        `INSERT INTO school_settings (id, school_id, currency, currency_symbol, current_academic_session, current_term, payment_notification_email, payment_notification_sms, portal_subdomain)
+          VALUES ($1, $2, 'NGN', '₦', '2024/2025', '1st Term', $3, 0, $4)
+          ON CONFLICT (id) DO NOTHING`,
+        [settingsId, schoolId, schoolEmail.toLowerCase(), baseSlug]
+      );
+
+      // 3. User & Owner Profile
+      await pgClient.query(
+        `INSERT INTO users (
+          id, email, password_hash, salt, full_name, phone,
+          security_question_1, security_answer_hash_1, security_answer_salt_1,
+          security_question_2, security_answer_hash_2, security_answer_salt_2,
+          recovery_email, recovery_phone,
+          is_platform_admin, is_active
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, 0, 1)
+        ON CONFLICT (id) DO UPDATE SET
+          full_name = EXCLUDED.full_name,
+          security_question_1 = EXCLUDED.security_question_1,
+          security_answer_hash_1 = EXCLUDED.security_answer_hash_1,
+          security_answer_salt_1 = EXCLUDED.security_answer_salt_1,
+          security_question_2 = EXCLUDED.security_question_2,
+          security_answer_hash_2 = EXCLUDED.security_answer_hash_2,
+          security_answer_salt_2 = EXCLUDED.security_answer_salt_2,
+          recovery_email = EXCLUDED.recovery_email,
+          recovery_phone = EXCLUDED.recovery_phone,
+          is_active = 1`,
+        [
+          userId,
+          ownerEmail.toLowerCase(),
+          passwordHash,
+          salt,
+          ownerName.trim(),
+          phone,
+          question1.trim(),
+          answerHash1,
+          salt1,
+          question2.trim(),
+          answerHash2,
+          salt2,
+          recoveryEmail?.trim().toLowerCase() || null,
+          recoveryPhone?.trim() || null,
+        ]
+      );
+
+      // 4. User Roles
+      await pgClient.query(
+        `INSERT INTO user_roles (id, user_id, school_id, role_id, is_primary)
+          VALUES ($1, $2, $3, 'role_school_owner', 1)
+          ON CONFLICT (user_id, school_id, role_id) DO UPDATE SET is_primary = 1`,
+        [userRoleId, userId, schoolId]
+      );
+
+      // 5. School Subscriptions (with both amount_paid_kobo and amount_paid)
+      await pgClient.query(
+        `INSERT INTO school_subscriptions (id, school_id, plan_id, status, start_date, end_date, trial_end_date, amount_paid_kobo, amount_paid, notes)
+          VALUES ($1, $2, 'plan_trial', 'TRIAL', CURRENT_DATE, $3, $4, 0, 0, 'Self-registered school trial')
+          ON CONFLICT (id) DO NOTHING`,
+        [subId, schoolId, subEnd, subEnd]
+      );
+
+      // Verify all records committed
+      const vSch = await pgClient.query('SELECT id FROM schools WHERE id = $1', [schoolId]);
+      const vUsr = await pgClient.query('SELECT id FROM users WHERE id = $1', [userId]);
+      if (vSch.rows.length === 0 || vUsr.rows.length === 0) {
+        throw new Error('Verification of newly inserted school records in cloud database failed');
+      }
+
+      await pgClient.query('COMMIT');
+      markPgConnected();
+    } catch (pgErr: any) {
+      try {
+        await pgClient.query('ROLLBACK');
+      } catch {}
+      console.error('[Registration PG Error - Critical]', pgErr);
+      return res.status(500).json({
+        error: 'REGISTRATION_TRANSACTION_FAILED',
+        message: 'Failed to persist school account in authoritative database: ' + (pgErr?.message || 'Database transaction error'),
+      });
+    } finally {
+      if (pgClient) pgClient.release();
+    }
   }
 
+  // STEP 2: Replicate into local SQLite read-cache safely (ON CONFLICT DO UPDATE)
   try {
-    await pgClient.query('BEGIN');
-
-    // 1. Schools (Tenant)
-    await pgClient.query(
-      `INSERT INTO schools (id, name, slug, type, status, address, state, lga, phone, email, website, current_plan_id)
-        VALUES ($1, $2, $3, $4, 'TRIAL', $5, $6, $7, $8, $9, $10, 'plan_trial')
-        ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name, status = EXCLUDED.status, current_plan_id = 'plan_trial'`,
-      [schoolId, schoolName.trim(), slug, schoolType, address || '', state, lga, phone, schoolEmail.toLowerCase(), req.body.website || null]
-    );
-
-    // 2. School Settings
-    await pgClient.query(
-      `INSERT INTO school_settings (id, school_id, currency, currency_symbol, current_academic_session, current_term, payment_notification_email, payment_notification_sms, portal_subdomain)
-        VALUES ($1, $2, 'NGN', '₦', '2024/2025', '1st Term', $3, 0, $4)
-        ON CONFLICT (id) DO NOTHING`,
-      [settingsId, schoolId, schoolEmail.toLowerCase(), baseSlug]
-    );
-
-    // 3. User & Owner Profile
-    await pgClient.query(
-      `INSERT INTO users (
-        id, email, password_hash, salt, full_name, phone,
-        security_question_1, security_answer_hash_1, security_answer_salt_1,
-        security_question_2, security_answer_hash_2, security_answer_salt_2,
-        recovery_email, recovery_phone,
-        is_platform_admin, is_active
-      )
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, 0, 1)
-      ON CONFLICT (id) DO UPDATE SET
-        full_name = EXCLUDED.full_name,
-        security_question_1 = EXCLUDED.security_question_1,
-        security_answer_hash_1 = EXCLUDED.security_answer_hash_1,
-        security_answer_salt_1 = EXCLUDED.security_answer_salt_1,
-        security_question_2 = EXCLUDED.security_question_2,
-        security_answer_hash_2 = EXCLUDED.security_answer_hash_2,
-        security_answer_salt_2 = EXCLUDED.security_answer_salt_2,
-        recovery_email = EXCLUDED.recovery_email,
-        recovery_phone = EXCLUDED.recovery_phone,
-        is_active = 1`,
-      [
-        userId,
-        ownerEmail.toLowerCase(),
-        passwordHash,
-        salt,
-        ownerName.trim(),
-        phone,
-        question1.trim(),
-        answerHash1,
-        salt1,
-        question2.trim(),
-        answerHash2,
-        salt2,
-        recoveryEmail?.trim().toLowerCase() || null,
-        recoveryPhone?.trim() || null,
-      ]
-    );
-
-    // 4. User Roles
-    await pgClient.query(
-      `INSERT INTO user_roles (id, user_id, school_id, role_id, is_primary)
-        VALUES ($1, $2, $3, 'role_school_owner', 1)
-        ON CONFLICT (id) DO NOTHING`,
-      [userRoleId, userId, schoolId]
-    );
-
-    // 5. School Subscriptions
-    await pgClient.query(
-      `INSERT INTO school_subscriptions (id, school_id, plan_id, status, start_date, end_date, trial_end_date, amount_paid, notes)
-        VALUES ($1, $2, 'plan_trial', 'TRIAL', CURRENT_DATE, $3, $4, 0, 'Self-registered school trial')
-        ON CONFLICT (id) DO NOTHING`,
-      [subId, schoolId, subEnd, subEnd]
-    );
-
-    await pgClient.query('COMMIT');
-  } catch (pgErr: any) {
-    await pgClient.query('ROLLBACK');
-    pgClient.release();
-    console.error('[Registration PG Error - Critical]', pgErr);
-    return res.status(500).json({
-      error: 'REGISTRATION_TRANSACTION_FAILED',
-      message: 'Failed to persist school account in authoritative database: ' + (pgErr?.message || 'Database transaction error'),
-    });
-  } finally {
-    if (pgClient) pgClient.release();
-  }
-
-  // STEP 2: Replicate into local SQLite engine as read-cache
-  try {
-    db.prepare(`
+    cacheDb.prepare(`
       INSERT INTO schools (id, name, slug, type, status, address, state, lga, phone, email, website, current_plan_id)
       VALUES (?, ?, ?, ?, 'TRIAL', ?, ?, ?, ?, ?, ?, 'plan_trial')
+      ON CONFLICT(id) DO UPDATE SET
+        name = excluded.name,
+        slug = excluded.slug,
+        type = excluded.type,
+        status = excluded.status,
+        address = excluded.address,
+        state = excluded.state,
+        lga = excluded.lga,
+        phone = excluded.phone,
+        email = excluded.email,
+        website = excluded.website,
+        current_plan_id = excluded.current_plan_id
     `).run(
       schoolId, schoolName.trim(), slug, schoolType, address || '', state, lga, phone, schoolEmail.toLowerCase(), req.body.website || null
     );
-    db.prepare(`
+    cacheDb.prepare(`
       INSERT INTO school_settings (id, school_id, currency, currency_symbol, current_academic_session, current_term, payment_notification_email, payment_notification_sms, portal_subdomain)
       VALUES (?, ?, 'NGN', '₦', '2024/2025', '1st Term', ?, 0, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        currency = excluded.currency,
+        currency_symbol = excluded.currency_symbol,
+        current_academic_session = excluded.current_academic_session,
+        current_term = excluded.current_term,
+        payment_notification_email = excluded.payment_notification_email,
+        portal_subdomain = excluded.portal_subdomain
     `).run(settingsId, schoolId, schoolEmail.toLowerCase(), baseSlug);
-    db.prepare(`
+    cacheDb.prepare(`
       INSERT INTO users (
         id, email, password_hash, salt, full_name, phone,
         security_question_1, security_answer_hash_1, security_answer_salt_1,
@@ -365,18 +394,47 @@ apiRouter.post(['/v1/auth/register-school', '/v1/auth/register'], async (req, re
         is_platform_admin, is_active
       )
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 1)
+      ON CONFLICT(id) DO UPDATE SET
+        email = excluded.email,
+        password_hash = excluded.password_hash,
+        salt = excluded.salt,
+        full_name = excluded.full_name,
+        phone = excluded.phone,
+        security_question_1 = excluded.security_question_1,
+        security_answer_hash_1 = excluded.security_answer_hash_1,
+        security_answer_salt_1 = excluded.security_answer_salt_1,
+        security_question_2 = excluded.security_question_2,
+        security_answer_hash_2 = excluded.security_answer_hash_2,
+        security_answer_salt_2 = excluded.security_answer_salt_2,
+        recovery_email = excluded.recovery_email,
+        recovery_phone = excluded.recovery_phone,
+        is_platform_admin = excluded.is_platform_admin,
+        is_active = excluded.is_active
     `).run(
       userId, ownerEmail.toLowerCase(), passwordHash, salt, ownerName.trim(), phone,
       question1.trim(), answerHash1, salt1, question2.trim(), answerHash2, salt2,
       recoveryEmail?.trim().toLowerCase() || null, recoveryPhone?.trim() || null
     );
-    db.prepare(`
+    cacheDb.prepare(`
       INSERT INTO user_roles (id, user_id, school_id, role_id, is_primary)
       VALUES (?, ?, ?, 'role_school_owner', 1)
+      ON CONFLICT(id) DO UPDATE SET
+        user_id = excluded.user_id,
+        school_id = excluded.school_id,
+        role_id = excluded.role_id,
+        is_primary = excluded.is_primary
     `).run(userRoleId, userId, schoolId);
-    db.prepare(`
-      INSERT OR IGNORE INTO school_subscriptions (id, school_id, plan_id, status, start_date, end_date, trial_end_date, amount_paid, notes)
+    cacheDb.prepare(`
+      INSERT INTO school_subscriptions (id, school_id, plan_id, status, start_date, end_date, trial_end_date, amount_paid, notes)
       VALUES (?, ?, 'plan_trial', 'TRIAL', date('now'), ?, ?, 0, 'Self-registered school trial')
+      ON CONFLICT(id) DO UPDATE SET
+        school_id = excluded.school_id,
+        plan_id = excluded.plan_id,
+        status = excluded.status,
+        start_date = excluded.start_date,
+        end_date = excluded.end_date,
+        trial_end_date = excluded.trial_end_date,
+        amount_paid = excluded.amount_paid
     `).run(subId, schoolId, subEnd, subEnd);
   } catch (sqErr) {
     console.warn('[Registration Local Cache Notice]', sqErr);
@@ -384,7 +442,16 @@ apiRouter.post(['/v1/auth/register-school', '/v1/auth/register'], async (req, re
 
   // STEP 3: Create Session Awaited in Neon PG
   const clientIp = req.ip || (req.headers['x-forwarded-for'] as string) || '127.0.0.1';
-  const token = await createSessionAsync(userId, schoolId, clientIp, req.headers['user-agent']);
+  let token: string;
+  try {
+    token = await createSessionAsync(userId, schoolId, clientIp, req.headers['user-agent']);
+  } catch (sessErr: any) {
+    console.error('[Registration Session Creation Error]', sessErr?.message);
+    return res.status(503).json({
+      error: 'SESSION_PERSISTENCE_FAILED',
+      message: 'School registered, but session creation failed against database. Please log in.',
+    });
+  }
 
   // STEP 4: Record Audit Log
   logAudit({
@@ -422,25 +489,25 @@ apiRouter.post(['/v1/auth/register-school', '/v1/auth/register'], async (req, re
     payment_notification_email: schoolEmail.toLowerCase(),
   };
 
-    return res.status(201).json({
-      success: true,
-      message: 'School tenant and proprietor account registered successfully!',
-      token,
-      user: {
-        id: userId,
-        email: ownerEmail.toLowerCase(),
-        full_name: ownerName.trim(),
-        is_platform_admin: 0,
-      },
-      school: schoolRecord,
-      settings: settingsRecord,
-      activeSchoolId: schoolId,
-      activeRole: {
-        role_name: 'SCHOOL_OWNER',
-        role_display_name: 'School Proprietor / Owner',
-        scope: 'SCHOOL',
-      },
-    });
+  return res.status(201).json({
+    success: true,
+    message: 'School tenant and proprietor account registered successfully!',
+    token,
+    user: {
+      id: userId,
+      email: ownerEmail.toLowerCase(),
+      full_name: ownerName.trim(),
+      is_platform_admin: 0,
+    },
+    school: schoolRecord,
+    settings: settingsRecord,
+    activeSchoolId: schoolId,
+    activeRole: {
+      role_name: 'SCHOOL_OWNER',
+      role_display_name: 'School Proprietor / Owner',
+      scope: 'SCHOOL',
+    },
+  });
 });
 
 // POST /api/v1/auth/login
@@ -453,44 +520,100 @@ apiRouter.post('/v1/auth/login', async (req, res) => {
 
   const normalizedEmail = (email || '').trim().toLowerCase();
 
-  // 1. Direct Authoritative Neon PostgreSQL lookup first
+  // 1. Direct Authoritative Neon PostgreSQL lookup first whenever pool is configured
   let user: UserRecord | undefined = undefined;
+  let pgLookupFailed = false;
   const pgPool = getPgPool();
-  if (pgPool && isPgConnected()) {
+  if (pgPool) {
     try {
-      const pgUserRes = await pgPool.query(
-        'SELECT * FROM users WHERE LOWER(email) = $1 AND is_active = 1',
+      // 1a. Direct user email match
+      const pgUserRes = await queryPg(
+        'SELECT * FROM users WHERE LOWER(email) = $1 AND is_active = 1 LIMIT 1',
         [normalizedEmail]
       );
       if (pgUserRes.rows.length > 0) {
-        const foundUser = pgUserRes.rows[0] as any;
-        user = foundUser;
-        // Keep local SQLite in sync
-        try {
-          db.prepare(`
-            INSERT OR REPLACE INTO users (id, email, password_hash, salt, full_name, phone, is_platform_admin, is_active, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-          `).run(foundUser.id, foundUser.email, foundUser.password_hash, foundUser.salt, foundUser.full_name, foundUser.phone, foundUser.is_platform_admin, foundUser.is_active, foundUser.created_at || new Date().toISOString());
-        } catch {}
-      } else if (normalizedEmail === 'superadmin@schoolpay.ng' || normalizedEmail === 'schoolpay28@gmail.com') {
-        const saRes = await pgPool.query(
-          "SELECT * FROM users WHERE (LOWER(email) = 'schoolpay28@gmail.com' OR LOWER(email) = 'superadmin@schoolpay.ng') AND is_active = 1 LIMIT 1"
+        user = pgUserRes.rows[0] as any;
+      } else {
+        // 1b. Check if email matches official school email (resolve to primary school owner)
+        const schoolOwnerRes = await queryPg(
+          `SELECT u.* FROM schools s
+           JOIN user_roles ur ON ur.school_id = s.id AND ur.role_id = 'role_school_owner'
+           JOIN users u ON u.id = ur.user_id
+           WHERE LOWER(s.email) = $1 AND u.is_active = 1
+           ORDER BY ur.is_primary DESC, ur.created_at ASC
+           LIMIT 1`,
+          [normalizedEmail]
         );
-        if (saRes.rows.length > 0) user = saRes.rows[0] as any;
+        if (schoolOwnerRes.rows.length > 0) {
+          user = schoolOwnerRes.rows[0] as any;
+        } else if (normalizedEmail === 'superadmin@schoolpay.ng' || normalizedEmail === 'schoolpay28@gmail.com') {
+          const saRes = await queryPg(
+            "SELECT * FROM users WHERE (LOWER(email) = 'schoolpay28@gmail.com' OR LOWER(email) = 'superadmin@schoolpay.ng') AND is_active = 1 LIMIT 1"
+          );
+          if (saRes.rows.length > 0) user = saRes.rows[0] as any;
+        }
       }
-    } catch (pgErr) {
-      console.warn('[PostgreSQL Login Query Notice]', (pgErr as any)?.message);
+
+      // Sync user safely into cacheDb using ON CONFLICT DO UPDATE (never INSERT OR REPLACE)
+      if (user) {
+        try {
+          cacheDb.prepare(`
+            INSERT INTO users (id, email, password_hash, salt, full_name, phone, is_platform_admin, is_active, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+              email = excluded.email,
+              password_hash = excluded.password_hash,
+              salt = excluded.salt,
+              full_name = excluded.full_name,
+              phone = excluded.phone,
+              is_platform_admin = excluded.is_platform_admin,
+              is_active = excluded.is_active
+          `).run(
+            user.id,
+            user.email,
+            user.password_hash,
+            user.salt,
+            user.full_name,
+            user.phone,
+            user.is_platform_admin,
+            user.is_active,
+            user.created_at || new Date().toISOString()
+          );
+        } catch {}
+      }
+    } catch (pgErr: any) {
+      console.warn('[PostgreSQL Login Query Notice]', pgErr?.message);
+      pgLookupFailed = true;
     }
   }
 
   // 2. Secondary fallback lookup: Local SQLite cache
   if (!user) {
-    user = db.prepare('SELECT * FROM users WHERE LOWER(email) = ? AND is_active = 1').get(normalizedEmail) as UserRecord | undefined;
+    user = cacheDb.prepare('SELECT * FROM users WHERE LOWER(email) = ? AND is_active = 1').get(normalizedEmail) as UserRecord | undefined;
+    if (!user) {
+      // Check if official school email in local cache
+      const localSchoolOwner = cacheDb.prepare(`
+        SELECT u.* FROM schools s
+        JOIN user_roles ur ON ur.school_id = s.id AND ur.role_id = 'role_school_owner'
+        JOIN users u ON u.id = ur.user_id
+        WHERE LOWER(s.email) = ? AND u.is_active = 1
+        ORDER BY ur.is_primary DESC
+        LIMIT 1
+      `).get(normalizedEmail) as UserRecord | undefined;
+      if (localSchoolOwner) user = localSchoolOwner;
+    }
     if (!user && (normalizedEmail === 'superadmin@schoolpay.ng' || normalizedEmail === 'schoolpay28@gmail.com')) {
-      user = db.prepare("SELECT * FROM users WHERE (LOWER(email) = 'schoolpay28@gmail.com' OR LOWER(email) = 'superadmin@schoolpay.ng') AND is_active = 1").get() as UserRecord | undefined;
+      user = cacheDb.prepare("SELECT * FROM users WHERE (LOWER(email) = 'schoolpay28@gmail.com' OR LOWER(email) = 'superadmin@schoolpay.ng') AND is_active = 1").get() as UserRecord | undefined;
     }
   }
+
   if (!user) {
+    if (pgLookupFailed) {
+      return res.status(503).json({
+        error: 'DATABASE_UNAVAILABLE',
+        message: 'Authoritative database connection is recovering. Please retry in a few moments.',
+      });
+    }
     return res.status(401).json({ error: 'INVALID_CREDENTIALS', message: 'Invalid email address or password.' });
   }
 
@@ -499,11 +622,11 @@ apiRouter.post('/v1/auth/login', async (req, res) => {
     return res.status(401).json({ error: 'INVALID_CREDENTIALS', message: 'Invalid email address or password.' });
   }
 
-  // Fetch all user roles and schools (authoritative from Neon PostgreSQL if connected)
+  // Fetch all user roles and schools (authoritative from Neon PostgreSQL if configured)
   let roles: any[] = [];
-  if (pgPool && isPgConnected()) {
+  if (pgPool) {
     try {
-      const pgRolesRes = await pgPool.query(
+      const pgRolesRes = await queryPg(
         `SELECT ur.*, r.name as role_name, r.display_name as role_display_name, r.scope as role_scope,
                 s.name as school_name, s.status as school_status, s.slug as school_slug
          FROM user_roles ur
@@ -515,12 +638,27 @@ apiRouter.post('/v1/auth/login', async (req, res) => {
       );
       if (pgRolesRes.rows.length > 0) {
         roles = pgRolesRes.rows;
-        // Keep SQLite cache in sync
+        // Keep SQLite cache in sync safely
         for (const r of roles) {
           try {
-            db.prepare(`
-              INSERT OR REPLACE INTO user_roles (id, user_id, school_id, role_id, is_primary)
+            if (r.school_id && r.school_name) {
+              cacheDb.prepare(`
+                INSERT INTO schools (id, name, slug, status)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                  name = excluded.name,
+                  slug = excluded.slug,
+                  status = excluded.status
+              `).run(r.school_id, r.school_name, r.school_slug || 'school', r.school_status || 'TRIAL');
+            }
+            cacheDb.prepare(`
+              INSERT INTO user_roles (id, user_id, school_id, role_id, is_primary)
               VALUES (?, ?, ?, ?, ?)
+              ON CONFLICT(id) DO UPDATE SET
+                user_id = excluded.user_id,
+                school_id = excluded.school_id,
+                role_id = excluded.role_id,
+                is_primary = excluded.is_primary
             `).run(r.id, r.user_id, r.school_id, r.role_id, r.is_primary ? 1 : 0);
           } catch {}
         }
@@ -532,7 +670,7 @@ apiRouter.post('/v1/auth/login', async (req, res) => {
 
   // Fallback to SQLite cache if roles not loaded from PG
   if (roles.length === 0) {
-    roles = db.prepare(`
+    roles = cacheDb.prepare(`
       SELECT ur.*, r.name as role_name, r.display_name as role_display_name, r.scope as role_scope,
              s.name as school_name, s.status as school_status, s.slug as school_slug
       FROM user_roles ur
@@ -568,27 +706,36 @@ apiRouter.post('/v1/auth/login', async (req, res) => {
   }
 
   const clientIp = req.ip || (req.headers['x-forwarded-for'] as string) || '127.0.0.1';
-  const token = await createSessionAsync(user.id, activeSchoolId, clientIp, req.headers['user-agent']);
+  let token: string;
+  try {
+    token = await createSessionAsync(user.id, activeSchoolId, clientIp, req.headers['user-agent']);
+  } catch (sessErr: any) {
+    console.error('[Login Session Creation Error]', sessErr?.message);
+    return res.status(503).json({
+      error: 'SESSION_CREATE_FAILED',
+      message: 'Failed to create authenticated session in database. Please try again in a moment.',
+    });
+  }
 
   // Pre-load active school and settings authoritatively from Neon PostgreSQL
   let activeSchool = null;
   let activeSettings = null;
   if (activeSchoolId) {
-    if (pgPool && isPgConnected()) {
+    if (pgPool) {
       try {
-        const schRes = await pgPool.query('SELECT * FROM schools WHERE id = $1', [activeSchoolId]);
+        const schRes = await queryPg('SELECT * FROM schools WHERE id = $1', [activeSchoolId]);
         if (schRes.rows.length > 0) activeSchool = schRes.rows[0];
-        const setRes = await pgPool.query('SELECT * FROM school_settings WHERE school_id = $1', [activeSchoolId]);
+        const setRes = await queryPg('SELECT * FROM school_settings WHERE school_id = $1', [activeSchoolId]);
         if (setRes.rows.length > 0) activeSettings = setRes.rows[0];
       } catch (err: any) {
         console.warn('[Login School Hydration PG Notice]', err?.message);
       }
     }
     if (!activeSchool) {
-      activeSchool = db.prepare('SELECT * FROM schools WHERE id = ?').get(activeSchoolId) || null;
+      activeSchool = cacheDb.prepare('SELECT * FROM schools WHERE id = ?').get(activeSchoolId) || null;
     }
     if (!activeSettings) {
-      activeSettings = db.prepare('SELECT * FROM school_settings WHERE school_id = ?').get(activeSchoolId) || null;
+      activeSettings = cacheDb.prepare('SELECT * FROM school_settings WHERE school_id = ?').get(activeSchoolId) || null;
     }
   }
 
@@ -625,12 +772,12 @@ apiRouter.post('/v1/auth/login', async (req, res) => {
 });
 
 // POST /api/v1/auth/logout
-apiRouter.post('/v1/auth/logout', requireAuth, (req: AuthenticatedRequest, res) => {
+apiRouter.post('/v1/auth/logout', requireAuth, async (req: AuthenticatedRequest, res) => {
   const authHeader = req.headers.authorization;
   const token = authHeader && authHeader.startsWith('Bearer ') ? authHeader.substring(7) : (req.headers['x-session-token'] as string);
 
   if (token) {
-    destroySession(token);
+    await destroySessionAsync(token);
   }
 
   if (req.user) {
@@ -649,7 +796,7 @@ apiRouter.post('/v1/auth/logout', requireAuth, (req: AuthenticatedRequest, res) 
 });
 
 // POST /api/v1/auth/exit-impersonation
-apiRouter.post('/v1/auth/exit-impersonation', requireAuth, (req: AuthenticatedRequest, res) => {
+apiRouter.post('/v1/auth/exit-impersonation', requireAuth, async (req: AuthenticatedRequest, res) => {
   const authHeader = req.headers.authorization;
   let token: string | undefined;
   if (authHeader && authHeader.startsWith('Bearer ')) {
@@ -659,7 +806,7 @@ apiRouter.post('/v1/auth/exit-impersonation', requireAuth, (req: AuthenticatedRe
   }
 
   if (token) {
-    destroySession(token);
+    await destroySessionAsync(token);
     logAudit({
       actorId: req.user?.id,
       actorEmail: req.user?.email,
@@ -691,23 +838,56 @@ apiRouter.get('/v1/auth/me', requireAuth, async (req: AuthenticatedRequest, res)
   let activeSettings: any = null;
 
   if (effectiveSchoolId) {
-    const { getPgPool } = await import('./db.ts');
     const pool = getPgPool();
     if (pool) {
       try {
-        const schRes = await pool.query('SELECT * FROM schools WHERE id = $1', [effectiveSchoolId]);
-        if (schRes.rows.length > 0) activeSchool = schRes.rows[0];
-        const setRes = await pool.query('SELECT * FROM school_settings WHERE school_id = $1', [effectiveSchoolId]);
-        if (setRes.rows.length > 0) activeSettings = setRes.rows[0];
+        const schRes = await queryPg('SELECT * FROM schools WHERE id = $1', [effectiveSchoolId]);
+        if (schRes.rows.length > 0) {
+          activeSchool = schRes.rows[0];
+          // Sync into cacheDb
+          try {
+            cacheDb.prepare(`
+              INSERT INTO schools (id, name, slug, status, type, address, state, lga, phone, email, website, current_plan_id)
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              ON CONFLICT(id) DO UPDATE SET
+                name = excluded.name,
+                slug = excluded.slug,
+                status = excluded.status,
+                current_plan_id = excluded.current_plan_id
+            `).run(
+              activeSchool.id, activeSchool.name, activeSchool.slug, activeSchool.status,
+              activeSchool.type || 'MIXED', activeSchool.address || '', activeSchool.state || '',
+              activeSchool.lga || '', activeSchool.phone || '', activeSchool.email || '',
+              activeSchool.website || null, activeSchool.current_plan_id || 'plan_trial'
+            );
+          } catch {}
+        }
+        const setRes = await queryPg('SELECT * FROM school_settings WHERE school_id = $1', [effectiveSchoolId]);
+        if (setRes.rows.length > 0) {
+          activeSettings = setRes.rows[0];
+          try {
+            cacheDb.prepare(`
+              INSERT INTO school_settings (id, school_id, currency, currency_symbol, current_academic_session, current_term)
+              VALUES (?, ?, ?, ?, ?, ?)
+              ON CONFLICT(id) DO UPDATE SET
+                current_academic_session = excluded.current_academic_session,
+                current_term = excluded.current_term
+            `).run(
+              activeSettings.id, activeSettings.school_id, activeSettings.currency || 'NGN',
+              activeSettings.currency_symbol || '₦', activeSettings.current_academic_session || '2024/2025',
+              activeSettings.current_term || '1st Term'
+            );
+          } catch {}
+        }
       } catch (err: any) {
         console.warn('[/v1/auth/me Neon PG notice]', err?.message);
       }
     }
     if (!activeSchool) {
-      activeSchool = db.prepare('SELECT * FROM schools WHERE id = ?').get(effectiveSchoolId);
+      activeSchool = cacheDb.prepare('SELECT * FROM schools WHERE id = ?').get(effectiveSchoolId);
     }
     if (!activeSettings) {
-      activeSettings = db.prepare('SELECT * FROM school_settings WHERE school_id = ?').get(effectiveSchoolId);
+      activeSettings = cacheDb.prepare('SELECT * FROM school_settings WHERE school_id = ?').get(effectiveSchoolId);
     }
   }
 
@@ -728,14 +908,41 @@ apiRouter.get('/v1/auth/me', requireAuth, async (req: AuthenticatedRequest, res)
 });
 
 // POST /api/v1/auth/forgot-password
-apiRouter.post('/v1/auth/forgot-password', (req, res) => {
+apiRouter.post('/v1/auth/forgot-password', async (req, res) => {
   const { email } = req.body;
   if (!email) {
     return res.status(400).json({ error: 'MISSING_EMAIL', message: 'Email address is required' });
   }
 
   const normalizedEmail = (email || '').trim().toLowerCase();
-  const user = db.prepare('SELECT id, email, full_name FROM users WHERE LOWER(email) = ? AND is_active = 1').get(normalizedEmail) as any;
+  let user: any = null;
+
+  const pool = getPgPool();
+  if (pool) {
+    try {
+      const uRes = await queryPg('SELECT id, email, full_name FROM users WHERE LOWER(email) = $1 AND is_active = 1', [normalizedEmail]);
+      if (uRes.rows.length > 0) {
+        user = uRes.rows[0];
+      } else {
+        const schRes = await queryPg(
+          `SELECT u.id, u.email, u.full_name FROM schools s
+           JOIN user_roles ur ON ur.school_id = s.id AND ur.role_id = 'role_school_owner'
+           JOIN users u ON u.id = ur.user_id
+           WHERE LOWER(s.email) = $1 AND u.is_active = 1
+           ORDER BY ur.is_primary DESC LIMIT 1`,
+          [normalizedEmail]
+        );
+        if (schRes.rows.length > 0) user = schRes.rows[0];
+      }
+    } catch (e: any) {
+      console.warn('[Forgot Password PG Notice]', e.message);
+    }
+  }
+
+  if (!user) {
+    user = cacheDb.prepare('SELECT id, email, full_name FROM users WHERE LOWER(email) = ? AND is_active = 1').get(normalizedEmail) as any;
+  }
+
   if (!user) {
     // For security, don't leak user existence
     return res.json({
@@ -748,10 +955,24 @@ apiRouter.post('/v1/auth/forgot-password', (req, res) => {
   const resetId = 'pr_' + crypto.randomUUID();
   const expiresAt = new Date(Date.now() + 60 * 60 * 1000).toISOString(); // 1 hour
 
-  db.prepare(`
-    INSERT INTO password_resets (id, email, token, expires_at)
-    VALUES (?, ?, ?, ?)
-  `).run(resetId, user.email, resetToken, expiresAt);
+  if (pool) {
+    try {
+      await queryPg(
+        `INSERT INTO password_resets (id, user_id, email, token, expires_at)
+         VALUES ($1, $2, $3, $4, $5)`,
+        [resetId, user.id, user.email, resetToken, expiresAt]
+      );
+    } catch (pgErr: any) {
+      console.warn('[PG password_resets insert notice]', pgErr.message);
+    }
+  }
+
+  try {
+    cacheDb.prepare(`
+      INSERT INTO password_resets (id, user_id, email, token, expires_at)
+      VALUES (?, ?, ?, ?, ?)
+    `).run(resetId, user.id, user.email, resetToken, expiresAt);
+  } catch {}
 
   logAudit({
     actorId: user.id,
@@ -765,12 +986,12 @@ apiRouter.post('/v1/auth/forgot-password', (req, res) => {
   return res.json({
     success: true,
     message: 'Password reset token generated successfully. In production, this is sent to the registered email address.',
-    debugToken: resetToken, // Provided in development for instantaneous testing
+    debugToken: resetToken,
   });
 });
 
 // POST /api/v1/auth/reset-password
-apiRouter.post('/v1/auth/reset-password', (req, res) => {
+apiRouter.post('/v1/auth/reset-password', async (req, res) => {
   const { token, newPassword } = req.body;
   if (!token || !newPassword) {
     return res.status(400).json({ error: 'MISSING_FIELDS', message: 'Reset token and new password are required' });
@@ -780,9 +1001,25 @@ apiRouter.post('/v1/auth/reset-password', (req, res) => {
     return res.status(400).json({ error: 'WEAK_PASSWORD', message: 'Password must be at least 8 characters long.' });
   }
 
-  const resetRecord = db.prepare(`
-    SELECT * FROM password_resets WHERE token = ? AND used_at IS NULL AND expires_at > datetime('now')
-  `).get(token) as any;
+  let resetRecord: any = null;
+  const pool = getPgPool();
+  if (pool) {
+    try {
+      const resPg = await queryPg(
+        'SELECT * FROM password_resets WHERE token = $1 AND used_at IS NULL AND expires_at > CURRENT_TIMESTAMP',
+        [token]
+      );
+      if (resPg.rows.length > 0) resetRecord = resPg.rows[0];
+    } catch (e: any) {
+      console.warn('[Reset Password PG Notice]', e.message);
+    }
+  }
+
+  if (!resetRecord) {
+    resetRecord = cacheDb.prepare(`
+      SELECT * FROM password_resets WHERE token = ? AND used_at IS NULL AND expires_at > datetime('now')
+    `).get(token) as any;
+  }
 
   if (!resetRecord) {
     return res.status(400).json({
@@ -794,22 +1031,37 @@ apiRouter.post('/v1/auth/reset-password', (req, res) => {
   const salt = generateSalt();
   const passwordHash = hashPassword(newPassword, salt);
 
-  db.exec('BEGIN TRANSACTION;');
-  db.prepare(`
-    UPDATE users SET password_hash = ?, salt = ?, updated_at = CURRENT_TIMESTAMP WHERE email = ?
-  `).run(passwordHash, salt, resetRecord.email);
-
-  db.prepare(`
-    UPDATE password_resets SET used_at = CURRENT_TIMESTAMP WHERE id = ?
-  `).run(resetRecord.id);
-
-  // Invalidate all existing sessions for this user for security
-  const user = db.prepare('SELECT id FROM users WHERE email = ?').get(resetRecord.email) as any;
-  if (user) {
-    db.prepare('DELETE FROM sessions WHERE user_id = ?').run(user.id);
+  // Authoritative update in Neon PG first
+  if (pool) {
+    try {
+      await queryPg(
+        'UPDATE users SET password_hash = $1, salt = $2, updated_at = CURRENT_TIMESTAMP WHERE email = $3',
+        [passwordHash, salt, resetRecord.email]
+      );
+      await queryPg(
+        'UPDATE password_resets SET used_at = CURRENT_TIMESTAMP WHERE id = $1',
+        [resetRecord.id]
+      );
+      if (resetRecord.user_id) {
+        await queryPg('DELETE FROM sessions WHERE user_id = $1', [resetRecord.user_id]);
+      }
+    } catch (pgErr: any) {
+      console.error('[Reset Password PG Error]', pgErr.message);
+      return res.status(500).json({ error: 'DATABASE_ERROR', message: 'Failed to update credentials in cloud database.' });
+    }
   }
 
-  db.exec('COMMIT;');
+  // Sync cacheDb
+  try {
+    cacheDb.prepare('UPDATE users SET password_hash = ?, salt = ?, updated_at = CURRENT_TIMESTAMP WHERE email = ?')
+      .run(passwordHash, salt, resetRecord.email);
+    cacheDb.prepare('UPDATE password_resets SET used_at = CURRENT_TIMESTAMP WHERE id = ?')
+      .run(resetRecord.id);
+    const u = cacheDb.prepare('SELECT id FROM users WHERE email = ?').get(resetRecord.email) as any;
+    if (u) {
+      cacheDb.prepare('DELETE FROM sessions WHERE user_id = ?').run(u.id);
+    }
+  } catch {}
 
   logAudit({
     actorEmail: resetRecord.email,
@@ -829,10 +1081,29 @@ apiRouter.post('/v1/auth/reset-password', (req, res) => {
 // ==============================================================================
 
 // GET /api/v1/school/profile
-apiRouter.get('/v1/school/profile', requireAuth, requireTenant, (req: AuthenticatedRequest, res) => {
+apiRouter.get('/v1/school/profile', requireAuth, requireTenant, async (req: AuthenticatedRequest, res) => {
   const schoolId = req.targetSchoolId!;
-  const school = db.prepare('SELECT * FROM schools WHERE id = ?').get(schoolId);
-  const settings = db.prepare('SELECT * FROM school_settings WHERE school_id = ?').get(schoolId);
+  let school: any = null;
+  let settings: any = null;
+
+  const pool = getPgPool();
+  if (pool) {
+    try {
+      const schRes = await queryPg('SELECT * FROM schools WHERE id = $1', [schoolId]);
+      if (schRes.rows.length > 0) school = schRes.rows[0];
+      const setRes = await queryPg('SELECT * FROM school_settings WHERE school_id = $1', [schoolId]);
+      if (setRes.rows.length > 0) settings = setRes.rows[0];
+    } catch (e: any) {
+      console.warn('[GET /v1/school/profile PG Notice]', e.message);
+    }
+  }
+
+  if (!school) {
+    school = cacheDb.prepare('SELECT * FROM schools WHERE id = ?').get(schoolId);
+  }
+  if (!settings) {
+    settings = cacheDb.prepare('SELECT * FROM school_settings WHERE school_id = ?').get(schoolId);
+  }
 
   return res.json({ success: true, school, settings });
 });
@@ -843,7 +1114,7 @@ apiRouter.put(
   requireAuth,
   requireTenant,
   requireRole(['SCHOOL_OWNER', 'SCHOOL_ADMIN']),
-  (req: AuthenticatedRequest, res) => {
+  async (req: AuthenticatedRequest, res) => {
     const schoolId = req.targetSchoolId!;
     const { name, address, state, lga, phone, email, website, type } = req.body;
 
@@ -851,13 +1122,21 @@ apiRouter.put(
       return res.status(400).json({ error: 'MISSING_FIELDS', message: 'Name, phone, email, state, and LGA are required.' });
     }
 
-    // Check email uniqueness if changed
-    const existing = db.prepare('SELECT id FROM schools WHERE email = ? AND id != ?').get(email.toLowerCase(), schoolId);
-    if (existing) {
-      return res.status(409).json({ error: 'EMAIL_IN_USE', message: 'This email is already registered to another school.' });
+    const pool = getPgPool();
+    if (pool) {
+      const dup = await queryPg('SELECT id FROM schools WHERE LOWER(email) = $1 AND id != $2', [email.toLowerCase(), schoolId]);
+      if (dup.rows.length > 0) {
+        return res.status(409).json({ error: 'EMAIL_IN_USE', message: 'This email is already registered to another school.' });
+      }
+      await queryPg(
+        `UPDATE schools
+         SET name = $1, address = $2, state = $3, lga = $4, phone = $5, email = $6, website = $7, type = COALESCE($8, type), updated_at = CURRENT_TIMESTAMP
+         WHERE id = $9`,
+        [name.trim(), address || '', state, lga, phone, email.toLowerCase(), website || null, type || null, schoolId]
+      );
     }
 
-    db.prepare(`
+    cacheDb.prepare(`
       UPDATE schools
       SET name = ?, address = ?, state = ?, lga = ?, phone = ?, email = ?, website = ?, type = COALESCE(?, type), updated_at = CURRENT_TIMESTAMP
       WHERE id = ?
@@ -874,15 +1153,32 @@ apiRouter.put(
       metadata: { name, state, lga, phone },
     });
 
-    const updated = db.prepare('SELECT * FROM schools WHERE id = ?').get(schoolId);
+    let updated: any = null;
+    if (pool) {
+      const uRes = await queryPg('SELECT * FROM schools WHERE id = $1', [schoolId]);
+      if (uRes.rows.length > 0) updated = uRes.rows[0];
+    }
+    if (!updated) {
+      updated = cacheDb.prepare('SELECT * FROM schools WHERE id = ?').get(schoolId);
+    }
     return res.json({ success: true, message: 'School profile updated successfully', school: updated });
   }
 );
 
 // GET /api/v1/school/settings
-apiRouter.get('/v1/school/settings', requireAuth, requireTenant, (req: AuthenticatedRequest, res) => {
+apiRouter.get('/v1/school/settings', requireAuth, requireTenant, async (req: AuthenticatedRequest, res) => {
   const schoolId = req.targetSchoolId!;
-  const settings = db.prepare('SELECT * FROM school_settings WHERE school_id = ?').get(schoolId);
+  let settings: any = null;
+  const pool = getPgPool();
+  if (pool) {
+    try {
+      const setRes = await queryPg('SELECT * FROM school_settings WHERE school_id = $1', [schoolId]);
+      if (setRes.rows.length > 0) settings = setRes.rows[0];
+    } catch {}
+  }
+  if (!settings) {
+    settings = cacheDb.prepare('SELECT * FROM school_settings WHERE school_id = ?').get(schoolId);
+  }
   return res.json({ success: true, settings });
 });
 
@@ -902,7 +1198,29 @@ apiRouter.put(
       allow_partial_payments,
     } = req.body;
 
-    db.prepare(`
+    const pool = getPgPool();
+    if (pool) {
+      await queryPg(
+        `UPDATE school_settings
+         SET current_academic_session = $1,
+             current_term = $2,
+             payment_notification_email = $3,
+             payment_notification_sms = $4,
+             allow_partial_payments = $5,
+             updated_at = CURRENT_TIMESTAMP
+         WHERE school_id = $6`,
+        [
+          current_academic_session || '2024/2025',
+          current_term || '1st Term',
+          payment_notification_email || null,
+          payment_notification_sms ? 1 : 0,
+          allow_partial_payments !== undefined ? (allow_partial_payments ? 1 : 0) : 1,
+          schoolId
+        ]
+      );
+    }
+
+    cacheDb.prepare(`
       UPDATE school_settings
       SET current_academic_session = ?,
           current_term = ?,
@@ -931,34 +1249,76 @@ apiRouter.put(
       metadata: { current_academic_session, current_term },
     });
 
-    const settings = db.prepare('SELECT * FROM school_settings WHERE school_id = ?').get(schoolId);
+    let settings: any = null;
+    if (pool) {
+      const sRes = await queryPg('SELECT * FROM school_settings WHERE school_id = $1', [schoolId]);
+      if (sRes.rows.length > 0) settings = sRes.rows[0];
+    }
+    if (!settings) {
+      settings = cacheDb.prepare('SELECT * FROM school_settings WHERE school_id = ?').get(schoolId);
+    }
     return res.json({ success: true, message: 'School settings saved', settings });
   }
 );
 
-// ==============================================================================
-// 2. TENANT-PROTECTED SCHOOL MANAGEMENT ROUTES (STEP 2)
-// ==============================================================================
-
 // GET /api/v1/school/stats (Tenant-scoped operational & demographic statistics)
-apiRouter.get('/v1/school/stats', requireAuth, requireTenant, (req: AuthenticatedRequest, res) => {
+apiRouter.get('/v1/school/stats', requireAuth, requireTenant, async (req: AuthenticatedRequest, res) => {
   const schoolId = req.targetSchoolId!;
+  const pool = getPgPool();
 
-  const totalStudents = (db.prepare('SELECT COUNT(*) as c FROM students WHERE school_id = ?').get(schoolId) as any)?.c || 0;
-  const activeStudents = (db.prepare("SELECT COUNT(*) as c FROM students WHERE school_id = ? AND student_status = 'ACTIVE'").get(schoolId) as any)?.c || 0;
-  const totalClasses = (db.prepare('SELECT COUNT(*) as c FROM classes WHERE school_id = ?').get(schoolId) as any)?.c || 0;
-  const totalStaff = (db.prepare('SELECT COUNT(*) as c FROM staff WHERE school_id = ?').get(schoolId) as any)?.c || 0;
-  const totalParents = (db.prepare('SELECT COUNT(*) as c FROM parents WHERE school_id = ?').get(schoolId) as any)?.c || 0;
+  if (pool) {
+    try {
+      const totStu = (await queryPg('SELECT COUNT(*) as c FROM students WHERE school_id = $1 AND (is_deleted = 0 OR is_deleted IS NULL)', [schoolId])).rows[0]?.c || 0;
+      const actStu = (await queryPg("SELECT COUNT(*) as c FROM students WHERE school_id = $1 AND student_status = 'ACTIVE' AND (is_deleted = 0 OR is_deleted IS NULL)", [schoolId])).rows[0]?.c || 0;
+      const totCls = (await queryPg('SELECT COUNT(*) as c FROM classes WHERE school_id = $1 AND (is_deleted = 0 OR is_deleted IS NULL)', [schoolId])).rows[0]?.c || 0;
+      const totStf = (await queryPg('SELECT COUNT(*) as c FROM staff WHERE school_id = $1 AND (is_deleted = 0 OR is_deleted IS NULL)', [schoolId])).rows[0]?.c || 0;
+      const totPar = (await queryPg('SELECT COUNT(*) as c FROM parents WHERE school_id = $1 AND (is_deleted = 0 OR is_deleted IS NULL)', [schoolId])).rows[0]?.c || 0;
 
-  const activeSessionRow = db.prepare("SELECT name FROM academic_sessions WHERE school_id = ? AND status = 'ACTIVE' LIMIT 1").get(schoolId) as any;
-  const activeTermRow = db.prepare("SELECT name FROM terms WHERE school_id = ? AND status = 'ACTIVE' LIMIT 1").get(schoolId) as any;
+      const actSes = (await queryPg("SELECT name FROM academic_sessions WHERE school_id = $1 AND status = 'ACTIVE' LIMIT 1", [schoolId])).rows[0];
+      const actTrm = (await queryPg("SELECT name FROM terms WHERE school_id = $1 AND status = 'ACTIVE' LIMIT 1", [schoolId])).rows[0];
+      const setRow = (await queryPg('SELECT current_academic_session, current_term FROM school_settings WHERE school_id = $1', [schoolId])).rows[0];
 
-  const settings = db.prepare('SELECT current_academic_session, current_term FROM school_settings WHERE school_id = ?').get(schoolId) as any;
+      const recStu = (await queryPg(`
+        SELECT id, admission_number, full_name, class_name, student_status, created_at
+        FROM students
+        WHERE school_id = $1 AND (is_deleted = 0 OR is_deleted IS NULL)
+        ORDER BY created_at DESC
+        LIMIT 5
+      `, [schoolId])).rows;
 
-  const recentStudents = db.prepare(`
+      return res.json({
+        success: true,
+        stats: {
+          totalStudents: Number(totStu),
+          activeStudents: Number(actStu),
+          totalClasses: Number(totCls),
+          totalStaff: Number(totStf),
+          totalParents: Number(totPar),
+          currentAcademicSession: actSes?.name || setRow?.current_academic_session || '2024/2025',
+          currentTerm: actTrm?.name || setRow?.current_term || '1st Term',
+          recentStudents: recStu,
+        },
+      });
+    } catch (e: any) {
+      console.warn('[Stats PG Notice]', e.message);
+    }
+  }
+
+  // Fallback to SQLite cache
+  const totalStudents = (cacheDb.prepare('SELECT COUNT(*) as c FROM students WHERE school_id = ? AND (is_deleted = 0 OR is_deleted IS NULL)').get(schoolId) as any)?.c || 0;
+  const activeStudents = (cacheDb.prepare("SELECT COUNT(*) as c FROM students WHERE school_id = ? AND student_status = 'ACTIVE' AND (is_deleted = 0 OR is_deleted IS NULL)").get(schoolId) as any)?.c || 0;
+  const totalClasses = (cacheDb.prepare('SELECT COUNT(*) as c FROM classes WHERE school_id = ? AND (is_deleted = 0 OR is_deleted IS NULL)').get(schoolId) as any)?.c || 0;
+  const totalStaff = (cacheDb.prepare('SELECT COUNT(*) as c FROM staff WHERE school_id = ? AND (is_deleted = 0 OR is_deleted IS NULL)').get(schoolId) as any)?.c || 0;
+  const totalParents = (cacheDb.prepare('SELECT COUNT(*) as c FROM parents WHERE school_id = ? AND (is_deleted = 0 OR is_deleted IS NULL)').get(schoolId) as any)?.c || 0;
+
+  const activeSessionRow = cacheDb.prepare("SELECT name FROM academic_sessions WHERE school_id = ? AND status = 'ACTIVE' LIMIT 1").get(schoolId) as any;
+  const activeTermRow = cacheDb.prepare("SELECT name FROM terms WHERE school_id = ? AND status = 'ACTIVE' LIMIT 1").get(schoolId) as any;
+  const settings = cacheDb.prepare('SELECT current_academic_session, current_term FROM school_settings WHERE school_id = ?').get(schoolId) as any;
+
+  const recentStudents = cacheDb.prepare(`
     SELECT id, admission_number, full_name, class_name, student_status, created_at
     FROM students
-    WHERE school_id = ?
+    WHERE school_id = ? AND (is_deleted = 0 OR is_deleted IS NULL)
     ORDER BY created_at DESC
     LIMIT 5
   `).all(schoolId);
@@ -979,7 +1339,7 @@ apiRouter.get('/v1/school/stats', requireAuth, requireTenant, (req: Authenticate
 });
 
 // GET /api/v1/school/students (Search, filter, paginate tenant students)
-apiRouter.get('/v1/school/students', requireAuth, requireTenant, (req: AuthenticatedRequest, res) => {
+apiRouter.get('/v1/school/students', requireAuth, requireTenant, async (req: AuthenticatedRequest, res) => {
   const schoolId = req.targetSchoolId!;
   const {
     search,
@@ -993,6 +1353,79 @@ apiRouter.get('/v1/school/students', requireAuth, requireTenant, (req: Authentic
     sort = 'name_asc',
   } = req.query as Record<string, string>;
 
+  const pageNum = Math.max(1, parseInt(page, 10) || 1);
+  const limitNum = Math.min(100, Math.max(1, parseInt(limit, 10) || 50));
+  const offset = (pageNum - 1) * limitNum;
+
+  const pool = getPgPool();
+  if (pool) {
+    try {
+      let whereClause = 'school_id = $1 AND (is_deleted = 0 OR is_deleted IS NULL)';
+      const params: any[] = [schoolId];
+      let pIdx = 2;
+
+      if (search && search.trim()) {
+        const s = `%${search.trim().toLowerCase()}%`;
+        whereClause += ` AND (LOWER(full_name) LIKE $${pIdx} OR LOWER(first_name) LIKE $${pIdx} OR LOWER(last_name) LIKE $${pIdx} OR LOWER(COALESCE(admission_number, '')) LIKE $${pIdx} OR LOWER(COALESCE(phone, '')) LIKE $${pIdx} OR LOWER(COALESCE(email, '')) LIKE $${pIdx})`;
+        params.push(s);
+        pIdx++;
+      }
+
+      if (class_id) {
+        whereClause += ` AND class_id = $${pIdx}`;
+        params.push(class_id);
+        pIdx++;
+      }
+
+      if (class_arm_id) {
+        whereClause += ` AND class_arm_id = $${pIdx}`;
+        params.push(class_arm_id);
+        pIdx++;
+      }
+
+      if (gender) {
+        whereClause += ` AND gender = $${pIdx}`;
+        params.push(gender);
+        pIdx++;
+      }
+
+      if (status) {
+        whereClause += ` AND student_status = $${pIdx}`;
+        params.push(status);
+        pIdx++;
+      }
+
+      if (academic_session_id) {
+        whereClause += ` AND academic_session_id = $${pIdx}`;
+        params.push(academic_session_id);
+        pIdx++;
+      }
+
+      const countRes = await queryPg(`SELECT COUNT(*) as c FROM students WHERE ${whereClause}`, params);
+      const total = Number(countRes.rows[0]?.c || 0);
+
+      let orderClause = 'ORDER BY full_name ASC';
+      if (sort === 'name_desc') orderClause = 'ORDER BY full_name DESC';
+      else if (sort === 'admission_asc') orderClause = 'ORDER BY admission_number ASC NULLS LAST';
+      else if (sort === 'admission_desc') orderClause = 'ORDER BY admission_number DESC NULLS LAST';
+      else if (sort === 'date_desc') orderClause = 'ORDER BY created_at DESC';
+
+      const dataSql = `SELECT * FROM students WHERE ${whereClause} ${orderClause} LIMIT $${pIdx} OFFSET $${pIdx + 1}`;
+      const dataRes = await queryPg(dataSql, [...params, limitNum, offset]);
+
+      return res.json({
+        success: true,
+        count: total,
+        page: pageNum,
+        totalPages: Math.ceil(total / limitNum) || 1,
+        students: dataRes.rows,
+      });
+    } catch (e: any) {
+      console.warn('[Students GET PG Notice]', e.message);
+    }
+  }
+
+  // Fallback to SQLite cache
   let sql = 'SELECT * FROM students WHERE school_id = ? AND (is_deleted = 0 OR is_deleted IS NULL)';
   const params: any[] = [schoolId];
 
@@ -1027,11 +1460,9 @@ apiRouter.get('/v1/school/students', requireAuth, requireTenant, (req: Authentic
     params.push(academic_session_id);
   }
 
-  // Count total matching
   const countSql = sql.replace('SELECT *', 'SELECT COUNT(*) as c');
-  const total = (db.prepare(countSql).get(...params) as any)?.c || 0;
+  const total = (cacheDb.prepare(countSql).get(...params) as any)?.c || 0;
 
-  // Sorting
   if (sort === 'name_desc') {
     sql += ' ORDER BY full_name DESC';
   } else if (sort === 'admission_asc') {
@@ -1044,14 +1475,10 @@ apiRouter.get('/v1/school/students', requireAuth, requireTenant, (req: Authentic
     sql += ' ORDER BY full_name ASC';
   }
 
-  const pageNum = Math.max(1, parseInt(page, 10) || 1);
-  const limitNum = Math.min(100, Math.max(1, parseInt(limit, 10) || 50));
-  const offset = (pageNum - 1) * limitNum;
-
   sql += ' LIMIT ? OFFSET ?';
   params.push(limitNum, offset);
 
-  const students = db.prepare(sql).all(...params);
+  const students = cacheDb.prepare(sql).all(...params);
 
   return res.json({
     success: true,
@@ -1063,53 +1490,50 @@ apiRouter.get('/v1/school/students', requireAuth, requireTenant, (req: Authentic
 });
 
 // GET /api/v1/school/students/:id (Detailed student profile with parent contacts)
-apiRouter.get('/v1/school/students/:id', requireAuth, requireTenant, (req: AuthenticatedRequest, res) => {
+apiRouter.get('/v1/school/students/:id', requireAuth, requireTenant, async (req: AuthenticatedRequest, res) => {
   const schoolId = req.targetSchoolId!;
   const { id } = req.params;
 
-  // Strict query: MUST match both id AND school_id
-  const student = db.prepare(`
-    SELECT * FROM students WHERE id = ? AND school_id = ?
-  `).get(id, schoolId) as any;
+  let student: any = null;
+  let parents: any[] = [];
+  const pool = getPgPool();
 
-  if (!student) {
-    // Check if record exists in another school to detect and log cross-tenant probe
-    const crossSchoolCheck = db.prepare('SELECT school_id FROM students WHERE id = ?').get(id) as { school_id: string } | undefined;
-    if (crossSchoolCheck && crossSchoolCheck.school_id !== schoolId) {
-      const clientIp = req.ip || (req.headers['x-forwarded-for'] as string) || '127.0.0.1';
-      logAudit({
-        actorId: req.user!.id,
-        actorEmail: req.user!.email,
-        schoolId,
-        action: 'CROSS_TENANT_STUDENT_ACCESS_REJECTED',
-        entity: 'STUDENT',
-        entityId: id,
-        ipAddress: clientIp,
-        metadata: {
-          attemptedId: id,
-          requesterSchool: schoolId,
-          targetSchool: crossSchoolCheck.school_id,
-        },
-      });
-
-      return res.status(403).json({
-        error: 'CROSS_TENANT_ACCESS_DENIED',
-        message: 'Security Violation: This student record belongs to a different school tenant.',
-        code: 'IDOR_PREVENTED',
-      });
+  if (pool) {
+    try {
+      const stuRes = await queryPg('SELECT * FROM students WHERE id = $1 AND school_id = $2', [id, schoolId]);
+      if (stuRes.rows.length > 0) {
+        student = stuRes.rows[0];
+        const parRes = await queryPg(
+          `SELECT p.id, p.id as parent_id, p.first_name, p.last_name, (p.first_name || ' ' || p.last_name) as full_name,
+                  p.phone, p.email, p.occupation, p.address, ps.relationship_type, ps.is_primary_contact
+           FROM parent_students ps
+           JOIN parents p ON ps.parent_id = p.id
+           WHERE ps.student_id = $1 AND ps.school_id = $2`,
+          [id, schoolId]
+        );
+        parents = parRes.rows;
+      }
+    } catch (e: any) {
+      console.warn('[Student GET:id PG Notice]', e.message);
     }
-
-    return res.status(404).json({ error: 'NOT_FOUND', message: 'Student record not found in your school.' });
   }
 
-  // Fetch linked parents for this student
-  const parents = db.prepare(`
-    SELECT p.id, p.id as parent_id, p.first_name, p.last_name, (p.first_name || ' ' || p.last_name) as full_name,
-           p.phone, p.email, p.occupation, p.address, ps.relationship_type, ps.is_primary_contact
-    FROM parent_students ps
-    JOIN parents p ON ps.parent_id = p.id
-    WHERE ps.student_id = ? AND ps.school_id = ?
-  `).all(id, schoolId);
+  if (!student) {
+    student = cacheDb.prepare('SELECT * FROM students WHERE id = ? AND school_id = ?').get(id, schoolId) as any;
+    if (student) {
+      parents = cacheDb.prepare(`
+        SELECT p.id, p.id as parent_id, p.first_name, p.last_name, (p.first_name || ' ' || p.last_name) as full_name,
+               p.phone, p.email, p.occupation, p.address, ps.relationship_type, ps.is_primary_contact
+        FROM parent_students ps
+        JOIN parents p ON ps.parent_id = p.id
+        WHERE ps.student_id = ? AND ps.school_id = ?
+      `).all(id, schoolId);
+    }
+  }
+
+  if (!student) {
+    return res.status(404).json({ error: 'NOT_FOUND', message: 'Student record not found in your school.' });
+  }
 
   return res.json({
     success: true,
@@ -1154,80 +1578,94 @@ apiRouter.post(
       medical_notes,
     } = body;
 
-    if (!first_name || !last_name) {
+    const fn = (first_name || '').toString().trim();
+    const ln = (last_name || '').toString().trim();
+    const mn = (middle_name || '').toString().trim();
+
+    if (!fn || !ln) {
       return res.status(400).json({
         error: 'MISSING_FIELDS',
         message: 'First name and last name are required.',
       });
     }
 
-    // Enforce Plan Student Limit (Section 10: Usage Limit Enforcement)
-    const currentStudentCount = (db.prepare('SELECT COUNT(*) as c FROM students WHERE school_id = ?').get(schoolId) as any).c;
-    const schoolPlan = db.prepare(`
-      SELECT p.student_limit, p.maximum_students, p.display_name
-      FROM schools s
-      LEFT JOIN subscription_plans p ON s.current_plan_id = p.id
-      WHERE s.id = ?
-    `).get(schoolId) as any;
+    const cleanAdm = admission_number ? String(admission_number).trim() : null;
+    const cleanGender = gender ? (String(gender).toLowerCase().startsWith('f') ? 'Female' : 'Male') : null;
+    const pool = getPgPool();
 
-    const studentLimit = schoolPlan?.maximum_students || schoolPlan?.student_limit;
-    if (studentLimit && currentStudentCount >= studentLimit) {
-      return res.status(403).json({
-        error: 'STUDENT_LIMIT_REACHED',
-        message: `Your school has reached the maximum student limit of ${studentLimit} on the ${schoolPlan.display_name || 'current'} plan. Please upgrade your subscription plan to enroll more students.`,
-        currentCount: currentStudentCount,
-        limit: studentLimit,
-      });
-    }
-
-    // Check duplicate admission number in THIS school if provided
-    const cleanAdm = admission_number ? admission_number.trim() : null;
+    // Check duplicate admission number if supplied
     if (cleanAdm) {
-      const existing = db.prepare('SELECT id FROM students WHERE school_id = ? AND admission_number = ?').get(schoolId, cleanAdm);
-      if (existing) {
-        return res.status(409).json({
-          error: 'DUPLICATE_ADMISSION_NUMBER',
-          message: `Admission number "${cleanAdm}" already exists in your school.`,
-        });
+      if (pool) {
+        const dup = await queryPg('SELECT id FROM students WHERE school_id = $1 AND LOWER(admission_number) = $2', [schoolId, cleanAdm.toLowerCase()]);
+        if (dup.rows.length > 0) {
+          return res.status(409).json({
+            error: 'DUPLICATE_ADMISSION_NUMBER',
+            message: `Admission number "${cleanAdm}" already exists in your school.`,
+          });
+        }
+      } else {
+        const dup = cacheDb.prepare('SELECT id FROM students WHERE school_id = ? AND LOWER(admission_number) = ?').get(schoolId, cleanAdm.toLowerCase());
+        if (dup) {
+          return res.status(409).json({
+            error: 'DUPLICATE_ADMISSION_NUMBER',
+            message: `Admission number "${cleanAdm}" already exists in your school.`,
+          });
+        }
       }
     }
 
     const id = 'stu_' + crypto.randomUUID().slice(0, 10);
-    const fullName = `${first_name.trim()} ${middle_name ? middle_name.trim() + ' ' : ''}${last_name.trim()}`.trim();
+    const fullName = `${fn} ${mn ? mn + ' ' : ''}${ln}`.trim();
 
-    db.prepare(`
-      INSERT INTO students (
-        id, school_id, admission_number, first_name, middle_name, last_name, full_name, gender,
-        date_of_birth, phone, email, address, state, nationality, admission_date, student_status,
-        class_id, class_arm_id, class_name, class_arm_name, academic_session_id, profile_photo_url,
-        emergency_contact, medical_notes
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
-      id,
-      schoolId,
-      cleanAdm,
-      first_name.trim(),
-      middle_name.trim(),
-      last_name.trim(),
-      fullName,
-      gender || 'UNSPECIFIED',
-      date_of_birth || null,
-      phone || null,
-      email ? email.toLowerCase().trim() : null,
-      address || null,
-      state || null,
-      nationality || 'Nigerian',
-      admission_date,
-      student_status,
-      class_id || null,
-      class_arm_id || null,
-      class_name || null,
-      class_arm_name || null,
-      academic_session_id || null,
-      profile_photo_url || null,
-      emergency_contact || null,
-      medical_notes || null
-    );
+    // 1. Authoritative Neon PostgreSQL Persistence First
+    if (pool) {
+      try {
+        await queryPg(
+          `INSERT INTO students (
+            id, school_id, admission_number, first_name, middle_name, last_name, full_name, gender,
+            date_of_birth, phone, email, address, state, nationality, admission_date, student_status,
+            class_id, class_arm_id, class_name, class_arm_name, academic_session_id, profile_photo_url,
+            emergency_contact, medical_notes, is_deleted
+          ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, 0)
+          ON CONFLICT (id) DO UPDATE SET
+            full_name = EXCLUDED.full_name,
+            student_status = EXCLUDED.student_status`,
+          [
+            id, schoolId, cleanAdm, fn, mn || null, ln, fullName, cleanGender,
+            date_of_birth || null, phone || null, email ? email.toLowerCase().trim() : null,
+            address || null, state || null, nationality || 'Nigerian', admission_date,
+            student_status, class_id || null, class_arm_id || null, class_name || null,
+            class_arm_name || null, academic_session_id || null, profile_photo_url || null,
+            emergency_contact || null, medical_notes || null
+          ]
+        );
+      } catch (pgErr: any) {
+        console.error('[Student Enroll PG Error]', pgErr.message);
+        return res.status(500).json({ error: 'ENROLL_FAILED', message: 'Failed to enroll student in database: ' + pgErr.message });
+      }
+    }
+
+    // 2. Sync cacheDb safely
+    try {
+      cacheDb.prepare(`
+        INSERT INTO students (
+          id, school_id, admission_number, first_name, middle_name, last_name, full_name, gender,
+          date_of_birth, phone, email, address, state, nationality, admission_date, student_status,
+          class_id, class_arm_id, class_name, class_arm_name, academic_session_id, profile_photo_url,
+          emergency_contact, medical_notes
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+          full_name = excluded.full_name,
+          student_status = excluded.student_status
+      `).run(
+        id, schoolId, cleanAdm, fn, mn || null, ln, fullName, cleanGender,
+        date_of_birth || null, phone || null, email ? email.toLowerCase().trim() : null,
+        address || null, state || null, nationality || 'Nigerian', admission_date,
+        student_status, class_id || null, class_arm_id || null, class_name || null,
+        class_arm_name || null, academic_session_id || null, profile_photo_url || null,
+        emergency_contact || null, medical_notes || null
+      );
+    } catch {}
 
     logAudit({
       actorId: req.user!.id,
@@ -1237,39 +1675,17 @@ apiRouter.post(
       entity: 'STUDENT',
       entityId: id,
       ipAddress: req.ip || '127.0.0.1',
-      metadata: { admission_number, full_name: fullName, class_name },
+      metadata: { admission_number: cleanAdm, full_name: fullName, class_name },
     });
 
-    // Authoritative Neon PostgreSQL Persistence
-    const pool = getPgPool();
-    if (pool && isPgConnected()) {
-      try {
-        await pool.query(
-          `INSERT INTO students (
-            id, school_id, admission_number, first_name, middle_name, last_name, full_name, gender,
-            date_of_birth, phone, email, address, state, nationality, admission_date, student_status,
-            class_id, class_arm_id, class_name, class_arm_name, academic_session_id, profile_photo_url,
-            emergency_contact, medical_notes
-          ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24)
-          ON CONFLICT (id) DO UPDATE SET
-            full_name = EXCLUDED.full_name,
-            student_status = EXCLUDED.student_status,
-            class_id = EXCLUDED.class_id`,
-          [
-            id, schoolId, admission_number.trim(), first_name.trim(), middle_name.trim(), last_name.trim(),
-            fullName, gender || 'UNSPECIFIED', date_of_birth || null, phone || null,
-            email ? email.toLowerCase().trim() : null, address || null, state || null,
-            nationality || 'Nigerian', admission_date, student_status, class_id || null,
-            class_arm_id || null, class_name || null, class_arm_name || null, academic_session_id || null,
-            profile_photo_url || null, emergency_contact || null, medical_notes || null
-          ]
-        );
-      } catch (pgErr: any) {
-        console.error('[Student PG Replication Warning]', pgErr.message);
-      }
+    let student: any = null;
+    if (pool) {
+      const sRes = await queryPg('SELECT * FROM students WHERE id = $1', [id]);
+      if (sRes.rows.length > 0) student = sRes.rows[0];
     }
-
-    const student = db.prepare('SELECT * FROM students WHERE id = ?').get(id);
+    if (!student) {
+      student = cacheDb.prepare('SELECT * FROM students WHERE id = ?').get(id);
+    }
     return res.status(201).json({ success: true, message: 'Student enrolled successfully', student });
   }
 );
@@ -1284,40 +1700,87 @@ apiRouter.put(
     const schoolId = req.targetSchoolId!;
     const { id } = req.params;
 
-    // Check ownership
-    const existing = db.prepare('SELECT * FROM students WHERE id = ?').get(id) as any;
-    if (!existing) {
-      return res.status(404).json({ error: 'NOT_FOUND', message: 'Student not found.' });
+    let existing: any = null;
+    const pool = getPgPool();
+    if (pool) {
+      const exRes = await queryPg('SELECT * FROM students WHERE id = $1 AND school_id = $2', [id, schoolId]);
+      if (exRes.rows.length > 0) existing = exRes.rows[0];
     }
-    if (existing.school_id !== schoolId) {
-      return res.status(403).json({
-        error: 'CROSS_TENANT_ACCESS_DENIED',
-        message: 'Security Violation: Cannot modify student of another school.',
-      });
+    if (!existing) {
+      existing = cacheDb.prepare('SELECT * FROM students WHERE id = ? AND school_id = ?').get(id, schoolId) as any;
+    }
+
+    if (!existing) {
+      return res.status(404).json({ error: 'NOT_FOUND', message: 'Student not found in this school.' });
     }
 
     const b = req.body || {};
-    const firstName = b.first_name !== undefined ? b.first_name.trim() : existing.first_name;
-    const middleName = b.middle_name !== undefined ? b.middle_name.trim() : existing.middle_name;
-    const lastName = b.last_name !== undefined ? b.last_name.trim() : existing.last_name;
+    const firstName = b.first_name !== undefined ? String(b.first_name).trim() : existing.first_name;
+    const middleName = b.middle_name !== undefined ? String(b.middle_name).trim() : (existing.middle_name || '');
+    const lastName = b.last_name !== undefined ? String(b.last_name).trim() : existing.last_name;
     const fullName = `${firstName} ${middleName ? middleName + ' ' : ''}${lastName}`.trim();
+    const cleanAdm = b.admission_number !== undefined ? (b.admission_number ? String(b.admission_number).trim() : null) : existing.admission_number;
+    const cleanGender = b.gender !== undefined ? (b.gender ? (String(b.gender).toLowerCase().startsWith('f') ? 'Female' : 'Male') : null) : existing.gender;
 
     // Check admission number uniqueness if changed
-    if (b.admission_number && b.admission_number.trim() !== existing.admission_number) {
-      const duplicate = db.prepare('SELECT id FROM students WHERE school_id = ? AND admission_number = ? AND id != ?').get(schoolId, b.admission_number.trim(), id);
-      if (duplicate) {
-        return res.status(409).json({ error: 'DUPLICATE_ADMISSION_NUMBER', message: 'Admission number already in use.' });
+    if (cleanAdm && cleanAdm !== existing.admission_number) {
+      if (pool) {
+        const dup = await queryPg('SELECT id FROM students WHERE school_id = $1 AND LOWER(admission_number) = $2 AND id != $3', [schoolId, cleanAdm.toLowerCase(), id]);
+        if (dup.rows.length > 0) {
+          return res.status(409).json({ error: 'DUPLICATE_ADMISSION_NUMBER', message: 'Admission number already in use.' });
+        }
+      } else {
+        const dup = cacheDb.prepare('SELECT id FROM students WHERE school_id = ? AND LOWER(admission_number) = ? AND id != ?').get(schoolId, cleanAdm.toLowerCase(), id);
+        if (dup) {
+          return res.status(409).json({ error: 'DUPLICATE_ADMISSION_NUMBER', message: 'Admission number already in use.' });
+        }
       }
     }
 
-    db.prepare(`
+    if (pool) {
+      await queryPg(
+        `UPDATE students SET
+          admission_number = $1,
+          first_name = $2,
+          middle_name = $3,
+          last_name = $4,
+          full_name = $5,
+          gender = $6,
+          date_of_birth = COALESCE($7, date_of_birth),
+          phone = COALESCE($8, phone),
+          email = COALESCE($9, email),
+          address = COALESCE($10, address),
+          state = COALESCE($11, state),
+          nationality = COALESCE($12, nationality),
+          student_status = COALESCE($13, student_status),
+          class_id = COALESCE($14, class_id),
+          class_arm_id = COALESCE($15, class_arm_id),
+          class_name = COALESCE($16, class_name),
+          class_arm_name = COALESCE($17, class_arm_name),
+          academic_session_id = COALESCE($18, academic_session_id),
+          emergency_contact = COALESCE($19, emergency_contact),
+          medical_notes = COALESCE($20, medical_notes),
+          updated_at = CURRENT_TIMESTAMP
+        WHERE id = $21 AND school_id = $22`,
+        [
+          cleanAdm, firstName, middleName || null, lastName, fullName, cleanGender,
+          b.date_of_birth || null, b.phone || null, b.email ? b.email.toLowerCase().trim() : null,
+          b.address || null, b.state || null, b.nationality || null, b.student_status || null,
+          b.class_id || null, b.class_arm_id || null, b.class_name || null, b.class_arm_name || null,
+          b.academic_session_id || null, b.emergency_contact || null, b.medical_notes || null,
+          id, schoolId
+        ]
+      );
+    }
+
+    cacheDb.prepare(`
       UPDATE students SET
-        admission_number = COALESCE(?, admission_number),
+        admission_number = ?,
         first_name = ?,
         middle_name = ?,
         last_name = ?,
         full_name = ?,
-        gender = COALESCE(?, gender),
+        gender = ?,
         date_of_birth = COALESCE(?, date_of_birth),
         phone = COALESCE(?, phone),
         email = COALESCE(?, email),
@@ -1335,28 +1798,12 @@ apiRouter.put(
         updated_at = CURRENT_TIMESTAMP
       WHERE id = ? AND school_id = ?
     `).run(
-      b.admission_number?.trim() || null,
-      firstName,
-      middleName || '',
-      lastName,
-      fullName,
-      b.gender || null,
-      b.date_of_birth || null,
-      b.phone || null,
-      b.email ? b.email.toLowerCase().trim() : null,
-      b.address || null,
-      b.state || null,
-      b.nationality || null,
-      b.student_status || null,
-      b.class_id || null,
-      b.class_arm_id || null,
-      b.class_name || null,
-      b.class_arm_name || null,
-      b.academic_session_id || null,
-      b.emergency_contact || null,
-      b.medical_notes || null,
-      id,
-      schoolId
+      cleanAdm, firstName, middleName || null, lastName, fullName, cleanGender,
+      b.date_of_birth || null, b.phone || null, b.email ? b.email.toLowerCase().trim() : null,
+      b.address || null, b.state || null, b.nationality || null, b.student_status || null,
+      b.class_id || null, b.class_arm_id || null, b.class_name || null, b.class_arm_name || null,
+      b.academic_session_id || null, b.emergency_contact || null, b.medical_notes || null,
+      id, schoolId
     );
 
     logAudit({
@@ -1370,7 +1817,14 @@ apiRouter.put(
       metadata: { full_name: fullName },
     });
 
-    const updated = db.prepare('SELECT * FROM students WHERE id = ?').get(id);
+    let updated: any = null;
+    if (pool) {
+      const uRes = await queryPg('SELECT * FROM students WHERE id = $1', [id]);
+      if (uRes.rows.length > 0) updated = uRes.rows[0];
+    }
+    if (!updated) {
+      updated = cacheDb.prepare('SELECT * FROM students WHERE id = ?').get(id);
+    }
     return res.json({ success: true, message: 'Student updated successfully', student: updated });
   }
 );
@@ -1381,35 +1835,50 @@ apiRouter.delete(
   requireAuth,
   requireTenant,
   requireRole(['SCHOOL_OWNER', 'SCHOOL_ADMIN']),
-  (req: AuthenticatedRequest, res) => {
+  async (req: AuthenticatedRequest, res) => {
     const schoolId = req.targetSchoolId!;
     const { id } = req.params;
 
-    const existing = db.prepare('SELECT * FROM students WHERE id = ?').get(id) as any;
+    let existing: any = null;
+    const pool = getPgPool();
+    if (pool) {
+      const exRes = await queryPg('SELECT * FROM students WHERE id = $1 AND school_id = $2', [id, schoolId]);
+      if (exRes.rows.length > 0) existing = exRes.rows[0];
+    }
+    if (!existing) {
+      existing = cacheDb.prepare('SELECT * FROM students WHERE id = ? AND school_id = ?').get(id, schoolId) as any;
+    }
+
     if (!existing) {
       return res.status(404).json({ error: 'NOT_FOUND', message: 'Student not found.' });
     }
-    if (existing.school_id !== schoolId) {
-      return res.status(403).json({
-        error: 'CROSS_TENANT_ACCESS_DENIED',
-        message: 'Security Violation: Cannot delete student of another school.',
-      });
-    }
 
-    // Financial check: audit whether payments or invoices exist
-    const paymentCount = (
-      db.prepare('SELECT COUNT(*) as c FROM payments WHERE student_id = ? AND school_id = ?').get(id, schoolId) as any
-    )?.c || 0;
-    const invoiceCount = (
-      db.prepare('SELECT COUNT(*) as c FROM invoices WHERE student_id = ? AND school_id = ?').get(id, schoolId) as any
-    )?.c || 0;
+    let paymentCount = 0;
+    let invoiceCount = 0;
+    if (pool) {
+      try {
+        paymentCount = Number((await queryPg('SELECT COUNT(*) as c FROM payments WHERE student_id = $1 AND school_id = $2', [id, schoolId])).rows[0]?.c || 0);
+        invoiceCount = Number((await queryPg('SELECT COUNT(*) as c FROM invoices WHERE student_id = $1 AND school_id = $2', [id, schoolId])).rows[0]?.c || 0);
+      } catch {}
+    } else {
+      paymentCount = (cacheDb.prepare('SELECT COUNT(*) as c FROM payments WHERE student_id = ? AND school_id = ?').get(id, schoolId) as any)?.c || 0;
+      invoiceCount = (cacheDb.prepare('SELECT COUNT(*) as c FROM invoices WHERE student_id = ? AND school_id = ?').get(id, schoolId) as any)?.c || 0;
+    }
 
     const reason = req.body?.reason || (paymentCount > 0 || invoiceCount > 0 
       ? 'Archived to Recycle Bin (has recorded financial transactions)' 
       : 'Removed by School Admin');
 
-    // Soft deletion preserves student records and ledger references
-    db.prepare(`
+    if (pool) {
+      await queryPg(
+        `UPDATE students 
+         SET is_deleted = 1, deleted_at = CURRENT_TIMESTAMP, deleted_by = $1, deletion_reason = $2 
+         WHERE id = $3 AND school_id = $4`,
+        [req.user!.email, reason, id, schoolId]
+      );
+    }
+
+    cacheDb.prepare(`
       UPDATE students 
       SET is_deleted = 1, deleted_at = CURRENT_TIMESTAMP, deleted_by = ?, deletion_reason = ? 
       WHERE id = ? AND school_id = ?
@@ -1433,7 +1902,7 @@ apiRouter.delete(
   }
 );
 
-// POST /api/v1/school/students/import (Bulk CSV Import with duplicate detection)
+// POST /api/v1/school/students/import (Bulk CSV Import with duplicate detection & optional admission number)
 apiRouter.post(
   '/v1/school/students/import',
   requireAuth,
@@ -1451,23 +1920,40 @@ apiRouter.post(
     let failedCount = 0;
     let skippedCount = 0;
     const errors: { row: number; admission_number?: string; student_name?: string; error: string; isDuplicate?: boolean }[] = [];
+    const warnings: { row: number; admission_number?: string; student_name?: string; message: string; isPossibleDuplicate?: boolean }[] = [];
 
-    const { getPgPool } = await import('./db.ts');
     const pool = getPgPool();
+    if (pool) {
+      if (!isPgConnected()) {
+        try {
+          await ensurePgConnected();
+        } catch {}
+      }
+    }
 
-    // Load existing admission numbers and full student identifiers for this school tenant
+    // Load existing students from authoritative Neon PG
     const existingAdmissions = new Set<string>();
-    const existingStudentKeys = new Set<string>(); // key: `cleanFullName|cleanClass`
+    const preExistingFingerprints = new Set<string>(); // cleanFullName|cleanClass|cleanArm|cleanGender|cleanPhone|cleanEmail
+    const preExistingNames = new Set<string>();
 
     if (pool) {
       try {
-        const stuRes = await pool.query(
-          'SELECT admission_number, LOWER(full_name) as clean_name, LOWER(COALESCE(class_name, "")) as clean_class FROM students WHERE school_id = $1 AND is_deleted = 0',
+        const stuRes = await queryPg(
+          `SELECT admission_number, LOWER(full_name) as clean_name,
+                  LOWER(COALESCE(class_name, '')) as clean_class,
+                  LOWER(COALESCE(class_arm_name, '')) as clean_arm,
+                  LOWER(COALESCE(gender, '')) as clean_gender,
+                  LOWER(COALESCE(phone, '')) as clean_phone,
+                  LOWER(COALESCE(email, '')) as clean_email
+           FROM students WHERE school_id = $1 AND (is_deleted = 0 OR is_deleted IS NULL)`,
           [schoolId]
         );
         for (const r of stuRes.rows) {
           if (r.admission_number) existingAdmissions.add(r.admission_number.trim().toLowerCase());
-          if (r.clean_name) existingStudentKeys.add(`${r.clean_name}|${r.clean_class}`);
+          if (r.clean_name) {
+            preExistingNames.add(r.clean_name);
+            preExistingFingerprints.add(`${r.clean_name}|${r.clean_class}|${r.clean_arm}|${r.clean_gender}|${r.clean_phone}|${r.clean_email}`);
+          }
         }
       } catch (e: any) {
         console.warn('[Bulk Import PG Load Notice]', e.message);
@@ -1476,10 +1962,21 @@ apiRouter.post(
 
     // Also sync local cache existing set
     try {
-      const localStudents = db.prepare('SELECT admission_number, LOWER(full_name) as clean_name, LOWER(COALESCE(class_name, "")) as clean_class FROM students WHERE school_id = ?').all(schoolId) as any[];
+      const localStudents = cacheDb.prepare(`
+        SELECT admission_number, LOWER(full_name) as clean_name,
+               LOWER(COALESCE(class_name, '')) as clean_class,
+               LOWER(COALESCE(class_arm_name, '')) as clean_arm,
+               LOWER(COALESCE(gender, '')) as clean_gender,
+               LOWER(COALESCE(phone, '')) as clean_phone,
+               LOWER(COALESCE(email, '')) as clean_email
+        FROM students WHERE school_id = ? AND (is_deleted = 0 OR is_deleted IS NULL)
+      `).all(schoolId) as any[];
       for (const r of localStudents) {
         if (r.admission_number) existingAdmissions.add(r.admission_number.trim().toLowerCase());
-        if (r.clean_name) existingStudentKeys.add(`${r.clean_name}|${r.clean_class}`);
+        if (r.clean_name) {
+          preExistingNames.add(r.clean_name);
+          preExistingFingerprints.add(`${r.clean_name}|${r.clean_class}|${r.clean_arm}|${r.clean_gender}|${r.clean_phone}|${r.clean_email}`);
+        }
       }
     } catch (e) {}
 
@@ -1489,9 +1986,17 @@ apiRouter.post(
         pgClient = await pool.connect();
         await pgClient.query('BEGIN');
       } catch (connErr) {
-        console.warn('[Bulk Import PG Connect Notice]', connErr);
+        console.error('[Bulk Import PG Connect Error]', connErr);
+        return res.status(503).json({
+          error: 'DATABASE_UNAVAILABLE',
+          message: 'Authoritative database connection failed. Aborted to avoid creating non-persistent records.',
+        });
       }
     }
+
+    const seenInBatchAdmissions = new Set<string>();
+    const seenInBatchFingerprints = new Set<string>();
+    const seenInBatchNames = new Set<string>();
 
     try {
       for (let i = 0; i < rawRows.length; i++) {
@@ -1507,17 +2012,16 @@ apiRouter.post(
 
         // If only student_name or full_name is present
         const singleName = (row.student_name || row.full_name || row.name || '').toString().trim();
-        if (!fn && !ln && singleName) {
-          const parts = singleName.split(/\s+/);
-          if (parts.length === 1) {
+        if ((!fn || !ln) && singleName) {
+          const parts = singleName.split(/\s+/).filter(Boolean);
+          if (parts.length >= 2) {
             fn = parts[0];
-            ln = parts[0];
-          } else {
+            ln = parts.slice(1).join(' ');
+          } else if (parts.length === 1) {
             fn = parts[0];
-            ln = parts[parts.length - 1];
+            // ln remains empty to trigger strict missing last_name validation
           }
         }
-        if (fn && !ln) ln = fn;
 
         const rawGender = (row.gender || row['Gender'] || row.sex || '').toString().trim();
         const gender = rawGender ? (rawGender.toLowerCase().startsWith('f') ? 'Female' : 'Male') : null;
@@ -1526,44 +2030,60 @@ apiRouter.post(
         const phone = (row.phone || row['Phone'] || row.parent_phone || row['Parent Phone'] || '').toString().trim();
         const email = (row.email || row['Email'] || row.parent_email || row['Parent Email'] || '').toString().trim();
 
-        // VALIDATION RULE: Require at least a student name (first_name or single full name)
-        if (!fn) {
+        // STRICT VALIDATION: Require BOTH first_name and last_name
+        if (!fn || !ln) {
           failedCount++;
           errors.push({
             row: i + 1,
             admission_number: rawAdm || undefined,
-            student_name: `${fn} ${ln}`.trim() || 'Unknown',
-            error: 'Missing student name: Please provide at least student first name or full name.',
+            student_name: `${fn} ${ln}`.trim() || 'Incomplete Name',
+            error: !fn && !ln ? 'Missing first name and last name' : (!fn ? 'Missing first name' : 'Missing last name'),
           });
           continue;
         }
 
         const fullName = `${fn} ${mn ? mn + ' ' : ''}${ln}`.trim();
-        const studentDedupKey = `${fullName.toLowerCase()}|${className.toLowerCase()}`;
+        const cleanNameKey = fullName.toLowerCase();
+        const cleanAdmKey = rawAdm.toLowerCase();
+        const rowFingerprint = `${cleanNameKey}|${className.toLowerCase()}|${armName.toLowerCase()}|${(gender || '').toLowerCase()}|${phone.toLowerCase()}|${email.toLowerCase()}`;
 
-        // DUPLICATE RULE 1: If admission number is supplied, check for collision within this school
-        if (rawAdm && existingAdmissions.has(rawAdm.toLowerCase())) {
-          skippedCount++;
-          errors.push({
-            row: i + 1,
-            admission_number: rawAdm,
-            student_name: fullName,
-            error: `Skipped: Admission number "${rawAdm}" already registered in this school.`,
-            isDuplicate: true,
-          });
-          continue;
+        // RULE 1: If admission_number is supplied, detect duplicates within school
+        if (rawAdm) {
+          if (existingAdmissions.has(cleanAdmKey) || seenInBatchAdmissions.has(cleanAdmKey)) {
+            skippedCount++;
+            errors.push({
+              row: i + 1,
+              admission_number: rawAdm,
+              student_name: fullName,
+              error: `Skipped: Admission number "${rawAdm}" already registered in this school.`,
+              isDuplicate: true,
+            });
+            continue;
+          }
         }
 
-        // DUPLICATE RULE 2: If admission number is NOT supplied, prevent duplicate student with exact same full name and class
-        if (!rawAdm && existingStudentKeys.has(studentDedupKey)) {
-          skippedCount++;
-          errors.push({
-            row: i + 1,
-            student_name: fullName,
-            error: `Skipped: Student "${fullName}" in class "${className || 'Unassigned'}" already exists.`,
-            isDuplicate: true,
-          });
-          continue;
+        // RULE 2: If admission_number is NOT supplied, check repeat import of exact student fingerprint
+        if (!rawAdm) {
+          if (preExistingFingerprints.has(rowFingerprint) || seenInBatchFingerprints.has(rowFingerprint)) {
+            skippedCount++;
+            errors.push({
+              row: i + 1,
+              student_name: fullName,
+              error: `Skipped repeat import: matching student record "${fullName}" already exists in this school.`,
+              isDuplicate: true,
+            });
+            continue;
+          }
+
+          // Flag identical names for manual review without rejecting
+          if (preExistingNames.has(cleanNameKey) || seenInBatchNames.has(cleanNameKey)) {
+            warnings.push({
+              row: i + 1,
+              student_name: fullName,
+              message: `Possible duplicate student name "${fullName}" detected — imported as a distinct record for administrative review.`,
+              isPossibleDuplicate: true,
+            });
+          }
         }
 
         const studentId = 'stu_' + crypto.randomUUID().slice(0, 10);
@@ -1586,7 +2106,7 @@ apiRouter.post(
                 mn || null,
                 ln,
                 fullName,
-                gender || 'Male',
+                gender,
                 phone || null,
                 email ? email.toLowerCase() : null,
                 className || null,
@@ -1609,11 +2129,14 @@ apiRouter.post(
 
         // 2. Local SQLite Engine Cache
         try {
-          db.prepare(`
+          cacheDb.prepare(`
             INSERT INTO students (
               id, school_id, admission_number, first_name, middle_name, last_name, full_name,
-              gender, phone, email, class_name, class_arm_name, student_status
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ACTIVE')
+              gender, phone, email, class_name, class_arm_name, student_status, is_deleted
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ACTIVE', 0)
+            ON CONFLICT(id) DO UPDATE SET
+              full_name = excluded.full_name,
+              student_status = excluded.student_status
           `).run(
             studentId,
             schoolId,
@@ -1622,7 +2145,7 @@ apiRouter.post(
             mn || null,
             ln,
             fullName,
-            gender || 'Male',
+            gender,
             phone || null,
             email ? email.toLowerCase() : null,
             className || null,
@@ -1632,17 +2155,27 @@ apiRouter.post(
           console.warn('[Bulk Import Local Cache Notice]', sqErr);
         }
 
-        if (rawAdm) existingAdmissions.add(rawAdm.toLowerCase());
-        existingStudentKeys.add(studentDedupKey);
+        if (rawAdm) seenInBatchAdmissions.add(cleanAdmKey);
+        seenInBatchFingerprints.add(rowFingerprint);
+        seenInBatchNames.add(cleanNameKey);
         importedCount++;
       }
 
       if (pgClient) {
         await pgClient.query('COMMIT');
+        markPgConnected();
       }
     } catch (globalErr: any) {
-      if (pgClient) await pgClient.query('ROLLBACK');
+      if (pgClient) {
+        try {
+          await pgClient.query('ROLLBACK');
+        } catch {}
+      }
       console.error('[Bulk Import Fatal Error]', globalErr);
+      return res.status(500).json({
+        error: 'IMPORT_TRANSACTION_FAILED',
+        message: 'Bulk import transaction encountered an error: ' + globalErr.message,
+      });
     } finally {
       if (pgClient) pgClient.release();
     }
@@ -1654,7 +2187,7 @@ apiRouter.post(
       action: 'BULK_IMPORT_STUDENTS',
       entity: 'STUDENTS',
       ipAddress: req.ip || '127.0.0.1',
-      metadata: { importedCount, failedCount, skippedCount, totalRows: rawRows.length },
+      metadata: { importedCount, failedCount, skippedCount, warningsCount: warnings.length, totalRows: rawRows.length },
     });
 
     return res.json({
@@ -1663,6 +2196,7 @@ apiRouter.post(
       failedCount,
       skippedCount,
       errors,
+      warnings,
       message: `Successfully imported ${importedCount} student(s). ${skippedCount} duplicate(s) safely skipped. ${failedCount} row(s) failed validation.`,
     });
   }
@@ -1677,16 +2211,15 @@ apiRouter.get(
   async (req: AuthenticatedRequest, res) => {
     const schoolId = req.targetSchoolId!;
     let students: any[] = [];
-    const { getPgPool } = await import('./db.ts');
     const pool = getPgPool();
     if (pool) {
       try {
-        const pgRes = await pool.query(`
+        const pgRes = await queryPg(`
           SELECT admission_number, first_name, middle_name, last_name, full_name, gender,
                  date_of_birth, phone, email, class_name, class_arm_name, student_status,
                  state, admission_date, emergency_contact, created_at
           FROM students
-          WHERE school_id = $1 AND is_deleted = 0
+          WHERE school_id = $1 AND (is_deleted = 0 OR is_deleted IS NULL)
           ORDER BY COALESCE(admission_number, 'ZZZZ') ASC, last_name ASC, first_name ASC
         `, [schoolId]);
         students = pgRes.rows;
@@ -1695,12 +2228,12 @@ apiRouter.get(
       }
     }
     if (students.length === 0) {
-      students = db.prepare(`
+      students = cacheDb.prepare(`
         SELECT admission_number, first_name, middle_name, last_name, full_name, gender,
                date_of_birth, phone, email, class_name, class_arm_name, student_status,
                state, admission_date, emergency_contact, created_at
         FROM students
-        WHERE school_id = ? AND is_deleted = 0
+        WHERE school_id = ? AND (is_deleted = 0 OR is_deleted IS NULL)
         ORDER BY COALESCE(admission_number, 'ZZZZ') ASC, last_name ASC, first_name ASC
       `).all(schoolId) as any[];
     }
@@ -1744,28 +2277,90 @@ apiRouter.get(
 // ==============================================================================
 
 // GET /api/v1/school/parents
-apiRouter.get('/v1/school/parents', requireAuth, requireTenant, (req: AuthenticatedRequest, res) => {
+apiRouter.get('/v1/school/parents', requireAuth, requireTenant, async (req: AuthenticatedRequest, res) => {
   const schoolId = req.targetSchoolId!;
-  const parents = db.prepare(`
-    SELECT p.*,
-           (SELECT COUNT(*) FROM parent_students ps WHERE ps.parent_id = p.id) as total_children
-    FROM parents p
-    WHERE p.school_id = ? AND (p.is_deleted = 0 OR p.is_deleted IS NULL)
-    ORDER BY p.last_name ASC, p.first_name ASC
-  `).all(schoolId) as any[];
+  try {
+    let parents: any[] = [];
+    const pgRes = await queryPg(`
+      SELECT p.*,
+             (SELECT COUNT(*) FROM parent_students ps WHERE ps.parent_id = p.id) as total_children
+      FROM parents p
+      WHERE p.school_id = $1 AND (p.is_deleted = 0 OR p.is_deleted IS NULL)
+      ORDER BY p.last_name ASC, p.first_name ASC
+    `, [schoolId]);
 
-  // Join children
-  const parentsWithChildren = parents.map((p) => {
-    const children = db.prepare(`
-      SELECT s.id as student_id, s.admission_number, s.full_name, s.class_name, ps.relationship_type, ps.is_primary_contact
-      FROM parent_students ps
-      JOIN students s ON ps.student_id = s.id
-      WHERE ps.parent_id = ? AND ps.school_id = ?
-    `).all(p.id, schoolId);
-    return { ...p, children };
-  });
+    if (pgRes) {
+      parents = pgRes.rows;
+      // Sync into cacheDb
+      for (const p of parents) {
+        cacheDb.prepare(`
+          INSERT INTO parents (id, school_id, first_name, last_name, phone, email, address, occupation, relationship, emergency_contact, is_deleted, created_at, updated_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          ON CONFLICT(id) DO UPDATE SET
+            first_name = excluded.first_name,
+            last_name = excluded.last_name,
+            phone = excluded.phone,
+            email = excluded.email,
+            address = excluded.address,
+            occupation = excluded.occupation,
+            relationship = excluded.relationship,
+            emergency_contact = excluded.emergency_contact,
+            is_deleted = excluded.is_deleted,
+            updated_at = excluded.updated_at
+        `).run(
+          p.id,
+          p.school_id,
+          p.first_name,
+          p.last_name,
+          p.phone || null,
+          p.email || null,
+          p.address || null,
+          p.occupation || null,
+          p.relationship || 'Parent',
+          p.emergency_contact || null,
+          p.is_deleted ? 1 : 0,
+          p.created_at || new Date().toISOString(),
+          p.updated_at || new Date().toISOString()
+        );
+      }
+    } else {
+      parents = cacheDb.prepare(`
+        SELECT p.*,
+               (SELECT COUNT(*) FROM parent_students ps WHERE ps.parent_id = p.id) as total_children
+        FROM parents p
+        WHERE p.school_id = ? AND (p.is_deleted = 0 OR p.is_deleted IS NULL)
+        ORDER BY p.last_name ASC, p.first_name ASC
+      `).all(schoolId) as any[];
+    }
 
-  return res.json({ success: true, count: parentsWithChildren.length, parents: parentsWithChildren });
+    // Join children
+    const parentsWithChildren = await Promise.all(parents.map(async (p) => {
+      let children: any[] = [];
+      const chPg = await queryPg(`
+        SELECT s.id as student_id, s.admission_number, s.full_name, s.class_name, ps.relationship_type, ps.is_primary_contact
+        FROM parent_students ps
+        JOIN students s ON ps.student_id = s.id
+        WHERE ps.parent_id = $1 AND ps.school_id = $2
+      `, [p.id, schoolId]);
+
+      if (chPg) {
+        children = chPg.rows;
+      } else {
+        children = cacheDb.prepare(`
+          SELECT s.id as student_id, s.admission_number, s.full_name, s.class_name, ps.relationship_type, ps.is_primary_contact
+          FROM parent_students ps
+          JOIN students s ON ps.student_id = s.id
+          WHERE ps.parent_id = ? AND ps.school_id = ?
+        `).all(p.id, schoolId);
+      }
+      return { ...p, children };
+    }));
+
+    return res.json({ success: true, count: parentsWithChildren.length, parents: parentsWithChildren });
+  } catch (err: any) {
+    console.error('[GET /v1/school/parents Error]', err);
+    return res.status(500).json({ error: 'FETCH_FAILED', message: err.message });
+  }
 });
 
 // POST /api/v1/school/parents
@@ -1778,43 +2373,86 @@ apiRouter.post(
     const schoolId = req.targetSchoolId!;
     const { first_name, last_name, phone, email, address, occupation, relationship, emergency_contact, student_ids } = req.body;
 
-    // Flexible Parent Validation: Schools without phone numbers can still record parent information
-    if (!first_name || !last_name) {
+    // Flexible Parent Validation: Names required, phone and email optional
+    if (!first_name || typeof first_name !== 'string' || !first_name.trim() || !last_name || typeof last_name !== 'string' || !last_name.trim()) {
       return res.status(400).json({ error: 'MISSING_FIELDS', message: 'Parent first name and last name are required.' });
     }
 
+    const safeFirstName = first_name.trim();
+    const safeLastName = last_name.trim();
+    const safePhone = phone && typeof phone === 'string' && phone.trim() ? phone.trim() : null;
+    const safeEmail = email && typeof email === 'string' && email.trim() ? email.toLowerCase().trim() : null;
+    const safeRelationship = relationship && typeof relationship === 'string' && relationship.trim() ? relationship.trim() : 'Parent';
+
     const id = 'par_' + crypto.randomUUID().slice(0, 10);
-    db.prepare(`
-      INSERT INTO parents (id, school_id, first_name, last_name, phone, email, address, occupation, relationship, emergency_contact)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+
+    // 1. Write authoritatively to Neon PostgreSQL first
+    await queryPg(`
+      INSERT INTO parents (id, school_id, first_name, last_name, phone, email, address, occupation, relationship, emergency_contact, created_at, updated_at)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+    `, [
+      id,
+      schoolId,
+      safeFirstName,
+      safeLastName,
+      safePhone,
+      safeEmail,
+      address || null,
+      occupation || null,
+      safeRelationship,
+      emergency_contact || null,
+    ]);
+
+    // 2. Cache in local SQLite
+    cacheDb.prepare(`
+      INSERT INTO parents (id, school_id, first_name, last_name, phone, email, address, occupation, relationship, emergency_contact, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+      ON CONFLICT(id) DO UPDATE SET
+        first_name = excluded.first_name,
+        last_name = excluded.last_name,
+        phone = excluded.phone,
+        email = excluded.email,
+        address = excluded.address,
+        occupation = excluded.occupation,
+        relationship = excluded.relationship,
+        emergency_contact = excluded.emergency_contact,
+        updated_at = CURRENT_TIMESTAMP
     `).run(
       id,
       schoolId,
-      first_name.trim(),
-      last_name.trim(),
-      phone.trim(),
-      email ? email.toLowerCase().trim() : null,
+      safeFirstName,
+      safeLastName,
+      safePhone,
+      safeEmail,
       address || null,
       occupation || null,
-      relationship || 'Parent',
+      safeRelationship,
       emergency_contact || null
     );
 
     // Link students if provided
     if (Array.isArray(student_ids)) {
       for (const sid of student_ids) {
-        // Verify student belongs to THIS school
-        const student = db.prepare('SELECT id FROM students WHERE id = ? AND school_id = ?').get(sid, schoolId);
-        if (student) {
-          db.prepare(`
-            INSERT OR IGNORE INTO parent_students (id, school_id, parent_id, student_id, relationship_type, is_primary_contact)
+        const psId = 'ps_' + crypto.randomUUID().slice(0, 10);
+        await queryPg(`
+          INSERT INTO parent_students (id, school_id, parent_id, student_id, relationship_type, is_primary_contact)
+          VALUES ($1, $2, $3, $4, $5, 1)
+          ON CONFLICT (id) DO NOTHING
+        `, [psId, schoolId, id, sid, safeRelationship]);
+
+        try {
+          cacheDb.prepare(`
+            INSERT INTO parent_students (id, school_id, parent_id, student_id, relationship_type, is_primary_contact)
             VALUES (?, ?, ?, ?, ?, 1)
-          `).run('ps_' + crypto.randomUUID().slice(0, 10), schoolId, id, sid, relationship || 'Parent');
-        }
+            ON CONFLICT (id) DO NOTHING
+          `).run(psId, schoolId, id, sid, safeRelationship);
+        } catch {}
       }
     }
 
-    const parent = db.prepare('SELECT * FROM parents WHERE id = ?').get(id);
+    const pgParent = await queryPg('SELECT * FROM parents WHERE id = $1', [id]);
+    const parent = pgParent?.rows[0] || cacheDb.prepare('SELECT * FROM parents WHERE id = ?').get(id);
+
     return res.status(201).json({ success: true, message: 'Parent record created successfully', parent });
   }
 );
@@ -1829,14 +2467,51 @@ apiRouter.put(
     const schoolId = req.targetSchoolId!;
     const { id } = req.params;
 
-    const existing = db.prepare('SELECT * FROM parents WHERE id = ?').get(id) as any;
+    let existing: any = null;
+    const pgCheck = await queryPg('SELECT * FROM parents WHERE id = $1', [id]);
+    if (pgCheck && pgCheck.rows.length > 0) {
+      existing = pgCheck.rows[0];
+    } else {
+      existing = cacheDb.prepare('SELECT * FROM parents WHERE id = ?').get(id) as any;
+    }
+
     if (!existing) return res.status(404).json({ error: 'NOT_FOUND', message: 'Parent not found.' });
     if (existing.school_id !== schoolId) {
       return res.status(403).json({ error: 'CROSS_TENANT_ACCESS_DENIED', message: 'Cannot edit parent of another school.' });
     }
 
     const b = req.body || {};
-    db.prepare(`
+    const safeFirst = b.first_name !== undefined ? (b.first_name ? b.first_name.trim() : null) : null;
+    const safeLast = b.last_name !== undefined ? (b.last_name ? b.last_name.trim() : null) : null;
+    const safePhone = b.phone !== undefined ? (b.phone ? b.phone.trim() : null) : null;
+    const safeEmail = b.email !== undefined ? (b.email ? b.email.toLowerCase().trim() : null) : null;
+
+    await queryPg(`
+      UPDATE parents SET
+        first_name = COALESCE($1, first_name),
+        last_name = COALESCE($2, last_name),
+        phone = COALESCE($3, phone),
+        email = COALESCE($4, email),
+        address = COALESCE($5, address),
+        occupation = COALESCE($6, occupation),
+        relationship = COALESCE($7, relationship),
+        emergency_contact = COALESCE($8, emergency_contact),
+        updated_at = CURRENT_TIMESTAMP
+      WHERE id = $9 AND school_id = $10
+    `, [
+      safeFirst,
+      safeLast,
+      safePhone,
+      safeEmail,
+      b.address || null,
+      b.occupation || null,
+      b.relationship || null,
+      b.emergency_contact || null,
+      id,
+      schoolId
+    ]);
+
+    cacheDb.prepare(`
       UPDATE parents SET
         first_name = COALESCE(?, first_name),
         last_name = COALESCE(?, last_name),
@@ -1849,10 +2524,10 @@ apiRouter.put(
         updated_at = CURRENT_TIMESTAMP
       WHERE id = ? AND school_id = ?
     `).run(
-      b.first_name?.trim() || null,
-      b.last_name?.trim() || null,
-      b.phone?.trim() || null,
-      b.email ? b.email.toLowerCase().trim() : null,
+      safeFirst,
+      safeLast,
+      safePhone,
+      safeEmail,
       b.address || null,
       b.occupation || null,
       b.relationship || null,
@@ -1861,7 +2536,8 @@ apiRouter.put(
       schoolId
     );
 
-    const updated = db.prepare('SELECT * FROM parents WHERE id = ?').get(id);
+    const updatedPg = await queryPg('SELECT * FROM parents WHERE id = $1', [id]);
+    const updated = updatedPg?.rows[0] || cacheDb.prepare('SELECT * FROM parents WHERE id = ?').get(id);
     return res.json({ success: true, message: 'Parent updated successfully', parent: updated });
   }
 );
@@ -1872,18 +2548,31 @@ apiRouter.delete(
   requireAuth,
   requireTenant,
   requireRole(['SCHOOL_OWNER', 'SCHOOL_ADMIN']),
-  (req: AuthenticatedRequest, res) => {
+  async (req: AuthenticatedRequest, res) => {
     const schoolId = req.targetSchoolId!;
     const { id } = req.params;
 
-    const existing = db.prepare('SELECT * FROM parents WHERE id = ?').get(id) as any;
+    let existing: any = null;
+    const pgCheck = await queryPg('SELECT * FROM parents WHERE id = $1', [id]);
+    if (pgCheck && pgCheck.rows.length > 0) {
+      existing = pgCheck.rows[0];
+    } else {
+      existing = cacheDb.prepare('SELECT * FROM parents WHERE id = ?').get(id) as any;
+    }
+
     if (!existing) return res.status(404).json({ error: 'NOT_FOUND', message: 'Parent not found.' });
     if (existing.school_id !== schoolId) {
       return res.status(403).json({ error: 'CROSS_TENANT_ACCESS_DENIED', message: 'Cannot delete parent of another school.' });
     }
 
     const reason = req.body?.reason || 'Parent archived by School Admin';
-    db.prepare(`
+    await queryPg(`
+      UPDATE parents 
+      SET is_deleted = 1, deleted_at = CURRENT_TIMESTAMP, deleted_by = $1, deletion_reason = $2 
+      WHERE id = $3 AND school_id = $4
+    `, [req.user!.email, reason, id, schoolId]);
+
+    cacheDb.prepare(`
       UPDATE parents 
       SET is_deleted = 1, deleted_at = CURRENT_TIMESTAMP, deleted_by = ?, deletion_reason = ? 
       WHERE id = ? AND school_id = ?
@@ -1908,29 +2597,84 @@ apiRouter.delete(
 // ==============================================================================
 
 // GET /api/v1/school/classes (Returns classes with arms and student totals)
-apiRouter.get('/v1/school/classes', requireAuth, requireTenant, (req: AuthenticatedRequest, res) => {
+apiRouter.get('/v1/school/classes', requireAuth, requireTenant, async (req: AuthenticatedRequest, res) => {
   const schoolId = req.targetSchoolId!;
-  const classes = db.prepare(`
-    SELECT c.*,
-           (SELECT COUNT(*) FROM students s WHERE s.class_id = c.id AND (s.is_deleted = 0 OR s.is_deleted IS NULL)) as total_students
-    FROM classes c
-    WHERE c.school_id = ? AND (c.is_deleted = 0 OR c.is_deleted IS NULL)
-    ORDER BY c.name ASC
-  `).all(schoolId) as any[];
+  try {
+    let classes: any[] = [];
+    const pgClasses = await queryPg(`
+      SELECT c.*,
+             (SELECT COUNT(*) FROM students s WHERE s.class_id = c.id AND (s.is_deleted = 0 OR s.is_deleted IS NULL)) as total_students
+      FROM classes c
+      WHERE c.school_id = $1 AND (c.is_deleted = 0 OR c.is_deleted IS NULL)
+      ORDER BY c.name ASC
+    `, [schoolId]);
 
-  const classesWithArms = classes.map((cls) => {
-    const arms = db.prepare(`
-      SELECT ca.*,
-             (SELECT COUNT(*) FROM students s WHERE s.class_arm_id = ca.id) as total_students,
-             (SELECT (first_name || ' ' || last_name) FROM staff st WHERE st.id = ca.class_teacher_id) as class_teacher_name
-      FROM class_arms ca
-      WHERE ca.class_id = ? AND ca.school_id = ?
-      ORDER BY ca.name ASC
-    `).all(cls.id, schoolId);
-    return { ...cls, arms };
-  });
+    if (pgClasses) {
+      classes = pgClasses.rows;
+      for (const cls of classes) {
+        cacheDb.prepare(`
+          INSERT INTO classes (id, school_id, name, level, description, academic_session_id, is_deleted, created_at, updated_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+          ON CONFLICT(id) DO UPDATE SET
+            name = excluded.name,
+            level = excluded.level,
+            description = excluded.description,
+            academic_session_id = excluded.academic_session_id,
+            is_deleted = excluded.is_deleted,
+            updated_at = excluded.updated_at
+        `).run(
+          cls.id,
+          cls.school_id,
+          cls.name,
+          cls.level,
+          cls.description || null,
+          cls.academic_session_id || null,
+          cls.is_deleted ? 1 : 0,
+          cls.created_at || new Date().toISOString(),
+          cls.updated_at || new Date().toISOString()
+        );
+      }
+    } else {
+      classes = cacheDb.prepare(`
+        SELECT c.*,
+               (SELECT COUNT(*) FROM students s WHERE s.class_id = c.id AND (s.is_deleted = 0 OR s.is_deleted IS NULL)) as total_students
+        FROM classes c
+        WHERE c.school_id = ? AND (c.is_deleted = 0 OR c.is_deleted IS NULL)
+        ORDER BY c.name ASC
+      `).all(schoolId) as any[];
+    }
 
-  return res.json({ success: true, count: classesWithArms.length, classes: classesWithArms });
+    const classesWithArms = await Promise.all(classes.map(async (cls) => {
+      let arms: any[] = [];
+      const pgArms = await queryPg(`
+        SELECT ca.*,
+               (SELECT COUNT(*) FROM students s WHERE s.class_arm_id = ca.id) as total_students,
+               (SELECT (first_name || ' ' || last_name) FROM staff st WHERE st.id = ca.class_teacher_id) as class_teacher_name
+        FROM class_arms ca
+        WHERE ca.class_id = $1 AND ca.school_id = $2
+        ORDER BY ca.name ASC
+      `, [cls.id, schoolId]);
+
+      if (pgArms) {
+        arms = pgArms.rows;
+      } else {
+        arms = cacheDb.prepare(`
+          SELECT ca.*,
+                 (SELECT COUNT(*) FROM students s WHERE s.class_arm_id = ca.id) as total_students,
+                 (SELECT (first_name || ' ' || last_name) FROM staff st WHERE st.id = ca.class_teacher_id) as class_teacher_name
+          FROM class_arms ca
+          WHERE ca.class_id = ? AND ca.school_id = ?
+          ORDER BY ca.name ASC
+        `).all(cls.id, schoolId);
+      }
+      return { ...cls, arms };
+    }));
+
+    return res.json({ success: true, count: classesWithArms.length, classes: classesWithArms });
+  } catch (err: any) {
+    console.error('[GET /v1/school/classes Error]', err);
+    return res.status(500).json({ error: 'FETCH_FAILED', message: err.message });
+  }
 });
 
 // POST /api/v1/school/classes
@@ -1939,21 +2683,36 @@ apiRouter.post(
   requireAuth,
   requireTenant,
   requireRole(['SCHOOL_OWNER', 'SCHOOL_ADMIN']),
-  (req: AuthenticatedRequest, res) => {
+  async (req: AuthenticatedRequest, res) => {
     const schoolId = req.targetSchoolId!;
     const { name, level, description, academic_session_id } = req.body;
 
-    if (!name || !level) {
+    if (!name || typeof name !== 'string' || !name.trim() || !level || typeof level !== 'string' || !level.trim()) {
       return res.status(400).json({ error: 'MISSING_FIELDS', message: 'Class name and level are required.' });
     }
 
     const id = 'cls_' + crypto.randomUUID().slice(0, 8);
-    db.prepare(`
-      INSERT INTO classes (id, school_id, name, level, description, academic_session_id)
-      VALUES (?, ?, ?, ?, ?, ?)
-    `).run(id, schoolId, name.trim(), level.trim(), description || null, academic_session_id || null);
+    const safeName = name.trim();
+    const safeLevel = level.trim();
 
-    const created = db.prepare('SELECT * FROM classes WHERE id = ?').get(id);
+    await queryPg(`
+      INSERT INTO classes (id, school_id, name, level, description, academic_session_id, created_at, updated_at)
+      VALUES ($1, $2, $3, $4, $5, $6, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+    `, [id, schoolId, safeName, safeLevel, description || null, academic_session_id || null]);
+
+    cacheDb.prepare(`
+      INSERT INTO classes (id, school_id, name, level, description, academic_session_id, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+      ON CONFLICT(id) DO UPDATE SET
+        name = excluded.name,
+        level = excluded.level,
+        description = excluded.description,
+        academic_session_id = excluded.academic_session_id,
+        updated_at = CURRENT_TIMESTAMP
+    `).run(id, schoolId, safeName, safeLevel, description || null, academic_session_id || null);
+
+    const pgCreated = await queryPg('SELECT * FROM classes WHERE id = $1', [id]);
+    const created = pgCreated?.rows[0] || cacheDb.prepare('SELECT * FROM classes WHERE id = ?').get(id);
     return res.status(201).json({ success: true, message: 'Class created successfully', class: created });
   }
 );
@@ -1964,28 +2723,48 @@ apiRouter.post(
   requireAuth,
   requireTenant,
   requireRole(['SCHOOL_OWNER', 'SCHOOL_ADMIN']),
-  (req: AuthenticatedRequest, res) => {
+  async (req: AuthenticatedRequest, res) => {
     const schoolId = req.targetSchoolId!;
     const { id: classId } = req.params;
     const { name, capacity = 40, class_teacher_id } = req.body;
 
-    // Verify class belongs to this school
-    const cls = db.prepare('SELECT id FROM classes WHERE id = ? AND school_id = ?').get(classId, schoolId);
+    let cls: any = null;
+    const pgCls = await queryPg('SELECT id FROM classes WHERE id = $1 AND school_id = $2', [classId, schoolId]);
+    if (pgCls && pgCls.rows.length > 0) {
+      cls = pgCls.rows[0];
+    } else {
+      cls = cacheDb.prepare('SELECT id FROM classes WHERE id = ? AND school_id = ?').get(classId, schoolId);
+    }
+
     if (!cls) {
       return res.status(404).json({ error: 'CLASS_NOT_FOUND', message: 'Class not found in this school.' });
     }
 
-    if (!name) {
+    if (!name || typeof name !== 'string' || !name.trim()) {
       return res.status(400).json({ error: 'MISSING_FIELDS', message: 'Arm name is required (e.g. Gold, A, Science).' });
     }
 
     const armId = 'arm_' + crypto.randomUUID().slice(0, 8);
-    db.prepare(`
-      INSERT INTO class_arms (id, school_id, class_id, name, capacity, class_teacher_id)
-      VALUES (?, ?, ?, ?, ?, ?)
-    `).run(armId, schoolId, classId, name.trim(), parseInt(capacity, 10) || 40, class_teacher_id || null);
+    const safeName = name.trim();
+    const safeCapacity = parseInt(capacity, 10) || 40;
 
-    const arm = db.prepare('SELECT * FROM class_arms WHERE id = ?').get(armId);
+    await queryPg(`
+      INSERT INTO class_arms (id, school_id, class_id, name, capacity, class_teacher_id, created_at, updated_at)
+      VALUES ($1, $2, $3, $4, $5, $6, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+    `, [armId, schoolId, classId, safeName, safeCapacity, class_teacher_id || null]);
+
+    cacheDb.prepare(`
+      INSERT INTO class_arms (id, school_id, class_id, name, capacity, class_teacher_id, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+      ON CONFLICT(id) DO UPDATE SET
+        name = excluded.name,
+        capacity = excluded.capacity,
+        class_teacher_id = excluded.class_teacher_id,
+        updated_at = CURRENT_TIMESTAMP
+    `).run(armId, schoolId, classId, safeName, safeCapacity, class_teacher_id || null);
+
+    const pgArm = await queryPg('SELECT * FROM class_arms WHERE id = $1', [armId]);
+    const arm = pgArm?.rows[0] || cacheDb.prepare('SELECT * FROM class_arms WHERE id = ?').get(armId);
     return res.status(201).json({ success: true, message: 'Class arm created successfully', arm });
   }
 );
@@ -1996,19 +2775,31 @@ apiRouter.delete(
   requireAuth,
   requireTenant,
   requireRole(['SCHOOL_OWNER', 'SCHOOL_ADMIN']),
-  (req: AuthenticatedRequest, res) => {
+  async (req: AuthenticatedRequest, res) => {
     const schoolId = req.targetSchoolId!;
     const { id } = req.params;
 
-    const cls = db.prepare('SELECT id, school_id, name FROM classes WHERE id = ?').get(id) as any;
+    let cls: any = null;
+    const pgCls = await queryPg('SELECT id, school_id, name FROM classes WHERE id = $1', [id]);
+    if (pgCls && pgCls.rows.length > 0) {
+      cls = pgCls.rows[0];
+    } else {
+      cls = cacheDb.prepare('SELECT id, school_id, name FROM classes WHERE id = ?').get(id) as any;
+    }
+
     if (!cls) return res.status(404).json({ error: 'NOT_FOUND', message: 'Class not found.' });
     if (cls.school_id !== schoolId) {
       return res.status(403).json({ error: 'CROSS_TENANT_ACCESS_DENIED', message: 'Cannot delete class of another school.' });
     }
 
-    const enrolledStudents = (
-      db.prepare('SELECT COUNT(*) as c FROM students WHERE class_id = ? AND school_id = ? AND (is_deleted = 0 OR is_deleted IS NULL)').get(id, schoolId) as any
-    )?.c || 0;
+    let enrolledStudents = 0;
+    const pgCount = await queryPg('SELECT COUNT(*) as c FROM students WHERE class_id = $1 AND school_id = $2 AND (is_deleted = 0 OR is_deleted IS NULL)', [id, schoolId]);
+    if (pgCount) {
+      enrolledStudents = parseInt(pgCount.rows[0]?.c || '0', 10);
+    } else {
+      enrolledStudents = (cacheDb.prepare('SELECT COUNT(*) as c FROM students WHERE class_id = ? AND school_id = ? AND (is_deleted = 0 OR is_deleted IS NULL)').get(id, schoolId) as any)?.c || 0;
+    }
+
     if (enrolledStudents > 0) {
       return res.status(400).json({
         error: 'CLASS_NOT_EMPTY',
@@ -2017,7 +2808,13 @@ apiRouter.delete(
     }
 
     const reason = req.body?.reason || 'Class archived by School Admin';
-    db.prepare(`
+    await queryPg(`
+      UPDATE classes 
+      SET is_deleted = 1, deleted_at = CURRENT_TIMESTAMP, deleted_by = $1, deletion_reason = $2 
+      WHERE id = $3 AND school_id = $4
+    `, [req.user!.email, reason, id, schoolId]);
+
+    cacheDb.prepare(`
       UPDATE classes 
       SET is_deleted = 1, deleted_at = CURRENT_TIMESTAMP, deleted_by = ?, deletion_reason = ? 
       WHERE id = ? AND school_id = ?
@@ -2042,13 +2839,68 @@ apiRouter.delete(
 // ==============================================================================
 
 // GET /api/v1/school/staff
-apiRouter.get('/v1/school/staff', requireAuth, requireTenant, (req: AuthenticatedRequest, res) => {
+apiRouter.get('/v1/school/staff', requireAuth, requireTenant, async (req: AuthenticatedRequest, res) => {
   const schoolId = req.targetSchoolId!;
-  const staff = db.prepare(`
-    SELECT * FROM staff WHERE school_id = ? AND (is_deleted = 0 OR is_deleted IS NULL) ORDER BY staff_number ASC
-  `).all(schoolId);
+  try {
+    let staff: any[] = [];
+    const pgRes = await queryPg(`
+      SELECT * FROM staff WHERE school_id = $1 AND (is_deleted = 0 OR is_deleted IS NULL) ORDER BY staff_number ASC
+    `, [schoolId]);
 
-  return res.json({ success: true, count: staff.length, staff });
+    if (pgRes) {
+      staff = pgRes.rows;
+      for (const st of staff) {
+        cacheDb.prepare(`
+          INSERT INTO staff (
+            id, school_id, staff_number, first_name, middle_name, last_name, email, phone,
+            gender, address, job_title, department, employment_status, date_joined, is_deleted, created_at, updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          ON CONFLICT(id) DO UPDATE SET
+            staff_number = excluded.staff_number,
+            first_name = excluded.first_name,
+            middle_name = excluded.middle_name,
+            last_name = excluded.last_name,
+            email = excluded.email,
+            phone = excluded.phone,
+            gender = excluded.gender,
+            address = excluded.address,
+            job_title = excluded.job_title,
+            department = excluded.department,
+            employment_status = excluded.employment_status,
+            date_joined = excluded.date_joined,
+            is_deleted = excluded.is_deleted,
+            updated_at = excluded.updated_at
+        `).run(
+          st.id,
+          st.school_id,
+          st.staff_number || null,
+          st.first_name,
+          st.middle_name || null,
+          st.last_name,
+          st.email || null,
+          st.phone || null,
+          st.gender || null,
+          st.address || null,
+          st.job_title || null,
+          st.department || null,
+          st.employment_status || 'ACTIVE',
+          st.date_joined || null,
+          st.is_deleted ? 1 : 0,
+          st.created_at || new Date().toISOString(),
+          st.updated_at || new Date().toISOString()
+        );
+      }
+    } else {
+      staff = cacheDb.prepare(`
+        SELECT * FROM staff WHERE school_id = ? AND (is_deleted = 0 OR is_deleted IS NULL) ORDER BY staff_number ASC
+      `).all(schoolId);
+    }
+
+    return res.json({ success: true, count: staff.length, staff });
+  } catch (err: any) {
+    console.error('[GET /v1/school/staff Error]', err);
+    return res.status(500).json({ error: 'FETCH_FAILED', message: err.message });
+  }
 });
 
 // POST /api/v1/school/staff
@@ -2057,7 +2909,7 @@ apiRouter.post(
   requireAuth,
   requireTenant,
   requireRole(['SCHOOL_OWNER', 'SCHOOL_ADMIN']),
-  (req: AuthenticatedRequest, res) => {
+  async (req: AuthenticatedRequest, res) => {
     const schoolId = req.targetSchoolId!;
     const {
       staff_number,
@@ -2074,24 +2926,52 @@ apiRouter.post(
       date_joined = new Date().toISOString().slice(0, 10),
     } = req.body;
 
-    // Flexible Staff Validation: Schools without complete information can still keep records
-    if (!first_name || !last_name) {
+    // Flexible Staff Validation: First & last name required; staff_number, email, phone optional
+    if (!first_name || typeof first_name !== 'string' || !first_name.trim() || !last_name || typeof last_name !== 'string' || !last_name.trim()) {
       return res.status(400).json({
         error: 'MISSING_FIELDS',
         message: 'Staff first name and last name are required.',
       });
     }
-    const effectiveStaffNo = staff_number ? staff_number.trim() : `STF-${crypto.randomBytes(3).toString('hex').toUpperCase()}`;
-    const effectiveJobTitle = job_title ? job_title.trim() : 'Staff Member';
 
-    // Enforce Plan Staff Limit (Section 10: Usage Limit Enforcement)
-    const currentStaffCount = (db.prepare('SELECT COUNT(*) as c FROM staff WHERE school_id = ?').get(schoolId) as any).c;
-    const schoolPlan = db.prepare(`
+    const safeFirstName = first_name.trim();
+    const safeMiddleName = middle_name && typeof middle_name === 'string' ? middle_name.trim() : '';
+    const safeLastName = last_name.trim();
+    const effectiveStaffNo = staff_number && typeof staff_number === 'string' && staff_number.trim()
+      ? staff_number.trim()
+      : `STF-${crypto.randomBytes(3).toString('hex').toUpperCase()}`;
+    const effectiveJobTitle = job_title && typeof job_title === 'string' && job_title.trim()
+      ? job_title.trim()
+      : 'Staff Member';
+    const safeEmail = email && typeof email === 'string' && email.trim() ? email.toLowerCase().trim() : null;
+    const safePhone = phone && typeof phone === 'string' && phone.trim() ? phone.trim() : null;
+
+    // Enforce Plan Staff Limit
+    let currentStaffCount = 0;
+    const countPg = await queryPg('SELECT COUNT(*) as c FROM staff WHERE school_id = $1 AND (is_deleted = 0 OR is_deleted IS NULL)', [schoolId]);
+    if (countPg) {
+      currentStaffCount = parseInt(countPg.rows[0]?.c || '0', 10);
+    } else {
+      currentStaffCount = (cacheDb.prepare('SELECT COUNT(*) as c FROM staff WHERE school_id = ? AND (is_deleted = 0 OR is_deleted IS NULL)').get(schoolId) as any)?.c || 0;
+    }
+
+    let schoolPlan: any = null;
+    const planPg = await queryPg(`
       SELECT p.staff_limit, p.maximum_staff, p.display_name
       FROM schools s
       LEFT JOIN subscription_plans p ON s.current_plan_id = p.id
-      WHERE s.id = ?
-    `).get(schoolId) as any;
+      WHERE s.id = $1
+    `, [schoolId]);
+    if (planPg && planPg.rows.length > 0) {
+      schoolPlan = planPg.rows[0];
+    } else {
+      schoolPlan = cacheDb.prepare(`
+        SELECT p.staff_limit, p.maximum_staff, p.display_name
+        FROM schools s
+        LEFT JOIN subscription_plans p ON s.current_plan_id = p.id
+        WHERE s.id = ?
+      `).get(schoolId) as any;
+    }
 
     const staffLimit = schoolPlan?.maximum_staff || schoolPlan?.staff_limit;
     if (staffLimit && currentStaffCount >= staffLimit) {
@@ -2104,26 +2984,70 @@ apiRouter.post(
     }
 
     // Check staff number uniqueness in this school
-    const existing = db.prepare('SELECT id FROM staff WHERE school_id = ? AND staff_number = ?').get(schoolId, staff_number.trim());
-    if (existing) {
+    let existingStaffNo: any = null;
+    const checkPg = await queryPg('SELECT id FROM staff WHERE school_id = $1 AND staff_number = $2', [schoolId, effectiveStaffNo]);
+    if (checkPg && checkPg.rows.length > 0) {
+      existingStaffNo = checkPg.rows[0];
+    } else {
+      existingStaffNo = cacheDb.prepare('SELECT id FROM staff WHERE school_id = ? AND staff_number = ?').get(schoolId, effectiveStaffNo);
+    }
+
+    if (existingStaffNo) {
       return res.status(409).json({ error: 'DUPLICATE_STAFF_NUMBER', message: 'Staff number already exists in your school.' });
     }
 
     const id = 'stf_' + crypto.randomUUID().slice(0, 8);
-    db.prepare(`
+
+    await queryPg(`
       INSERT INTO staff (
         id, school_id, staff_number, first_name, middle_name, last_name, email, phone,
-        gender, address, job_title, department, employment_status, date_joined
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        gender, address, job_title, department, employment_status, date_joined, created_at, updated_at
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+    `, [
+      id,
+      schoolId,
+      effectiveStaffNo,
+      safeFirstName,
+      safeMiddleName,
+      safeLastName,
+      safeEmail,
+      safePhone,
+      gender || null,
+      address || null,
+      effectiveJobTitle,
+      department || null,
+      employment_status,
+      date_joined
+    ]);
+
+    cacheDb.prepare(`
+      INSERT INTO staff (
+        id, school_id, staff_number, first_name, middle_name, last_name, email, phone,
+        gender, address, job_title, department, employment_status, date_joined, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+      ON CONFLICT(id) DO UPDATE SET
+        staff_number = excluded.staff_number,
+        first_name = excluded.first_name,
+        middle_name = excluded.middle_name,
+        last_name = excluded.last_name,
+        email = excluded.email,
+        phone = excluded.phone,
+        gender = excluded.gender,
+        address = excluded.address,
+        job_title = excluded.job_title,
+        department = excluded.department,
+        employment_status = excluded.employment_status,
+        date_joined = excluded.date_joined,
+        updated_at = CURRENT_TIMESTAMP
     `).run(
       id,
       schoolId,
       effectiveStaffNo,
-      first_name.trim(),
-      middle_name.trim(),
-      last_name.trim(),
-      email.toLowerCase().trim(),
-      phone.trim(),
+      safeFirstName,
+      safeMiddleName,
+      safeLastName,
+      safeEmail,
+      safePhone,
       gender || null,
       address || null,
       effectiveJobTitle,
@@ -2132,7 +3056,8 @@ apiRouter.post(
       date_joined
     );
 
-    const created = db.prepare('SELECT * FROM staff WHERE id = ?').get(id);
+    const pgCreated = await queryPg('SELECT * FROM staff WHERE id = $1', [id]);
+    const created = pgCreated?.rows[0] || cacheDb.prepare('SELECT * FROM staff WHERE id = ?').get(id);
     return res.status(201).json({ success: true, message: 'Staff member added successfully', staff: created });
   }
 );
@@ -2143,18 +3068,62 @@ apiRouter.put(
   requireAuth,
   requireTenant,
   requireRole(['SCHOOL_OWNER', 'SCHOOL_ADMIN']),
-  (req: AuthenticatedRequest, res) => {
+  async (req: AuthenticatedRequest, res) => {
     const schoolId = req.targetSchoolId!;
     const { id } = req.params;
 
-    const existing = db.prepare('SELECT * FROM staff WHERE id = ?').get(id) as any;
+    let existing: any = null;
+    const checkPg = await queryPg('SELECT * FROM staff WHERE id = $1', [id]);
+    if (checkPg && checkPg.rows.length > 0) {
+      existing = checkPg.rows[0];
+    } else {
+      existing = cacheDb.prepare('SELECT * FROM staff WHERE id = ?').get(id) as any;
+    }
+
     if (!existing) return res.status(404).json({ error: 'NOT_FOUND', message: 'Staff member not found.' });
     if (existing.school_id !== schoolId) {
       return res.status(403).json({ error: 'CROSS_TENANT_ACCESS_DENIED', message: 'Cannot edit staff of another school.' });
     }
 
     const b = req.body || {};
-    db.prepare(`
+    const safeStaffNo = b.staff_number !== undefined ? (b.staff_number ? b.staff_number.trim() : null) : null;
+    const safeFirstName = b.first_name !== undefined ? (b.first_name ? b.first_name.trim() : null) : null;
+    const safeMiddleName = b.middle_name !== undefined ? (b.middle_name ? b.middle_name.trim() : null) : null;
+    const safeLastName = b.last_name !== undefined ? (b.last_name ? b.last_name.trim() : null) : null;
+    const safeEmail = b.email !== undefined ? (b.email ? b.email.toLowerCase().trim() : null) : null;
+    const safePhone = b.phone !== undefined ? (b.phone ? b.phone.trim() : null) : null;
+    const safeJobTitle = b.job_title !== undefined ? (b.job_title ? b.job_title.trim() : null) : null;
+
+    await queryPg(`
+      UPDATE staff SET
+        staff_number = COALESCE($1, staff_number),
+        first_name = COALESCE($2, first_name),
+        middle_name = COALESCE($3, middle_name),
+        last_name = COALESCE($4, last_name),
+        email = COALESCE($5, email),
+        phone = COALESCE($6, phone),
+        gender = COALESCE($7, gender),
+        job_title = COALESCE($8, job_title),
+        department = COALESCE($9, department),
+        employment_status = COALESCE($10, employment_status),
+        updated_at = CURRENT_TIMESTAMP
+      WHERE id = $11 AND school_id = $12
+    `, [
+      safeStaffNo,
+      safeFirstName,
+      safeMiddleName,
+      safeLastName,
+      safeEmail,
+      safePhone,
+      b.gender || null,
+      safeJobTitle,
+      b.department || null,
+      b.employment_status || null,
+      id,
+      schoolId
+    ]);
+
+    cacheDb.prepare(`
       UPDATE staff SET
         staff_number = COALESCE(?, staff_number),
         first_name = COALESCE(?, first_name),
@@ -2169,44 +3138,57 @@ apiRouter.put(
         updated_at = CURRENT_TIMESTAMP
       WHERE id = ? AND school_id = ?
     `).run(
-      b.staff_number?.trim() || null,
-      b.first_name?.trim() || null,
-      b.middle_name?.trim() || null,
-      b.last_name?.trim() || null,
-      b.email ? b.email.toLowerCase().trim() : null,
-      b.phone?.trim() || null,
+      safeStaffNo,
+      safeFirstName,
+      safeMiddleName,
+      safeLastName,
+      safeEmail,
+      safePhone,
       b.gender || null,
-      b.job_title?.trim() || null,
+      safeJobTitle,
       b.department || null,
       b.employment_status || null,
       id,
       schoolId
     );
 
-    const updated = db.prepare('SELECT * FROM staff WHERE id = ?').get(id);
+    const updatedPg = await queryPg('SELECT * FROM staff WHERE id = $1', [id]);
+    const updated = updatedPg?.rows[0] || cacheDb.prepare('SELECT * FROM staff WHERE id = ?').get(id);
     return res.json({ success: true, message: 'Staff updated successfully', staff: updated });
   }
 );
 
-// DELETE /api/v1/school/staff/:id
 // DELETE /api/v1/school/staff/:id (Controlled soft-deletion to Recycle Bin)
 apiRouter.delete(
   '/v1/school/staff/:id',
   requireAuth,
   requireTenant,
   requireRole(['SCHOOL_OWNER', 'SCHOOL_ADMIN']),
-  (req: AuthenticatedRequest, res) => {
+  async (req: AuthenticatedRequest, res) => {
     const schoolId = req.targetSchoolId!;
     const { id } = req.params;
 
-    const existing = db.prepare('SELECT * FROM staff WHERE id = ?').get(id) as any;
+    let existing: any = null;
+    const checkPg = await queryPg('SELECT * FROM staff WHERE id = $1', [id]);
+    if (checkPg && checkPg.rows.length > 0) {
+      existing = checkPg.rows[0];
+    } else {
+      existing = cacheDb.prepare('SELECT * FROM staff WHERE id = ?').get(id) as any;
+    }
+
     if (!existing) return res.status(404).json({ error: 'NOT_FOUND', message: 'Staff not found.' });
     if (existing.school_id !== schoolId) {
       return res.status(403).json({ error: 'CROSS_TENANT_ACCESS_DENIED', message: 'Cannot delete staff of another school.' });
     }
 
     const reason = req.body?.reason || 'Staff archived by School Admin';
-    db.prepare(`
+    await queryPg(`
+      UPDATE staff 
+      SET is_deleted = 1, deleted_at = CURRENT_TIMESTAMP, deleted_by = $1, deletion_reason = $2 
+      WHERE id = $3 AND school_id = $4
+    `, [req.user!.email, reason, id, schoolId]);
+
+    cacheDb.prepare(`
       UPDATE staff 
       SET is_deleted = 1, deleted_at = CURRENT_TIMESTAMP, deleted_by = ?, deletion_reason = ? 
       WHERE id = ? AND school_id = ?
@@ -2231,20 +3213,86 @@ apiRouter.delete(
 // ==============================================================================
 
 // GET /api/v1/school/academic-sessions
-apiRouter.get('/v1/school/academic-sessions', requireAuth, requireTenant, (req: AuthenticatedRequest, res) => {
+apiRouter.get('/v1/school/academic-sessions', requireAuth, requireTenant, async (req: AuthenticatedRequest, res) => {
   const schoolId = req.targetSchoolId!;
-  const sessions = db.prepare(`
-    SELECT * FROM academic_sessions WHERE school_id = ? ORDER BY name DESC
-  `).all(schoolId) as any[];
+  try {
+    let sessions: any[] = [];
+    const pgSessions = await queryPg(`
+      SELECT * FROM academic_sessions WHERE school_id = $1 ORDER BY name DESC
+    `, [schoolId]);
 
-  const sessionsWithTerms = sessions.map((s) => {
-    const terms = db.prepare(`
-      SELECT * FROM terms WHERE academic_session_id = ? AND school_id = ? ORDER BY name ASC
-    `).all(s.id, schoolId);
-    return { ...s, terms };
-  });
+    if (pgSessions) {
+      sessions = pgSessions.rows;
+      for (const s of sessions) {
+        cacheDb.prepare(`
+          INSERT INTO academic_sessions (id, school_id, name, start_date, end_date, status, created_at, updated_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+          ON CONFLICT(id) DO UPDATE SET
+            name = excluded.name,
+            start_date = excluded.start_date,
+            end_date = excluded.end_date,
+            status = excluded.status,
+            updated_at = excluded.updated_at
+        `).run(
+          s.id,
+          s.school_id,
+          s.name,
+          s.start_date || null,
+          s.end_date || null,
+          s.status || 'UPCOMING',
+          s.created_at || new Date().toISOString(),
+          s.updated_at || new Date().toISOString()
+        );
+      }
+    } else {
+      sessions = cacheDb.prepare(`
+        SELECT * FROM academic_sessions WHERE school_id = ? ORDER BY name DESC
+      `).all(schoolId) as any[];
+    }
 
-  return res.json({ success: true, sessions: sessionsWithTerms });
+    const sessionsWithTerms = await Promise.all(sessions.map(async (s) => {
+      let terms: any[] = [];
+      const pgTerms = await queryPg(`
+        SELECT * FROM terms WHERE academic_session_id = $1 AND school_id = $2 ORDER BY name ASC
+      `, [s.id, schoolId]);
+
+      if (pgTerms) {
+        terms = pgTerms.rows;
+        for (const t of terms) {
+          cacheDb.prepare(`
+            INSERT INTO terms (id, school_id, academic_session_id, name, start_date, end_date, status, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+              name = excluded.name,
+              start_date = excluded.start_date,
+              end_date = excluded.end_date,
+              status = excluded.status,
+              updated_at = excluded.updated_at
+          `).run(
+            t.id,
+            t.school_id,
+            t.academic_session_id,
+            t.name,
+            t.start_date || null,
+            t.end_date || null,
+            t.status || 'UPCOMING',
+            t.created_at || new Date().toISOString(),
+            t.updated_at || new Date().toISOString()
+          );
+        }
+      } else {
+        terms = cacheDb.prepare(`
+          SELECT * FROM terms WHERE academic_session_id = ? AND school_id = ? ORDER BY name ASC
+        `).all(s.id, schoolId);
+      }
+      return { ...s, terms };
+    }));
+
+    return res.json({ success: true, sessions: sessionsWithTerms });
+  } catch (err: any) {
+    console.error('[GET /v1/school/academic-sessions Error]', err);
+    return res.status(500).json({ error: 'FETCH_FAILED', message: err.message });
+  }
 });
 
 // POST /api/v1/school/academic-sessions
@@ -2253,26 +3301,40 @@ apiRouter.post(
   requireAuth,
   requireTenant,
   requireRole(['SCHOOL_OWNER', 'SCHOOL_ADMIN']),
-  (req: AuthenticatedRequest, res) => {
+  async (req: AuthenticatedRequest, res) => {
     const schoolId = req.targetSchoolId!;
     const { name, start_date, end_date, status = 'UPCOMING' } = req.body;
 
-    if (!name) {
+    if (!name || typeof name !== 'string' || !name.trim()) {
       return res.status(400).json({ error: 'MISSING_FIELDS', message: 'Session name is required (e.g. 2025/2026).' });
     }
 
     if (status === 'ACTIVE') {
-      // Deactivate other sessions for this school to enforce single active session rule
-      db.prepare("UPDATE academic_sessions SET status = 'COMPLETED' WHERE school_id = ? AND status = 'ACTIVE'").run(schoolId);
+      await queryPg("UPDATE academic_sessions SET status = 'COMPLETED' WHERE school_id = $1 AND status = 'ACTIVE'", [schoolId]);
+      cacheDb.prepare("UPDATE academic_sessions SET status = 'COMPLETED' WHERE school_id = ? AND status = 'ACTIVE'").run(schoolId);
     }
 
     const id = 'ses_' + crypto.randomUUID().slice(0, 8);
-    db.prepare(`
-      INSERT INTO academic_sessions (id, school_id, name, start_date, end_date, status)
-      VALUES (?, ?, ?, ?, ?, ?)
-    `).run(id, schoolId, name.trim(), start_date || null, end_date || null, status);
+    const safeName = name.trim();
 
-    const session = db.prepare('SELECT * FROM academic_sessions WHERE id = ?').get(id);
+    await queryPg(`
+      INSERT INTO academic_sessions (id, school_id, name, start_date, end_date, status, created_at, updated_at)
+      VALUES ($1, $2, $3, $4, $5, $6, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+    `, [id, schoolId, safeName, start_date || null, end_date || null, status]);
+
+    cacheDb.prepare(`
+      INSERT INTO academic_sessions (id, school_id, name, start_date, end_date, status, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+      ON CONFLICT(id) DO UPDATE SET
+        name = excluded.name,
+        start_date = excluded.start_date,
+        end_date = excluded.end_date,
+        status = excluded.status,
+        updated_at = CURRENT_TIMESTAMP
+    `).run(id, schoolId, safeName, start_date || null, end_date || null, status);
+
+    const pgSession = await queryPg('SELECT * FROM academic_sessions WHERE id = $1', [id]);
+    const session = pgSession?.rows[0] || cacheDb.prepare('SELECT * FROM academic_sessions WHERE id = ?').get(id);
     return res.status(201).json({ success: true, message: 'Academic session created successfully', session });
   }
 );
@@ -2283,56 +3345,107 @@ apiRouter.post(
   requireAuth,
   requireTenant,
   requireRole(['SCHOOL_OWNER', 'SCHOOL_ADMIN']),
-  (req: AuthenticatedRequest, res) => {
+  async (req: AuthenticatedRequest, res) => {
     const schoolId = req.targetSchoolId!;
     const { id: sessionId } = req.params;
     const { name, start_date, end_date, status = 'UPCOMING' } = req.body;
 
-    const session = db.prepare('SELECT id FROM academic_sessions WHERE id = ? AND school_id = ?').get(sessionId, schoolId);
+    let session: any = null;
+    const pgSes = await queryPg('SELECT id FROM academic_sessions WHERE id = $1 AND school_id = $2', [sessionId, schoolId]);
+    if (pgSes && pgSes.rows.length > 0) {
+      session = pgSes.rows[0];
+    } else {
+      session = cacheDb.prepare('SELECT id FROM academic_sessions WHERE id = ? AND school_id = ?').get(sessionId, schoolId);
+    }
+
     if (!session) {
       return res.status(404).json({ error: 'SESSION_NOT_FOUND', message: 'Academic session not found in your school.' });
     }
 
-    if (!name) {
+    if (!name || typeof name !== 'string' || !name.trim()) {
       return res.status(400).json({ error: 'MISSING_FIELDS', message: 'Term name is required (e.g. 1st Term).' });
     }
 
     if (status === 'ACTIVE') {
-      db.prepare("UPDATE terms SET status = 'COMPLETED' WHERE school_id = ? AND status = 'ACTIVE'").run(schoolId);
+      await queryPg("UPDATE terms SET status = 'COMPLETED' WHERE school_id = $1 AND status = 'ACTIVE'", [schoolId]);
+      cacheDb.prepare("UPDATE terms SET status = 'COMPLETED' WHERE school_id = ? AND status = 'ACTIVE'").run(schoolId);
     }
 
     const termId = 'trm_' + crypto.randomUUID().slice(0, 8);
-    db.prepare(`
-      INSERT INTO terms (id, school_id, academic_session_id, name, start_date, end_date, status)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
-    `).run(termId, schoolId, sessionId, name.trim(), start_date || null, end_date || null, status);
+    const safeName = name.trim();
 
-    const term = db.prepare('SELECT * FROM terms WHERE id = ?').get(termId);
+    await queryPg(`
+      INSERT INTO terms (id, school_id, academic_session_id, name, start_date, end_date, status, created_at, updated_at)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+    `, [termId, schoolId, sessionId, safeName, start_date || null, end_date || null, status]);
+
+    cacheDb.prepare(`
+      INSERT INTO terms (id, school_id, academic_session_id, name, start_date, end_date, status, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+      ON CONFLICT(id) DO UPDATE SET
+        name = excluded.name,
+        start_date = excluded.start_date,
+        end_date = excluded.end_date,
+        status = excluded.status,
+        updated_at = CURRENT_TIMESTAMP
+    `).run(termId, schoolId, sessionId, safeName, start_date || null, end_date || null, status);
+
+    const pgTerm = await queryPg('SELECT * FROM terms WHERE id = $1', [termId]);
+    const term = pgTerm?.rows[0] || cacheDb.prepare('SELECT * FROM terms WHERE id = ?').get(termId);
     return res.status(201).json({ success: true, message: 'Term created successfully', term });
   }
 );
 
 // GET /api/v1/school/fees (Strictly tenant-scoped fees)
-apiRouter.get('/v1/school/fees', requireAuth, requireTenant, (req: AuthenticatedRequest, res) => {
+apiRouter.get('/v1/school/fees', requireAuth, requireTenant, async (req: AuthenticatedRequest, res) => {
   const schoolId = req.targetSchoolId!;
-  const fees = db.prepare('SELECT * FROM fees WHERE school_id = ? ORDER BY name ASC').all(schoolId);
-  return res.json({ success: true, count: fees.length, fees });
+  try {
+    let fees: any[] = [];
+    const pgFees = await queryPg('SELECT * FROM fees WHERE school_id = $1 ORDER BY name ASC', [schoolId]);
+    if (pgFees) {
+      fees = pgFees.rows;
+    } else {
+      fees = cacheDb.prepare('SELECT * FROM fees WHERE school_id = ? ORDER BY name ASC').all(schoolId);
+    }
+    return res.json({ success: true, count: fees.length, fees });
+  } catch (err: any) {
+    return res.status(500).json({ error: 'FETCH_FAILED', message: err.message });
+  }
 });
 
 // GET /api/v1/school/users (Users belonging to THIS tenant only)
-apiRouter.get('/v1/school/users', requireAuth, requireTenant, (req: AuthenticatedRequest, res) => {
+apiRouter.get('/v1/school/users', requireAuth, requireTenant, async (req: AuthenticatedRequest, res) => {
   const schoolId = req.targetSchoolId!;
-  const users = db.prepare(`
-    SELECT u.id, u.email, u.full_name, u.phone, u.is_active, u.created_at,
-           r.name as role_name, r.display_name as role_display_name
-    FROM user_roles ur
-    JOIN users u ON ur.user_id = u.id
-    JOIN roles r ON ur.role_id = r.id
-    WHERE ur.school_id = ?
-    ORDER BY u.created_at ASC
-  `).all(schoolId);
+  try {
+    let users: any[] = [];
+    const pgUsers = await queryPg(`
+      SELECT u.id, u.email, u.full_name, u.phone, u.is_active, u.created_at,
+             r.name as role_name, r.display_name as role_display_name
+      FROM user_roles ur
+      JOIN users u ON ur.user_id = u.id
+      JOIN roles r ON ur.role_id = r.id
+      WHERE ur.school_id = $1
+      ORDER BY u.created_at ASC
+    `, [schoolId]);
 
-  return res.json({ success: true, users });
+    if (pgUsers) {
+      users = pgUsers.rows;
+    } else {
+      users = cacheDb.prepare(`
+        SELECT u.id, u.email, u.full_name, u.phone, u.is_active, u.created_at,
+               r.name as role_name, r.display_name as role_display_name
+        FROM user_roles ur
+        JOIN users u ON ur.user_id = u.id
+        JOIN roles r ON ur.role_id = r.id
+        WHERE ur.school_id = ?
+        ORDER BY u.created_at ASC
+      `).all(schoolId);
+    }
+
+    return res.json({ success: true, users });
+  } catch (err: any) {
+    return res.status(500).json({ error: 'FETCH_FAILED', message: err.message });
+  }
 });
 
 // GET /api/v1/school/audit-logs (Audit trail for this school tenant only)
@@ -2341,16 +3454,32 @@ apiRouter.get(
   requireAuth,
   requireTenant,
   requireRole(['SCHOOL_OWNER', 'SCHOOL_ADMIN']),
-  (req: AuthenticatedRequest, res) => {
+  async (req: AuthenticatedRequest, res) => {
     const schoolId = req.targetSchoolId!;
-    const logs = db.prepare(`
-      SELECT * FROM audit_logs
-      WHERE school_id = ?
-      ORDER BY created_at DESC
-      LIMIT 100
-    `).all(schoolId);
+    try {
+      let logs: any[] = [];
+      const pgLogs = await queryPg(`
+        SELECT * FROM audit_logs
+        WHERE school_id = $1
+        ORDER BY created_at DESC
+        LIMIT 100
+      `, [schoolId]);
 
-    return res.json({ success: true, logs });
+      if (pgLogs) {
+        logs = pgLogs.rows;
+      } else {
+        logs = cacheDb.prepare(`
+          SELECT * FROM audit_logs
+          WHERE school_id = ?
+          ORDER BY created_at DESC
+          LIMIT 100
+        `).all(schoolId);
+      }
+
+      return res.json({ success: true, logs });
+    } catch (err: any) {
+      return res.status(500).json({ error: 'FETCH_FAILED', message: err.message });
+    }
   }
 );
 
@@ -2383,95 +3512,6 @@ apiRouter.post('/v1/test/simulate-idor', requireAuth, (req: AuthenticatedRequest
       schoolId: foreignSchoolId,
     });
   });
-});
-
-// Explicit fallback route for school deletion: DELETE /api/v1/admin/schools/:schoolId
-apiRouter.delete(['/v1/admin/schools/:schoolId', '/admin/schools/:schoolId'], requireAuth, requireSuperAdmin, async (req: AuthenticatedRequest, res) => {
-  const { schoolId } = req.params;
-  const { confirmationName } = req.body || {};
-
-  const { getPgPool } = await import('./db.ts');
-  const pool = getPgPool();
-  let school: any = null;
-
-  if (pool) {
-    try {
-      const schCheck = await pool.query('SELECT * FROM schools WHERE id = $1', [schoolId]);
-      if (schCheck.rows.length > 0) school = schCheck.rows[0];
-    } catch {}
-  }
-  if (!school) {
-    school = db.prepare('SELECT * FROM schools WHERE id = ?').get(schoolId) as any;
-  }
-  if (!school) {
-    return res.status(404).json({ error: 'NOT_FOUND', message: 'School not found' });
-  }
-
-  if (confirmationName && confirmationName.trim().toLowerCase() !== school.name.trim().toLowerCase()) {
-    return res.status(400).json({
-      error: 'CONFIRMATION_MISMATCH',
-      message: `To delete this school, please confirm by typing its exact name "${school.name}".`,
-    });
-  }
-
-  // 1. Authoritative Neon PostgreSQL Purge
-  if (pool) {
-    const client = await pool.connect();
-    try {
-      await client.query('BEGIN');
-      const uRes = await client.query('SELECT user_id FROM user_roles WHERE school_id = $1', [schoolId]);
-      const userIds = uRes.rows.map(r => r.user_id);
-
-      await client.query('DELETE FROM payments WHERE school_id = $1', [schoolId]);
-      await client.query('DELETE FROM invoices WHERE school_id = $1', [schoolId]);
-      await client.query('DELETE FROM students WHERE school_id = $1', [schoolId]);
-      await client.query('DELETE FROM classes WHERE school_id = $1', [schoolId]);
-      await client.query('DELETE FROM staff WHERE school_id = $1', [schoolId]);
-      await client.query('DELETE FROM school_subscriptions WHERE school_id = $1', [schoolId]);
-      await client.query('DELETE FROM user_roles WHERE school_id = $1', [schoolId]);
-      if (userIds.length > 0) {
-        await client.query('DELETE FROM users WHERE id = ANY($1::text[]) AND is_platform_admin = 0', [userIds]);
-      }
-      await client.query('DELETE FROM school_settings WHERE school_id = $1', [schoolId]);
-      await client.query('DELETE FROM schools WHERE id = $1', [schoolId]);
-      await client.query('COMMIT');
-    } catch (err: any) {
-      await client.query('ROLLBACK');
-      console.error('[Purge PG Error]', err);
-    } finally {
-      client.release();
-    }
-  }
-
-  // 2. Local SQLite Purge
-  try {
-    const uRows = db.prepare('SELECT user_id FROM user_roles WHERE school_id = ?').all(schoolId) as any[];
-    db.prepare('DELETE FROM payments WHERE school_id = ?').run(schoolId);
-    db.prepare('DELETE FROM invoices WHERE school_id = ?').run(schoolId);
-    db.prepare('DELETE FROM students WHERE school_id = ?').run(schoolId);
-    db.prepare('DELETE FROM classes WHERE school_id = ?').run(schoolId);
-    db.prepare('DELETE FROM staff WHERE school_id = ?').run(schoolId);
-    db.prepare('DELETE FROM school_subscriptions WHERE school_id = ?').run(schoolId);
-    db.prepare('DELETE FROM user_roles WHERE school_id = ?').run(schoolId);
-    for (const u of uRows) {
-      db.prepare('DELETE FROM users WHERE id = ? AND is_platform_admin = 0').run(u.user_id);
-    }
-    db.prepare('DELETE FROM school_settings WHERE school_id = ?').run(schoolId);
-    db.prepare('DELETE FROM schools WHERE id = ?').run(schoolId);
-  } catch (e) {}
-
-  logAudit({
-    actorId: req.user!.id,
-    actorEmail: req.user!.email,
-    schoolId,
-    action: 'PURGE_SCHOOL',
-    entity: 'SCHOOL',
-    entityId: schoolId,
-    ipAddress: req.ip || '127.0.0.1',
-    metadata: { schoolName: school.name },
-  });
-
-  return res.json({ success: true, message: `School ${school.name} permanently purged from all databases.` });
 });
 
 

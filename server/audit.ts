@@ -1,4 +1,4 @@
-import { db } from './db.ts';
+import { cacheDb, getPgPool, queryPg } from './db.ts';
 
 export interface AuditParams {
   actorId?: string | null;
@@ -12,23 +12,59 @@ export interface AuditParams {
 }
 
 export function logAudit(params: AuditParams) {
+  const metadataJson = params.metadata ? JSON.stringify(params.metadata) : null;
+  const ip = params.ipAddress || '127.0.0.1';
+
+  // 1. Local SQLite read-cache write (safe if FK parent isn't in local cache yet)
   try {
-    const stmt = db.prepare(`
+    const validActor = params.actorId
+      ? cacheDb.prepare('SELECT id FROM users WHERE id = ?').get(params.actorId)
+      : null;
+    const validSchool = params.schoolId
+      ? cacheDb.prepare('SELECT id FROM schools WHERE id = ?').get(params.schoolId)
+      : null;
+
+    (cacheDb as any).prepare(`
       INSERT INTO audit_logs (actor_id, actor_email, school_id, action, entity, entity_id, ip_address, metadata)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    `);
-
-    stmt.run(
-      params.actorId || null,
+    `).run(
+      validActor ? params.actorId : null,
       params.actorEmail || null,
-      params.schoolId || null,
+      validSchool ? params.schoolId : null,
       params.action,
       params.entity,
       params.entityId || null,
-      params.ipAddress || '127.0.0.1',
-      params.metadata ? JSON.stringify(params.metadata) : null
+      ip,
+      metadataJson
     );
   } catch (err) {
-    console.error('[AuditLog] Failed to record audit log:', err);
+    // Non-fatal local cache audit notice
+  }
+
+  // 2. Authoritative Neon PostgreSQL audit persistence (uses PG SERIAL sequence for id)
+  const pool = getPgPool();
+  if (pool) {
+    queryPg(
+      `INSERT INTO audit_logs (actor_id, actor_email, school_id, action, entity, entity_id, ip_address, metadata)
+       VALUES (
+         (SELECT id FROM users WHERE id = $1),
+         $2,
+         (SELECT id FROM schools WHERE id = $3),
+         $4, $5, $6, $7, $8
+       )`,
+      [
+        params.actorId || null,
+        params.actorEmail || null,
+        params.schoolId || null,
+        params.action,
+        params.entity,
+        params.entityId || null,
+        ip,
+        metadataJson,
+      ]
+    ).catch((err) => {
+      console.warn('[AuditLog PG Notice]', err?.message);
+    });
   }
 }
+

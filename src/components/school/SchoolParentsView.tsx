@@ -403,11 +403,10 @@ export const SchoolParentsView: React.FC = () => {
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
                   <label className="block font-semibold text-slate-700 mb-1">
-                    Phone Number <span className="text-red-500">*</span>
+                    Phone Number <span className="text-slate-400 font-normal">(Optional)</span>
                   </label>
                   <input
                     type="tel"
-                    required
                     value={formData.phone}
                     onChange={(e) => setFormData({ ...formData, phone: e.target.value })}
                     placeholder="e.g. 08021234567"
@@ -571,10 +570,11 @@ export const SchoolParentsView: React.FC = () => {
 
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
-                  <label className="block font-semibold text-slate-700 mb-1">Phone Number</label>
+                  <label className="block font-semibold text-slate-700 mb-1">
+                    Phone Number <span className="text-slate-400 font-normal">(Optional)</span>
+                  </label>
                   <input
                     type="tel"
-                    required
                     value={formData.phone}
                     onChange={(e) => setFormData({ ...formData, phone: e.target.value })}
                     className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl"

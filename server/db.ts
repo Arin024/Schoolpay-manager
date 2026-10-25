@@ -30,6 +30,7 @@ rawDb.exec('PRAGMA wal_autocheckpoint = 100;'); // Checkpoint WAL frequently (ev
 let pgPool: pg.Pool | null = null;
 let pgConnected = false;
 let pgStatusInfo: any = null;
+let pgEndpointHostPrefix = 'NONE';
 
 export function getPgPool(): pg.Pool | null {
   return pgPool;
@@ -39,14 +40,87 @@ export function isPgConnected(): boolean {
   return pgConnected;
 }
 
+export function markPgConnected(): void {
+  if (!pgConnected) {
+    pgConnected = true;
+    pgStatusInfo = {
+      ...(pgStatusInfo || {}),
+      status: 'CONNECTED',
+      reconnectedAt: new Date().toISOString(),
+    };
+  }
+}
+
+export function getPgEndpointHostPrefix(): string {
+  return pgEndpointHostPrefix;
+}
+
+export function isTransientPgError(err: any): boolean {
+  const msg = String(err?.message || '').toLowerCase();
+  const code = String(err?.code || '');
+  return (
+    msg.includes('connection terminated') ||
+    msg.includes('econnreset') ||
+    msg.includes('etimedout') ||
+    msg.includes('socket hang up') ||
+    msg.includes('client has encountered a connection error') ||
+    msg.includes('terminating connection') ||
+    code === '57P01' ||
+    code === '08006' ||
+    code === '08003' ||
+    code === '08001' ||
+    code === 'ECONNRESET'
+  );
+}
+
+/**
+ * Executes a parameterized PostgreSQL query ($1, $2, ...) with automatic 1x retry
+ * if Neon Serverless closed an idle pooled socket during scale-to-zero.
+ */
+export async function queryPg(sql: string, params: any[] = []): Promise<pg.QueryResult<any>> {
+  if (!pgPool) {
+    throw new Error('Neon PostgreSQL pool is not configured');
+  }
+  const cleanParams = params.map((p) => (p === undefined ? null : p));
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    try {
+      const res = await pgPool.query(sql, cleanParams);
+      markPgConnected();
+      return res;
+    } catch (err: any) {
+      if (attempt === 1 && isTransientPgError(err)) {
+        await new Promise((r) => setTimeout(r, 250));
+        continue;
+      }
+      throw err;
+    }
+  }
+  throw new Error('PostgreSQL query retry exhausted');
+}
+
+export async function ensurePgConnected(): Promise<boolean> {
+  if (pgConnected && pgPool) return true;
+  if (!pgPool) return false;
+  try {
+    await queryPg('SELECT 1');
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export function getPgStatus(): any {
   return pgStatusInfo;
 }
 
+/**
+ * Direct local SQLite cache handle (does NOT trigger write-through back to PostgreSQL).
+ * Always use cacheDb with ON CONFLICT(...) DO UPDATE (never INSERT OR REPLACE on parent tables)
+ * when syncing authoritative rows from Neon PostgreSQL into the local SQLite read cache.
+ */
+export const cacheDb = rawDb;
+
 // Proxied db instance with safe, lightweight write-through replication to Neon PostgreSQL
-// Note: Authoritative mutations in services (auth, finance, admin, billing) explicitly use
-// getPgPool() transactions. The proxy below ensures non-critical SQLite writes sync without
-// flooding un-awaited promises or consuming memory during bulk seeding.
 let isInitialSeedingInProgress = false;
 
 export function setInitialSeedingState(inProgress: boolean) {
@@ -56,7 +130,7 @@ export function setInitialSeedingState(inProgress: boolean) {
 export const db = {
   exec(sql: string) {
     rawDb.exec(sql);
-    if (!isInitialSeedingInProgress && pgPool && pgConnected) {
+    if (!isInitialSeedingInProgress && pgPool) {
       const trimmed = sql.trim().toUpperCase();
       if (
         trimmed.startsWith('INSERT') ||
@@ -64,9 +138,12 @@ export const db = {
         trimmed.startsWith('DELETE')
       ) {
         const pgSql = translateSqlForPostgres(sql);
-        pgPool.query(pgSql).catch(() => {
-          // Suppress noise; critical writes are explicitly handled with transactional safety
-        });
+        pgPool
+          .query(pgSql)
+          .then(() => markPgConnected())
+          .catch((err) => {
+            console.warn('[PG Write-Through exec Notice]', err?.message);
+          });
       }
     }
   },
@@ -76,7 +153,7 @@ export const db = {
     return {
       run(...params: any[]) {
         const res = rawStmt.run(...params);
-        if (!isInitialSeedingInProgress && pgPool && pgConnected) {
+        if (!isInitialSeedingInProgress && pgPool) {
           const trimmed = sql.trim().toUpperCase();
           if (
             trimmed.startsWith('INSERT') ||
@@ -85,9 +162,12 @@ export const db = {
           ) {
             const pgSql = translateSqlForPostgres(sql);
             const pgParams = params.map((p) => (p === undefined ? null : p));
-            pgPool.query(pgSql, pgParams).catch(() => {
-              // Suppress noise; critical writes are explicitly handled with transactional safety
-            });
+            pgPool
+              .query(pgSql, pgParams)
+              .then(() => markPgConnected())
+              .catch((err) => {
+                console.warn('[PG Write-Through run Notice]', err?.message);
+              });
           }
         }
         return res;
@@ -106,12 +186,11 @@ export const db = {
  * Executes a query directly on Neon PostgreSQL as the authoritative store
  */
 export async function queryNeonDirectly(sql: string, params: any[] = []): Promise<any[]> {
-  if (!pgPool || !pgConnected) {
-    throw new Error('Neon PostgreSQL is not connected');
+  if (!pgPool) {
+    throw new Error('Neon PostgreSQL is not configured');
   }
   const pgSql = translateSqlForPostgres(sql);
-  const pgParams = params.map((p) => (p === undefined ? null : p));
-  const res = await pgPool.query(pgSql, pgParams);
+  const res = await queryPg(pgSql, params);
   return res.rows;
 }
 
@@ -122,17 +201,26 @@ export async function queryNeonDirectly(sql: string, params: any[] = []): Promis
 export async function executePgTransaction<T>(
   callback: (client: pg.PoolClient) => Promise<T>
 ): Promise<T> {
-  if (!pgPool || !pgConnected) {
+  if (!pgPool) {
     throw new Error('Durable Neon PostgreSQL database connection is unavailable.');
+  }
+  if (!pgConnected) {
+    const ok = await ensurePgConnected();
+    if (!ok) {
+      throw new Error('Durable Neon PostgreSQL database connection is unavailable.');
+    }
   }
   const client = await pgPool.connect();
   try {
     await client.query('BEGIN');
     const result = await callback(client);
     await client.query('COMMIT');
+    markPgConnected();
     return result;
   } catch (err) {
-    await client.query('ROLLBACK');
+    try {
+      await client.query('ROLLBACK');
+    } catch {}
     throw err;
   } finally {
     client.release();
@@ -143,7 +231,7 @@ export async function executePgTransaction<T>(
  * Reconciles local engine state on demand from authoritative Neon PostgreSQL
  */
 export async function reconcileCacheFromNeon(): Promise<{ success: boolean; tableCount: number; message: string }> {
-  if (!pgPool || !pgConnected) {
+  if (!pgPool || !(await ensurePgConnected())) {
     return { success: false, tableCount: 0, message: 'Neon PostgreSQL is not connected' };
   }
   await hydrateSqliteFromPostgres();
@@ -161,17 +249,23 @@ export async function initDatabase() {
     rawDb.exec(schemaSql);
   }
 
-  // 3. Run dynamic schema column migrations to ensure all columns exist
-  migrateStep2Columns();
-  migrateStep4Columns();
-  migrateStep5Columns();
-  migrateRecoveryColumns();
+  // 3. Run dynamic schema column migrations to ensure all columns and nullable constraints exist
+  setInitialSeedingState(true);
+  try {
+    migrateStep2Columns();
+    migrateStep4Columns();
+    migrateStep5Columns();
+    migrateRecoveryColumns();
+    migrateNullableDirectoryColumnsSqlite();
+  } finally {
+    setInitialSeedingState(false);
+  }
 
   // 4. Ensure Neon configuration is resolved and available
   await ensureNeonEnvironment();
 
   // 5. Initialize and verify Neon PostgreSQL if DATABASE_URL is configured
-  let rawEnvUrl = (process.env.NEON_DATABASE_URL || process.env.DATABASE_URL || process.env.DATABASE_URL_UNPOOLED || '').trim();
+  let rawEnvUrl = (process.env.NEON_DATABASE_URL || process.env.DATABASE_URL || process.env.POSTGRES_URL || process.env.DATABASE_URL_UNPOOLED || '').trim();
   if ((rawEnvUrl.startsWith('"') && rawEnvUrl.endsWith('"')) || (rawEnvUrl.startsWith("'") && rawEnvUrl.endsWith("'"))) {
     rawEnvUrl = rawEnvUrl.slice(1, -1).trim();
   }
@@ -187,71 +281,122 @@ export async function initDatabase() {
   const databaseUrl = rawEnvUrl;
   if (databaseUrl) {
     try {
-      pgPool = new pg.Pool({
-        connectionString: databaseUrl,
-        ssl: databaseUrl.includes('localhost') ? false : { rejectUnauthorized: true },
-        max: 2, // Low connection count strictly conserves RAM on Render Free (512MB cap)
-        idleTimeoutMillis: 15000,
-        connectionTimeoutMillis: 15000, // Generous 15s timeout to allow Neon serverless compute to spin up without throwing
-        statement_timeout: 15000,
-        keepAlive: true,
-        maxUses: 200, // Recycle frequently to free pooled memory
-      });
+      const parsedHost = new URL(databaseUrl).hostname;
+      pgEndpointHostPrefix = parsedHost.split('.')[0] || parsedHost.slice(0, 18);
+    } catch {
+      pgEndpointHostPrefix = 'CONFIGURED';
+    }
 
-      const client = await pgPool.connect();
+    pgPool = new pg.Pool({
+      connectionString: databaseUrl,
+      ssl: databaseUrl.includes('localhost') ? false : { rejectUnauthorized: true },
+      max: 5,
+      idleTimeoutMillis: 20000,
+      connectionTimeoutMillis: 30000, // Generous 30s timeout for Neon serverless cold wake-up
+      statement_timeout: 30000,
+      keepAlive: true,
+      maxUses: 500,
+    });
+
+    // CRITICAL: Prevent idle Neon socket closures from crashing the Node.js process
+    pgPool.on('error', (poolErr: any) => {
+      console.warn('[Neon PostgreSQL Idle Client Notice]', poolErr?.message);
+    });
+
+    let lastErr: any = null;
+    for (let attempt = 1; attempt <= 3; attempt++) {
       try {
-        const testRes = await client.query(
-          'SELECT current_database() AS database_name, current_user AS database_user, version() AS postgres_version, NOW() AS database_time;'
-        );
-        pgConnected = true;
-        pgStatusInfo = {
-          databaseName: testRes.rows[0].database_name,
-          databaseUser: testRes.rows[0].database_user,
-          connectedAt: testRes.rows[0].database_time,
-          status: 'CONNECTED',
-        };
-        console.log(`[Neon PostgreSQL] Connected successfully to database "${pgStatusInfo.databaseName}" (User: ${pgStatusInfo.databaseUser})`);
-      } finally {
-        client.release();
-      }
+        const client = await pgPool.connect();
+        try {
+          const testRes = await client.query(
+            'SELECT current_database() AS database_name, current_user AS database_user, version() AS postgres_version, NOW() AS database_time;'
+          );
+          pgConnected = true;
+          pgStatusInfo = {
+            databaseName: testRes.rows[0].database_name,
+            databaseUser: testRes.rows[0].database_user,
+            endpoint: pgEndpointHostPrefix,
+            connectedAt: testRes.rows[0].database_time,
+            status: 'CONNECTED',
+          };
+          console.log(`[Neon PostgreSQL] Connected successfully to database "${pgStatusInfo.databaseName}" on ${pgEndpointHostPrefix} (attempt ${attempt})`);
 
+          // Ensure optional directory and academic date columns are nullable in authoritative Neon PostgreSQL
+          const alterStatements = [
+            'ALTER TABLE parents ALTER COLUMN phone DROP NOT NULL',
+            'ALTER TABLE students ALTER COLUMN admission_number DROP NOT NULL',
+            'ALTER TABLE students ALTER COLUMN gender DROP NOT NULL',
+            'ALTER TABLE staff ALTER COLUMN staff_number DROP NOT NULL',
+            'ALTER TABLE staff ALTER COLUMN email DROP NOT NULL',
+            'ALTER TABLE staff ALTER COLUMN phone DROP NOT NULL',
+            'ALTER TABLE staff ALTER COLUMN job_title DROP NOT NULL',
+            'ALTER TABLE academic_sessions ALTER COLUMN start_date DROP NOT NULL',
+            'ALTER TABLE academic_sessions ALTER COLUMN end_date DROP NOT NULL',
+            'ALTER TABLE terms ALTER COLUMN start_date DROP NOT NULL',
+            'ALTER TABLE terms ALTER COLUMN end_date DROP NOT NULL',
+          ];
+          for (const stmt of alterStatements) {
+            try {
+              await client.query(stmt);
+            } catch {
+              // Column may already be nullable
+            }
+          }
+        } finally {
+          client.release();
+        }
+        lastErr = null;
+        break;
+      } catch (err: any) {
+        lastErr = err;
+        console.warn(`[Neon PostgreSQL Connect Attempt ${attempt}/3 Notice]`, err?.message);
+        if (attempt < 3) {
+          await new Promise((r) => setTimeout(r, 1500 * attempt));
+        }
+      }
+    }
+
+    if (pgConnected) {
       // 6. Hydrate local state from authoritative Neon PostgreSQL NOW that tables and columns exist!
       await hydrateSqliteFromPostgres();
-    } catch (err: any) {
-      console.warn('[Neon PostgreSQL Connection Notice]', err.message);
-      pgConnected = false;
-      pgStatusInfo = { status: 'DISCONNECTED', error: err.message };
+    } else if (lastErr) {
+      pgStatusInfo = { status: 'DISCONNECTED', endpoint: pgEndpointHostPrefix, error: lastErr.message };
     }
   }
 
-  // 7. Execute safe version-controlled migrations (soft deletion & recycle bin guards)
+  // 7. Execute safe version-controlled migrations & idempotent base seeds WITHOUT echoing demo seeds to PG
+  setInitialSeedingState(true);
   try {
-    await runSafeMigrations();
-  } catch (err) {
-    console.error('[Migration Error]', err);
+    try {
+      await runSafeMigrations();
+    } catch (err) {
+      console.error('[Migration Error]', err);
+    }
+
+    // 8. Ensure base schools, users, and roles exist (idempotent, never overwrite existing user data)
+    seedInitialData();
+
+    // 9. Ensure Step 2 modules (academic sessions, terms, classes, arms, staff, parents, students) are seeded
+    seedStep2SchoolManagement();
+
+    // 10. Ensure Step 3 financial modules (categories, structures, invoices, payments, discounts) are seeded
+    seedStep3FinancialManagement();
+
+    // 11. Ensure Step 4 payment modules (receipts, notifications, pending demo payments) are seeded
+    seedStep4PaymentsAndReceipts();
+
+    // 12. Ensure Step 5 Platform Super Admin SaaS modules (plans, subscriptions, revenue, partners) are seeded
+    seedStep5PlatformSubscriptions();
+  } finally {
+    setInitialSeedingState(false);
   }
-
-  // 8. Ensure base schools, users, and roles exist (idempotent, never overwrite existing user data)
-  seedInitialData();
-
-  // 9. Ensure Step 2 modules (academic sessions, terms, classes, arms, staff, parents, students) are seeded
-  seedStep2SchoolManagement();
-
-  // 10. Ensure Step 3 financial modules (categories, structures, invoices, payments, discounts) are seeded
-  seedStep3FinancialManagement();
-
-  // 11. Ensure Step 4 payment modules (receipts, notifications, pending demo payments) are seeded
-  seedStep4PaymentsAndReceipts();
-
-  // 12. Ensure Step 5 Platform Super Admin SaaS modules (plans, subscriptions, revenue, partners) are seeded
-  seedStep5PlatformSubscriptions();
 
   // 13. Start automated daily backup scheduler
   startAutomaticBackupScheduler();
 }
 
 async function hydrateSqliteFromPostgres() {
-  if (!pgPool || !pgConnected) return;
+  if (!pgPool) return;
 
   const client = await pgPool.connect();
   try {
@@ -270,7 +415,7 @@ async function hydrateSqliteFromPostgres() {
           let hasMore = true;
 
           while (hasMore) {
-            const res = await client.query(`SELECT * FROM "${table}" LIMIT ${BATCH_SIZE} OFFSET ${offset}`);
+            const res = await client.query(`SELECT * FROM "${table}" ORDER BY 1 LIMIT ${BATCH_SIZE} OFFSET ${offset}`);
             if (res.rows.length === 0) {
               hasMore = false;
               break;
@@ -317,7 +462,147 @@ async function hydrateSqliteFromPostgres() {
   } catch (err: any) {
     console.warn('[Hydration Warning]', err.message);
   } finally {
+    try {
+      rawDb.exec('PRAGMA foreign_keys = ON;');
+    } catch {}
     client.release();
+  }
+}
+
+function migrateNullableDirectoryColumnsSqlite() {
+  // Rebuild SQLite students, parents, or staff tables in-place ONLY if legacy NOT NULL constraints exist on optional columns
+  try {
+    const stuInfo = rawDb.prepare('PRAGMA table_info(students)').all() as any[];
+    const admCol = stuInfo.find((c) => c.name === 'admission_number');
+    if (admCol && admCol.notnull === 1) {
+      rawDb.exec(`
+        PRAGMA foreign_keys = OFF;
+        CREATE TABLE students_mig (
+          id TEXT PRIMARY KEY,
+          school_id TEXT NOT NULL REFERENCES schools(id) ON DELETE CASCADE,
+          admission_number TEXT,
+          first_name TEXT NOT NULL,
+          middle_name TEXT,
+          last_name TEXT NOT NULL,
+          full_name TEXT NOT NULL,
+          gender TEXT,
+          date_of_birth TEXT,
+          phone TEXT,
+          email TEXT,
+          address TEXT,
+          state TEXT,
+          nationality TEXT DEFAULT 'Nigerian',
+          admission_date TEXT,
+          student_status TEXT DEFAULT 'ACTIVE',
+          status TEXT DEFAULT 'ACTIVE',
+          class_id TEXT REFERENCES classes(id) ON DELETE SET NULL,
+          class_arm_id TEXT,
+          class_name TEXT,
+          class_arm_name TEXT,
+          academic_session_id TEXT,
+          profile_photo_url TEXT,
+          emergency_contact TEXT,
+          medical_notes TEXT,
+          is_deleted INTEGER DEFAULT 0,
+          deleted_at DATETIME,
+          deleted_by TEXT,
+          deletion_reason TEXT,
+          created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+          updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+          UNIQUE (school_id, admission_number)
+        );
+      `);
+      const existingCols = stuInfo.map((c) => c.name);
+      const targetCols = (rawDb.prepare('PRAGMA table_info(students_mig)').all() as any[]).map((c) => c.name);
+      const shared = existingCols.filter((c) => targetCols.includes(c)).map((c) => `"${c}"`).join(', ');
+      rawDb.exec(`INSERT INTO students_mig (${shared}) SELECT ${shared} FROM students;`);
+      rawDb.exec('DROP TABLE students; ALTER TABLE students_mig RENAME TO students; PRAGMA foreign_keys = ON;');
+    }
+  } catch (e: any) {
+    try { rawDb.exec('PRAGMA foreign_keys = ON;'); } catch {}
+    console.warn('[SQLite Students Nullable Migration Notice]', e?.message);
+  }
+
+  try {
+    const parInfo = rawDb.prepare('PRAGMA table_info(parents)').all() as any[];
+    const phoneCol = parInfo.find((c) => c.name === 'phone');
+    if (phoneCol && phoneCol.notnull === 1) {
+      rawDb.exec(`
+        PRAGMA foreign_keys = OFF;
+        CREATE TABLE parents_mig (
+          id TEXT PRIMARY KEY,
+          school_id TEXT NOT NULL REFERENCES schools(id) ON DELETE CASCADE,
+          user_id TEXT REFERENCES users(id) ON DELETE SET NULL,
+          first_name TEXT NOT NULL,
+          last_name TEXT NOT NULL,
+          phone TEXT,
+          email TEXT,
+          address TEXT,
+          occupation TEXT,
+          relationship TEXT DEFAULT 'Parent',
+          emergency_contact TEXT,
+          is_deleted INTEGER DEFAULT 0,
+          deleted_at DATETIME,
+          deleted_by TEXT,
+          deletion_reason TEXT,
+          created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+          updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        );
+      `);
+      const existingCols = parInfo.map((c) => c.name);
+      const targetCols = (rawDb.prepare('PRAGMA table_info(parents_mig)').all() as any[]).map((c) => c.name);
+      const shared = existingCols.filter((c) => targetCols.includes(c)).map((c) => `"${c}"`).join(', ');
+      rawDb.exec(`INSERT INTO parents_mig (${shared}) SELECT ${shared} FROM parents;`);
+      rawDb.exec('DROP TABLE parents; ALTER TABLE parents_mig RENAME TO parents; PRAGMA foreign_keys = ON;');
+    }
+  } catch (e: any) {
+    try { rawDb.exec('PRAGMA foreign_keys = ON;'); } catch {}
+    console.warn('[SQLite Parents Nullable Migration Notice]', e?.message);
+  }
+
+  try {
+    const stfInfo = rawDb.prepare('PRAGMA table_info(staff)').all() as any[];
+    const stfNumCol = stfInfo.find((c) => c.name === 'staff_number');
+    const emailCol = stfInfo.find((c) => c.name === 'email');
+    const phoneCol = stfInfo.find((c) => c.name === 'phone');
+    if ((stfNumCol && stfNumCol.notnull === 1) || (emailCol && emailCol.notnull === 1) || (phoneCol && phoneCol.notnull === 1)) {
+      rawDb.exec(`
+        PRAGMA foreign_keys = OFF;
+        CREATE TABLE staff_mig (
+          id TEXT PRIMARY KEY,
+          school_id TEXT NOT NULL REFERENCES schools(id) ON DELETE CASCADE,
+          user_id TEXT REFERENCES users(id) ON DELETE SET NULL,
+          staff_number TEXT,
+          first_name TEXT NOT NULL,
+          middle_name TEXT,
+          last_name TEXT NOT NULL,
+          email TEXT,
+          phone TEXT,
+          gender TEXT,
+          address TEXT,
+          job_title TEXT DEFAULT 'Staff Member',
+          department TEXT,
+          employment_status TEXT DEFAULT 'ACTIVE',
+          date_joined TEXT,
+          profile_photo_url TEXT,
+          is_deleted INTEGER DEFAULT 0,
+          deleted_at DATETIME,
+          deleted_by TEXT,
+          deletion_reason TEXT,
+          created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+          updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+          UNIQUE (school_id, staff_number)
+        );
+      `);
+      const existingCols = stfInfo.map((c) => c.name);
+      const targetCols = (rawDb.prepare('PRAGMA table_info(staff_mig)').all() as any[]).map((c) => c.name);
+      const shared = existingCols.filter((c) => targetCols.includes(c)).map((c) => `"${c}"`).join(', ');
+      rawDb.exec(`INSERT INTO staff_mig (${shared}) SELECT ${shared} FROM staff;`);
+      rawDb.exec('DROP TABLE staff; ALTER TABLE staff_mig RENAME TO staff; PRAGMA foreign_keys = ON;');
+    }
+  } catch (e: any) {
+    try { rawDb.exec('PRAGMA foreign_keys = ON;'); } catch {}
+    console.warn('[SQLite Staff Nullable Migration Notice]', e?.message);
   }
 }
 
@@ -1676,10 +1961,19 @@ function seedStep5PlatformSubscriptions() {
 
   for (const p of plans) {
     db.prepare(`
-      INSERT OR REPLACE INTO subscription_plans (
+      INSERT INTO subscription_plans (
         id, name, display_name, description, price, billing_interval,
         student_limit, staff_limit, storage_limit_mb, feature_flags, active
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        display_name = excluded.display_name,
+        description = excluded.description,
+        price = excluded.price,
+        student_limit = excluded.student_limit,
+        staff_limit = excluded.staff_limit,
+        storage_limit_mb = excluded.storage_limit_mb,
+        feature_flags = excluded.feature_flags,
+        active = excluded.active
     `).run(
       p.id, p.name, p.display_name, p.description, p.price, p.billing_interval,
       p.student_limit, p.staff_limit, p.storage_limit_mb, p.feature_flags, p.active
@@ -1741,7 +2035,7 @@ function seedStep5PlatformSubscriptions() {
     `).run(`set_${s.id}`, s.id);
   }
 
-  // 3. Seed Subscriptions for Schools
+  // 3. Seed Subscriptions for Demo Schools (INSERT OR IGNORE so real/edited subscriptions are never replaced)
   const subscriptions = [
     {
       id: 'sub_lagos_01',
@@ -1803,29 +2097,26 @@ function seedStep5PlatformSubscriptions() {
   ];
 
   for (const sub of subscriptions) {
+    const schoolExists = db.prepare('SELECT id FROM schools WHERE id = ?').get(sub.school_id);
+    if (!schoolExists) continue;
     db.prepare(`
-      INSERT OR REPLACE INTO school_subscriptions (
+      INSERT OR IGNORE INTO school_subscriptions (
         id, school_id, plan_id, status, start_date, end_date, trial_end_date, amount_paid, provider, provider_reference, notes
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       sub.id, sub.school_id, sub.plan_id, sub.status, sub.start_date, sub.end_date,
       sub.trial_end_date || null, sub.amount_paid, sub.provider, sub.provider_reference || null, sub.notes
     );
-
-    // Update school's current plan and status
-    db.prepare(`
-      UPDATE schools SET current_plan_id = ?, subscription_end_date = ? WHERE id = ?
-    `).run(sub.plan_id, sub.end_date, sub.school_id);
   }
 
-  // 4. Seed Platform SaaS Subscription Revenue Payments (Distinct from student fee payments!)
+  // 4. Seed Platform SaaS Subscription Revenue Payments
   const platformPayments = [
     {
       id: 'ppay_lagos_01',
       school_id: schoolAId,
       subscription_id: 'sub_lagos_01',
       plan_id: 'plan_standard',
-      amount: 6000000, // ₦60,000
+      amount: 6000000,
       payment_method: 'BANK_TRANSFER',
       provider: 'MANUAL',
       internal_reference: 'PLT-PAY-LPC-2024-01',
@@ -1838,7 +2129,7 @@ function seedStep5PlatformSubscriptions() {
       school_id: schoolBId,
       subscription_id: 'sub_abuja_02',
       plan_id: 'plan_premium',
-      amount: 12000000, // ₦120,000
+      amount: 12000000,
       payment_method: 'PAYSTACK',
       provider: 'PAYSTACK',
       provider_reference: 'pstk_ref_aha_2024_01',
@@ -1852,7 +2143,7 @@ function seedStep5PlatformSubscriptions() {
       school_id: 'sch_kano_heritage_04',
       subscription_id: 'sub_kano_04',
       plan_id: 'plan_basic',
-      amount: 2500000, // ₦25,000
+      amount: 2500000,
       payment_method: 'BANK_TRANSFER',
       provider: 'MANUAL',
       internal_reference: 'PLT-PAY-KHC-2024-01',
@@ -1863,8 +2154,10 @@ function seedStep5PlatformSubscriptions() {
   ];
 
   for (const pp of platformPayments) {
+    const subExists = db.prepare('SELECT id FROM school_subscriptions WHERE id = ?').get(pp.subscription_id);
+    if (!subExists) continue;
     db.prepare(`
-      INSERT OR REPLACE INTO platform_payments (
+      INSERT OR IGNORE INTO platform_payments (
         id, school_id, subscription_id, plan_id, amount, currency, payment_method, provider,
         provider_reference, internal_reference, status, paid_at, notes
       ) VALUES (?, ?, ?, ?, ?, 'NGN', ?, ?, ?, ?, ?, ?, ?)
@@ -1917,7 +2210,7 @@ function seedStep5PlatformSubscriptions() {
 
   for (const p of partners) {
     db.prepare(`
-      INSERT OR REPLACE INTO partners (
+      INSERT OR IGNORE INTO partners (
         id, name, email, phone, company, partner_type, commission_rate, referral_code, status, notes
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
@@ -1933,7 +2226,7 @@ function seedStep5PlatformSubscriptions() {
       partner_id: 'ptn_access_01',
       school_id: schoolAId,
       platform_payment_id: 'ppay_lagos_01',
-      amount: 900000, // 15% of ₦60,000 = ₦9,000 (900000 kobo)
+      amount: 900000,
       rate_percent: 15.0,
       status: 'PAID',
       notes: 'Settled commission for Lagos Premier College Term 1 onboarding.',
@@ -1944,7 +2237,7 @@ function seedStep5PlatformSubscriptions() {
       partner_id: 'ptn_zenith_02',
       school_id: schoolBId,
       platform_payment_id: 'ppay_abuja_02',
-      amount: 1500000, // 12.5% of ₦120,000 = ₦15,000 (1500000 kobo)
+      amount: 1500000,
       rate_percent: 12.5,
       status: 'PENDING',
       notes: 'Pending payout for Abuja Horizon Academy Premium Plan commission.',
@@ -1953,8 +2246,10 @@ function seedStep5PlatformSubscriptions() {
   ];
 
   for (const c of commissions) {
+    const payExists = db.prepare('SELECT id FROM platform_payments WHERE id = ?').get(c.platform_payment_id);
+    if (!payExists) continue;
     db.prepare(`
-      INSERT OR REPLACE INTO commissions (
+      INSERT OR IGNORE INTO commissions (
         id, partner_id, school_id, platform_payment_id, amount, rate_percent, status, notes, paid_at
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(c.id, c.partner_id, c.school_id, c.platform_payment_id, c.amount, c.rate_percent, c.status, c.notes, c.paid_at);

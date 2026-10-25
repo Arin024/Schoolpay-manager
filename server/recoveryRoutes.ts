@@ -1,6 +1,6 @@
 import express from 'express';
 import crypto from 'node:crypto';
-import { db } from './db.ts';
+import { db, cacheDb, queryPg } from './db.ts';
 import {
   hashPassword,
   generateSalt,
@@ -55,7 +55,7 @@ function checkRateLimit(ip: string, maxReqs = 15, windowMs = 60 * 1000): boolean
 // ==============================================================================
 // 1. PHASE 2 & 5: IDENTIFY ACCOUNT & DISCOVER AVAILABLE RECOVERY METHODS
 // ==============================================================================
-recoveryRouter.post('/recovery/identify', (req, res) => {
+recoveryRouter.post('/recovery/identify', async (req, res) => {
   const clientIp = (req.ip || req.headers['x-forwarded-for'] || '127.0.0.1') as string;
   if (!checkRateLimit(clientIp, 20)) {
     return res.status(429).json({
@@ -74,15 +74,61 @@ recoveryRouter.post('/recovery/identify', (req, res) => {
 
   const clean = identifier.trim().toLowerCase();
 
-  // Search user by email or phone number
-  const user = db.prepare(`
+  // Search user by email or phone number in Neon PG first
+  let user: any = null;
+  const pgUser = await queryPg(`
     SELECT id, email, phone, full_name, is_platform_admin, is_active,
            security_question_1, security_question_2,
            recovery_attempts, recovery_locked_until
     FROM users
-    WHERE (LOWER(email) = ? OR phone = ? OR LOWER(recovery_email) = ? OR recovery_phone = ?)
+    WHERE (LOWER(email) = $1 OR phone = $1 OR LOWER(recovery_email) = $1 OR recovery_phone = $1)
       AND is_active = 1
-  `).get(clean, clean, clean, clean) as any;
+    LIMIT 1
+  `, [clean]);
+
+  if (pgUser && pgUser.rows.length > 0) {
+    user = pgUser.rows[0];
+  } else {
+    // If not found in users.email, check if identifier is an official school email (schools.email)
+    const schoolOwnerPg = await queryPg(`
+      SELECT u.id, u.email, u.phone, u.full_name, u.is_platform_admin, u.is_active,
+             u.security_question_1, u.security_question_2,
+             u.recovery_attempts, u.recovery_locked_until
+      FROM schools s
+      JOIN user_roles ur ON ur.school_id = s.id AND ur.role_id = 'role_school_owner'
+      JOIN users u ON u.id = ur.user_id
+      WHERE LOWER(s.email) = $1 AND u.is_active = 1
+      LIMIT 1
+    `, [clean]);
+    if (schoolOwnerPg && schoolOwnerPg.rows.length > 0) {
+      user = schoolOwnerPg.rows[0];
+    }
+  }
+
+  // Fallback to cacheDb if Neon PG returned nothing
+  if (!user) {
+    user = cacheDb.prepare(`
+      SELECT id, email, phone, full_name, is_platform_admin, is_active,
+             security_question_1, security_question_2,
+             recovery_attempts, recovery_locked_until
+      FROM users
+      WHERE (LOWER(email) = ? OR phone = ? OR LOWER(recovery_email) = ? OR recovery_phone = ?)
+        AND is_active = 1
+    `).get(clean, clean, clean, clean) as any;
+
+    if (!user) {
+      user = cacheDb.prepare(`
+        SELECT u.id, u.email, u.phone, u.full_name, u.is_platform_admin, u.is_active,
+               u.security_question_1, u.security_question_2,
+               u.recovery_attempts, u.recovery_locked_until
+        FROM schools s
+        JOIN user_roles ur ON ur.school_id = s.id AND ur.role_id = 'role_school_owner'
+        JOIN users u ON u.id = ur.user_id
+        WHERE LOWER(s.email) = ? AND u.is_active = 1
+        LIMIT 1
+      `).get(clean) as any;
+    }
+  }
 
   // Generic anti-enumeration response if user does not exist
   if (!user) {
@@ -112,25 +158,39 @@ recoveryRouter.post('/recovery/identify', (req, res) => {
       });
     } else {
       // Lock has expired, reset attempts
-      db.prepare(`
+      await queryPg('UPDATE users SET recovery_attempts = 0, recovery_locked_until = NULL WHERE id = $1', [user.id]);
+      cacheDb.prepare(`
         UPDATE users SET recovery_attempts = 0, recovery_locked_until = NULL WHERE id = ?
       `).run(user.id);
     }
   }
 
   // Check unused backup codes
-  const unusedCodesCount = (
-    db.prepare(`SELECT COUNT(*) as count FROM user_recovery_codes WHERE user_id = ? AND used_at IS NULL`).get(user.id) as any
-  )?.count || 0;
+  let unusedCodesCount = 0;
+  const bcPg = await queryPg('SELECT COUNT(*) as count FROM user_recovery_codes WHERE user_id = $1 AND used_at IS NULL', [user.id]);
+  if (bcPg) {
+    unusedCodesCount = parseInt(bcPg.rows[0]?.count || '0', 10);
+  } else {
+    unusedCodesCount = (
+      cacheDb.prepare(`SELECT COUNT(*) as count FROM user_recovery_codes WHERE user_id = ? AND used_at IS NULL`).get(user.id) as any
+    )?.count || 0;
+  }
 
   // Create stateful recovery challenge valid for 15 minutes
   const challengeId = 'rc_' + crypto.randomUUID();
   const expiresAt = new Date(Date.now() + 15 * 60 * 1000).toISOString();
 
-  db.prepare(`
+  await queryPg(`
     INSERT INTO recovery_challenges (id, user_id, identifier, expires_at)
-    VALUES (?, ?, ?, ?)
-  `).run(challengeId, user.id, user.email, expiresAt);
+    VALUES ($1, $2, $3, $4)
+  `, [challengeId, user.id, user.email, expiresAt]);
+
+  try {
+    cacheDb.prepare(`
+      INSERT INTO recovery_challenges (id, user_id, identifier, expires_at)
+      VALUES (?, ?, ?, ?)
+    `).run(challengeId, user.id, user.email, expiresAt);
+  } catch {}
 
   // Security questions cannot be the sole recovery method for platform SUPER_ADMIN
   const hasSecurityQuestions =
@@ -393,7 +453,7 @@ recoveryRouter.post('/recovery/verify-code', (req, res) => {
 // ==============================================================================
 // 4. PHASE 3 - METHOD 1: VERIFIED EMAIL RECOVERY LINK / TICKET
 // ==============================================================================
-recoveryRouter.post('/recovery/request-link', (req, res) => {
+recoveryRouter.post('/recovery/request-link', async (req, res) => {
   const { challengeId } = req.body;
 
   if (!challengeId) {
@@ -424,10 +484,17 @@ recoveryRouter.post('/recovery/request-link', (req, res) => {
   const resetId = 'pr_' + crypto.randomUUID();
   const expiresAt = new Date(Date.now() + 60 * 60 * 1000).toISOString(); // 1 hour
 
-  db.prepare(`
+  await queryPg(`
     INSERT INTO password_resets (id, user_id, email, token, recovery_method, expires_at, verified_at, ip_address)
-    VALUES (?, ?, ?, ?, 'EMAIL_LINK', ?, CURRENT_TIMESTAMP, ?)
-  `).run(resetId, user.id, user.email, resetToken, expiresAt, (req.ip || '127.0.0.1') as string);
+    VALUES ($1, $2, $3, $4, 'EMAIL_LINK', $5, CURRENT_TIMESTAMP, $6)
+  `, [resetId, user.id, user.email, resetToken, expiresAt, (req.ip || '127.0.0.1') as string]);
+
+  try {
+    cacheDb.prepare(`
+      INSERT INTO password_resets (id, user_id, email, token, recovery_method, expires_at, verified_at, ip_address)
+      VALUES (?, ?, ?, ?, 'EMAIL_LINK', ?, CURRENT_TIMESTAMP, ?)
+    `).run(resetId, user.id, user.email, resetToken, expiresAt, (req.ip || '127.0.0.1') as string);
+  } catch {}
 
   logAudit({
     actorEmail: user.email,
@@ -447,7 +514,7 @@ recoveryRouter.post('/recovery/request-link', (req, res) => {
 // ==============================================================================
 // 5. PHASE 5 & 6: COMPLETE PASSWORD RESET WITH STRICT SERVER VALIDATION
 // ==============================================================================
-recoveryRouter.post('/recovery/complete', (req, res) => {
+recoveryRouter.post('/recovery/complete', async (req, res) => {
   const { recoveryTicket, newPassword, confirmPassword } = req.body;
 
   if (!recoveryTicket || !newPassword) {
@@ -471,11 +538,21 @@ recoveryRouter.post('/recovery/complete', (req, res) => {
     });
   }
 
-  // Find unexpired and unused reset record
-  const resetRecord = db.prepare(`
+  // Find unexpired and unused reset record from Neon PG first, fallback to cacheDb
+  let resetRecord: any = null;
+  const pgReset = await queryPg(`
     SELECT * FROM password_resets
-    WHERE token = ? AND used_at IS NULL AND expires_at > datetime('now')
-  `).get(recoveryTicket) as any;
+    WHERE token = $1 AND used_at IS NULL AND expires_at > CURRENT_TIMESTAMP
+  `, [recoveryTicket]);
+
+  if (pgReset && pgReset.rows.length > 0) {
+    resetRecord = pgReset.rows[0];
+  } else {
+    resetRecord = cacheDb.prepare(`
+      SELECT * FROM password_resets
+      WHERE token = ? AND used_at IS NULL AND expires_at > datetime('now')
+    `).get(recoveryTicket) as any;
+  }
 
   if (!resetRecord) {
     return res.status(400).json({
@@ -484,7 +561,14 @@ recoveryRouter.post('/recovery/complete', (req, res) => {
     });
   }
 
-  const user = db.prepare('SELECT id, email FROM users WHERE email = ?').get(resetRecord.email) as any;
+  let user: any = null;
+  const pgUser = await queryPg('SELECT id, email FROM users WHERE email = $1', [resetRecord.email]);
+  if (pgUser && pgUser.rows.length > 0) {
+    user = pgUser.rows[0];
+  } else {
+    user = cacheDb.prepare('SELECT id, email FROM users WHERE email = ?').get(resetRecord.email) as any;
+  }
+
   if (!user) {
     return res.status(404).json({ error: 'USER_NOT_FOUND', message: 'Target user account not found.' });
   }
@@ -492,10 +576,23 @@ recoveryRouter.post('/recovery/complete', (req, res) => {
   const salt = generateSalt();
   const passwordHash = hashPassword(newPassword, salt);
 
-  db.exec('BEGIN TRANSACTION;');
+  // 1. Authoritative Neon PostgreSQL Update
+  await queryPg(`
+    UPDATE users SET
+      password_hash = $1,
+      salt = $2,
+      recovery_attempts = 0,
+      recovery_locked_until = NULL,
+      updated_at = CURRENT_TIMESTAMP
+    WHERE id = $3
+  `, [passwordHash, salt, user.id]);
+
+  await queryPg(`UPDATE password_resets SET used_at = CURRENT_TIMESTAMP WHERE id = $1`, [resetRecord.id]);
+  await queryPg(`DELETE FROM sessions WHERE user_id = $1`, [user.id]);
+
+  // 2. Local cacheDb Update
   try {
-    // 1. Update user password and clear recovery lockouts
-    db.prepare(`
+    cacheDb.prepare(`
       UPDATE users SET
         password_hash = ?,
         salt = ?,
@@ -505,23 +602,9 @@ recoveryRouter.post('/recovery/complete', (req, res) => {
       WHERE id = ?
     `).run(passwordHash, salt, user.id);
 
-    // 2. Mark reset token as used (single-use enforcement)
-    db.prepare(`
-      UPDATE password_resets SET used_at = CURRENT_TIMESTAMP WHERE id = ?
-    `).run(resetRecord.id);
-
-    // 3. Invalidate ALL active sessions for this user across all devices (Phase 6 requirement)
-    db.prepare(`DELETE FROM sessions WHERE user_id = ?`).run(user.id);
-
-    db.exec('COMMIT;');
-  } catch (err: any) {
-    db.exec('ROLLBACK;');
-    console.error('Password reset transaction failed:', err);
-    return res.status(500).json({
-      error: 'RESET_FAILED',
-      message: 'Failed to update password. Please try again.',
-    });
-  }
+    cacheDb.prepare(`UPDATE password_resets SET used_at = CURRENT_TIMESTAMP WHERE id = ?`).run(resetRecord.id);
+    cacheDb.prepare(`DELETE FROM sessions WHERE user_id = ?`).run(user.id);
+  } catch {}
 
   logAudit({
     actorEmail: user.email,

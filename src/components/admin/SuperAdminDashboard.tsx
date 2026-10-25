@@ -104,8 +104,10 @@ export const SuperAdminDashboard: React.FC = () => {
   const [statusModalSchool, setStatusModalSchool] = useState<any | null>(null);
   const [deleteModalSchool, setDeleteModalSchool] = useState<any | null>(null);
   const [deleteConfirmationText, setDeleteConfirmationText] = useState('');
+  const [deleteMode, setDeleteMode] = useState<'ARCHIVE' | 'PURGE'>('PURGE');
   const [deleteSubmitting, setDeleteSubmitting] = useState(false);
   const [deleteError, setDeleteError] = useState('');
+  const [deletingUserId, setDeletingUserId] = useState<string | null>(null);
   const [newStatus, setNewStatus] = useState<SchoolStatus>('ACTIVE');
   const [statusReason, setStatusReason] = useState('');
   const [statusSubmitting, setStatusSubmitting] = useState(false);
@@ -257,7 +259,7 @@ export const SuperAdminDashboard: React.FC = () => {
     }
   };
 
-  // Status Change Handler
+  // School & User Deletion Handlers
   const handleDeleteSchoolSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!deleteModalSchool) return;
@@ -265,24 +267,41 @@ export const SuperAdminDashboard: React.FC = () => {
     const normTarget = deleteModalSchool.name.trim().toLowerCase().replace(/\s+/g, ' ');
 
     if (normInput !== normTarget) {
-      setDeleteError(`Please type the exact school name "${deleteModalSchool.name}" to confirm deletion.`);
+      setDeleteError(`Please type the exact school name "${deleteModalSchool.name}" to confirm.`);
       return;
     }
 
     setDeleteSubmitting(true);
     setDeleteError('');
     try {
-      await api.deleteSchool(deleteModalSchool.id, deleteModalSchool.name);
+      await api.deleteSchool(deleteModalSchool.id, deleteModalSchool.name, deleteMode);
       setDeleteModalSchool(null);
       setDeleteConfirmationText('');
+      setDeleteMode('PURGE');
       await loadData();
       if (selectedSchool && selectedSchool.id === deleteModalSchool.id) {
         setSelectedSchool(null);
       }
     } catch (err: any) {
-      setDeleteError(err?.message || 'Failed to delete school account');
+      setDeleteError(err?.message || 'Failed to process school deletion');
     } finally {
       setDeleteSubmitting(false);
+    }
+  };
+
+  const handleDeleteUser = async (user: any) => {
+    const isOwner = user.roles && (user.roles.includes('SCHOOL_OWNER') || user.roles.includes('role_school_owner'));
+    const confirmMsg = `PERMANENTLY DELETE USER ACCOUNT\n\nUser: ${user.full_name}\nEmail: ${user.email}\nID: ${user.id}\n\nThis will remove their credentials, sessions, and roles across Neon PostgreSQL and all local caches.${isOwner ? '\n\nNote: This user is registered as a school owner.' : ''}\n\nProceed with permanent deletion?`;
+    if (!window.confirm(confirmMsg)) return;
+
+    setDeletingUserId(user.id);
+    try {
+      await api.deleteUser(user.id);
+      await loadData();
+    } catch (err: any) {
+      alert(err?.message || 'Failed to delete user');
+    } finally {
+      setDeletingUserId(null);
     }
   };
 
@@ -1432,6 +1451,7 @@ export const SuperAdminDashboard: React.FC = () => {
                   <th className="py-2.5 px-3">Platform Privilege</th>
                   <th className="py-2.5 px-3">Account Status</th>
                   <th className="py-2.5 px-3">Created</th>
+                  <th className="py-2.5 px-3 text-right">Actions</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
@@ -1459,6 +1479,22 @@ export const SuperAdminDashboard: React.FC = () => {
                       </span>
                     </td>
                     <td className="py-3 px-3 text-slate-400">{new Date(u.created_at).toLocaleDateString()}</td>
+                    <td className="py-3 px-3 text-right">
+                      {u.is_platform_admin === 1 ? (
+                        <span className="text-[10px] text-slate-400 font-semibold italic">Protected</span>
+                      ) : (
+                        <button
+                          type="button"
+                          disabled={deletingUserId === u.id}
+                          onClick={() => handleDeleteUser(u)}
+                          className="px-2 py-1 bg-red-50 hover:bg-red-100 text-red-700 hover:text-red-800 border border-red-200 rounded text-[11px] font-semibold cursor-pointer transition disabled:opacity-50 inline-flex items-center gap-1"
+                          title="Permanently Delete User"
+                        >
+                          <Trash2 className="w-3 h-3 text-red-600" />
+                          <span>{deletingUserId === u.id ? 'Deleting...' : 'Delete User'}</span>
+                        </button>
+                      )}
+                    </td>
                   </tr>
                 ))}
               </tbody>
@@ -2130,45 +2166,99 @@ export const SuperAdminDashboard: React.FC = () => {
       )}
 
       {/* ==================================================================== */}
-      {/* PERMANENTLY DELETE SCHOOL MODAL */}
+      {/* DELETE / ARCHIVE SCHOOL MODAL */}
       {deleteModalSchool && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-xs p-4">
           <div className="bg-white rounded-2xl max-w-lg w-full shadow-2xl border border-red-200 overflow-hidden">
-            <div className="bg-red-900 px-6 py-4 flex items-center justify-between text-white">
+            <div className={`${deleteMode === 'PURGE' ? 'bg-red-900' : 'bg-amber-900'} px-6 py-4 flex items-center justify-between text-white transition-colors`}>
               <div className="flex items-center gap-2">
-                <div className="w-8 h-8 rounded-lg bg-red-800 flex items-center justify-center text-red-300">
+                <div className={`w-8 h-8 rounded-lg ${deleteMode === 'PURGE' ? 'bg-red-800 text-red-300' : 'bg-amber-800 text-amber-300'} flex items-center justify-center`}>
                   <Trash2 className="w-4 h-4" />
                 </div>
                 <div>
-                  <h3 className="font-bold text-sm">Permanent School Account Deletion</h3>
-                  <p className="text-[11px] text-red-300">Super Admin Irreversible Purge</p>
+                  <h3 className="font-bold text-sm">
+                    {deleteMode === 'PURGE' ? 'Permanent School Account Deletion' : 'Archive / Deactivate School Account'}
+                  </h3>
+                  <p className="text-[11px] text-white/75">
+                    {deleteMode === 'PURGE' ? 'Super Admin Irreversible Purge' : 'Super Admin Safe Deactivation (Preserve Records)'}
+                  </p>
                 </div>
               </div>
               <button
                 type="button"
                 onClick={() => setDeleteModalSchool(null)}
-                className="p-1 hover:bg-red-800 rounded-md text-red-200 hover:text-white cursor-pointer"
+                className="p-1 hover:bg-white/20 rounded-md text-white/80 hover:text-white cursor-pointer"
               >
                 <X className="w-4 h-4" />
               </button>
             </div>
 
             <form onSubmit={handleDeleteSchoolSubmit} className="p-6 space-y-4">
-              <div className="p-3.5 bg-red-50 border border-red-200 rounded-xl text-red-900 text-xs">
-                <p className="font-bold flex items-center gap-1.5 mb-1 text-red-700">
-                  <AlertTriangle className="w-4 h-4 text-red-600 shrink-0" />
-                  Warning: This action CANNOT be undone!
-                </p>
-                <p className="text-[11px] leading-relaxed text-red-800">
-                  You are about to permanently delete <strong>{deleteModalSchool.name}</strong> from both Neon PostgreSQL and all local caches. This will immediately purge:
-                </p>
-                <ul className="list-disc list-inside mt-1.5 space-y-0.5 text-[11px] text-red-700 font-medium">
-                  <li>All student, staff, and parent records</li>
-                  <li>All fee structures, invoices, and payment receipts</li>
-                  <li>All proprietor, bursar, and school user login credentials</li>
-                  <li>Active subscriptions and custom settings</li>
-                </ul>
+              {/* Mode Selection */}
+              <div>
+                <label className="block text-xs font-bold text-slate-800 mb-1.5">Select Action Mode:</label>
+                <div className="grid grid-cols-2 gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setDeleteMode('PURGE')}
+                    className={`p-2.5 rounded-xl border text-left cursor-pointer transition ${
+                      deleteMode === 'PURGE'
+                        ? 'bg-red-50/80 border-red-500 text-red-950 font-bold ring-1 ring-red-500'
+                        : 'bg-slate-50 border-slate-200 text-slate-700 hover:bg-slate-100 font-medium'
+                    }`}
+                  >
+                    <p className="text-xs font-bold flex items-center gap-1.5">
+                      <span className="w-2 h-2 rounded-full bg-red-600 inline-block"></span>
+                      Permanent Purge
+                    </p>
+                    <p className="text-[10px] text-slate-500 mt-0.5">Destroy database rows & logins</p>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => setDeleteMode('ARCHIVE')}
+                    className={`p-2.5 rounded-xl border text-left cursor-pointer transition ${
+                      deleteMode === 'ARCHIVE'
+                        ? 'bg-amber-50/80 border-amber-500 text-amber-950 font-bold ring-1 ring-amber-500'
+                        : 'bg-slate-50 border-slate-200 text-slate-700 hover:bg-slate-100 font-medium'
+                    }`}
+                  >
+                    <p className="text-xs font-bold flex items-center gap-1.5">
+                      <span className="w-2 h-2 rounded-full bg-amber-500 inline-block"></span>
+                      Safe Archival
+                    </p>
+                    <p className="text-[10px] text-slate-500 mt-0.5">Revoke access, keep historical records</p>
+                  </button>
+                </div>
               </div>
+
+              {deleteMode === 'PURGE' ? (
+                <div className="p-3.5 bg-red-50 border border-red-200 rounded-xl text-red-900 text-xs">
+                  <p className="font-bold flex items-center gap-1.5 mb-1 text-red-700">
+                    <AlertTriangle className="w-4 h-4 text-red-600 shrink-0" />
+                    Warning: This action CANNOT be undone!
+                  </p>
+                  <p className="text-[11px] leading-relaxed text-red-800">
+                    You are about to permanently delete <strong>{deleteModalSchool.name}</strong> from both Neon PostgreSQL and all local caches. This will immediately purge:
+                  </p>
+                  <ul className="list-disc list-inside mt-1.5 space-y-0.5 text-[11px] text-red-700 font-medium">
+                    <li>All student, staff, and parent records</li>
+                    <li>All fee structures, invoices, and payment receipts</li>
+                    <li>All proprietor, bursar, and school user login credentials</li>
+                    <li>Active subscriptions and custom settings</li>
+                  </ul>
+                </div>
+              ) : (
+                <div className="p-3.5 bg-amber-50 border border-amber-200 rounded-xl text-amber-900 text-xs">
+                  <p className="font-bold flex items-center gap-1.5 mb-1 text-amber-800">
+                    <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0" />
+                    Safe Archival Mode Selected
+                  </p>
+                  <p className="text-[11px] leading-relaxed text-amber-800">
+                    This sets <strong>{deleteModalSchool.name}</strong> status to <code>CANCELLED</code> and disables school access. All academic data, fee histories, receipts, and audit logs are securely preserved in Neon PostgreSQL.
+                  </p>
+                </div>
+              )}
 
               {deleteError && (
                 <div className="p-3 bg-red-100 border border-red-300 rounded-lg text-red-800 text-xs flex items-center gap-2">
@@ -2179,7 +2269,7 @@ export const SuperAdminDashboard: React.FC = () => {
 
               <div>
                 <label className="block text-xs font-bold text-slate-700 mb-1">
-                  To confirm deletion, please type the school name:
+                  To confirm {deleteMode === 'PURGE' ? 'deletion' : 'archival'}, please type the school name:
                 </label>
                 <div className="p-2 bg-slate-100 rounded-md text-xs font-mono font-bold text-slate-800 mb-2 select-all">
                   {deleteModalSchool.name}
@@ -2205,10 +2295,22 @@ export const SuperAdminDashboard: React.FC = () => {
                 <button
                   type="submit"
                   disabled={deleteSubmitting}
-                  className="px-4 py-2 bg-red-600 hover:bg-red-700 text-white font-bold rounded-lg text-xs shadow-md transition disabled:opacity-50 cursor-pointer flex items-center gap-1.5"
+                  className={`px-4 py-2 ${
+                    deleteMode === 'PURGE'
+                      ? 'bg-red-600 hover:bg-red-700 text-white'
+                      : 'bg-amber-600 hover:bg-amber-700 text-white'
+                  } font-bold rounded-lg text-xs shadow-md transition disabled:opacity-50 cursor-pointer flex items-center gap-1.5`}
                 >
                   <Trash2 className="w-3.5 h-3.5" />
-                  <span>{deleteSubmitting ? 'Purging School...' : 'Permanently Delete School'}</span>
+                  <span>
+                    {deleteSubmitting
+                      ? deleteMode === 'PURGE'
+                        ? 'Purging School...'
+                        : 'Archiving School...'
+                      : deleteMode === 'PURGE'
+                        ? 'Permanently Delete School'
+                        : 'Archive School Account'}
+                  </span>
                 </button>
               </div>
             </form>

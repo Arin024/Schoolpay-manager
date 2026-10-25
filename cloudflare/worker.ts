@@ -17,7 +17,7 @@ export interface Env {
   BACKEND_ORIGIN?: string;
 }
 
-const DEFAULT_BACKEND_ORIGIN = 'https://ais-pre-eoqypgqka7gqp6j4a5fwme-696474482089.europe-west2.run.app';
+const DEFAULT_BACKEND_ORIGIN = 'https://www.bursariq.com.ng';
 
 export default {
   async fetch(request: Request, env: Env, ctx: any): Promise<Response> {

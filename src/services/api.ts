@@ -1085,11 +1085,11 @@ export const api = {
     });
   },
 
-  async deleteSchool(schoolId: string, confirmationName?: string) {
+  async deleteSchool(schoolId: string, confirmationName?: string, mode: 'ARCHIVE' | 'PURGE' = 'PURGE') {
     return safeFetch(`${API_BASE}/admin/schools/${schoolId}`, {
       method: 'DELETE',
       headers: getAuthHeaders(),
-      body: JSON.stringify({ confirmationName }),
+      body: JSON.stringify({ confirmationName, mode }),
     });
   },
 

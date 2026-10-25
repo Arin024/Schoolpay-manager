@@ -10,8 +10,29 @@
 
 import crypto from 'node:crypto';
 import pg from 'pg';
-import { getPgPool } from './db.ts';
+import { getPgPool, cacheDb, markPgConnected, isTransientPgError } from './db.ts';
 import type { UserRecord, UserRoleRecord } from './auth.ts';
+
+async function execPg(
+  runner: pg.Pool | pg.PoolClient,
+  sql: string,
+  params: any[] = []
+): Promise<pg.QueryResult<any>> {
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    try {
+      const res = await runner.query(sql, params);
+      markPgConnected();
+      return res;
+    } catch (err: any) {
+      if (attempt === 1 && !('release' in runner) && isTransientPgError(err)) {
+        await new Promise((r) => setTimeout(r, 250));
+        continue;
+      }
+      throw err;
+    }
+  }
+  throw new Error('PostgreSQL session query retry exhausted');
+}
 
 export interface SessionData {
   user: UserRecord;
@@ -43,6 +64,7 @@ export async function createSessionPg(
      VALUES ($1, $2, $3, $4, $5, $6, CURRENT_TIMESTAMP + INTERVAL '7 days')`,
     [sessionId, token, userId, schoolId || null, ip || null, userAgent || null]
   );
+  markPgConnected();
 
   return token;
 }
@@ -71,6 +93,7 @@ export async function createImpersonationSessionPg(
      VALUES ($1, $2, $3, $4, $5, $6, $7, CURRENT_TIMESTAMP + INTERVAL '2 hours')`,
     [sessionId, token, targetUserId, targetSchoolId, superAdminId, ip || null, userAgent || null]
   );
+  markPgConnected();
 
   return token;
 }
@@ -87,8 +110,9 @@ export async function validateSessionPg(
 
   if (!pool) return null;
 
-  // 1. Query active session
-  const sessionRes = await pool.query(
+  // 1. Query active session (with automatic retry on idle Neon socket reset)
+  const sessionRes = await execPg(
+    pool,
     `SELECT * FROM sessions 
      WHERE token = $1 AND expires_at > CURRENT_TIMESTAMP`,
     [token]
@@ -98,7 +122,8 @@ export async function validateSessionPg(
   const session = sessionRes.rows[0];
 
   // 2. Query user
-  const userRes = await pool.query(
+  const userRes = await execPg(
+    pool,
     `SELECT * FROM users WHERE id = $1 AND is_active = 1`,
     [session.user_id]
   );
@@ -107,7 +132,8 @@ export async function validateSessionPg(
   const user: UserRecord = userRes.rows[0];
 
   // 3. Query user roles with school details
-  const rolesRes = await pool.query(
+  const rolesRes = await execPg(
+    pool,
     `SELECT ur.*, r.name as role_name, r.display_name as role_display_name, r.scope as role_scope,
             s.name as school_name, s.status as school_status
      FROM user_roles ur
@@ -141,19 +167,26 @@ export async function validateSessionPg(
     )
     .catch(() => {});
 
-    // Seamless Cache Sync: Populate local SQLite cache with this valid PostgreSQL session & user data
+  // 6. Non-destructive local SQLite cache sync (NEVER use INSERT OR REPLACE on schools/users as that fires ON DELETE CASCADE!)
   try {
-    const { db } = await import('./db.ts');
-    db.prepare(`
-      INSERT OR REPLACE INTO users (id, email, password_hash, salt, full_name, phone, is_platform_admin, is_active, created_at)
+    cacheDb.prepare(`
+      INSERT INTO users (id, email, password_hash, salt, full_name, phone, is_platform_admin, is_active, created_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        email = excluded.email,
+        password_hash = excluded.password_hash,
+        salt = excluded.salt,
+        full_name = excluded.full_name,
+        phone = excluded.phone,
+        is_platform_admin = excluded.is_platform_admin,
+        is_active = excluded.is_active
     `).run(
       user.id,
       user.email,
       user.password_hash,
       user.salt,
       user.full_name,
-      user.phone,
+      user.phone || null,
       user.is_platform_admin,
       user.is_active,
       user.created_at ? new Date(user.created_at).toISOString() : new Date().toISOString()
@@ -163,30 +196,78 @@ export async function validateSessionPg(
       const schRes = await pool.query('SELECT * FROM schools WHERE id = $1', [resolvedSchoolId]);
       if (schRes.rows.length > 0) {
         const s = schRes.rows[0];
-        db.prepare(`
-          INSERT OR REPLACE INTO schools (id, name, slug, type, status, address, state, lga, phone, email, current_plan_id)
+        cacheDb.prepare(`
+          INSERT INTO schools (id, name, slug, type, status, address, state, lga, phone, email, current_plan_id)
           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        `).run(s.id, s.name, s.slug, s.type, s.status, s.address || '', s.state || '', s.lga || '', s.phone || '', s.email || '', s.current_plan_id || null);
+          ON CONFLICT(id) DO UPDATE SET
+            name = excluded.name,
+            status = excluded.status,
+            address = excluded.address,
+            state = excluded.state,
+            lga = excluded.lga,
+            phone = excluded.phone,
+            email = excluded.email,
+            current_plan_id = COALESCE(excluded.current_plan_id, schools.current_plan_id)
+        `).run(
+          s.id,
+          s.name,
+          s.slug,
+          s.type || 'MIXED',
+          s.status || 'TRIAL',
+          s.address || '',
+          s.state || '',
+          s.lga || '',
+          s.phone || '',
+          s.email || '',
+          s.current_plan_id || null
+        );
+      }
+
+      const setRes = await pool.query('SELECT * FROM school_settings WHERE school_id = $1', [resolvedSchoolId]);
+      if (setRes.rows.length > 0) {
+        const st = setRes.rows[0];
+        cacheDb.prepare(`
+          INSERT INTO school_settings (id, school_id, currency, currency_symbol, current_academic_session, current_term, payment_notification_email)
+          VALUES (?, ?, ?, ?, ?, ?, ?)
+          ON CONFLICT(school_id) DO UPDATE SET
+            current_academic_session = COALESCE(excluded.current_academic_session, school_settings.current_academic_session),
+            current_term = COALESCE(excluded.current_term, school_settings.current_term)
+        `).run(
+          st.id,
+          st.school_id,
+          st.currency || 'NGN',
+          st.currency_symbol || '₦',
+          st.current_academic_session || '2024/2025',
+          st.current_term || '1st Term',
+          st.payment_notification_email || null
+        );
       }
     }
-    // Also sync user_roles to local cache so fallback queries find them
+
     for (const r of roles) {
       try {
-        db.prepare(`
-          INSERT OR REPLACE INTO user_roles (id, user_id, school_id, role_id, is_primary)
+        cacheDb.prepare(`
+          INSERT INTO user_roles (id, user_id, school_id, role_id, is_primary)
           VALUES (?, ?, ?, ?, ?)
-        `).run(r.id, r.user_id, r.school_id, r.role_id, r.is_primary ? 1 : 0);
+          ON CONFLICT(user_id, school_id, role_id) DO UPDATE SET
+            is_primary = excluded.is_primary
+        `).run(r.id, r.user_id, r.school_id || null, r.role_id, r.is_primary ? 1 : 0);
       } catch {}
     }
 
-    db.prepare(`
-      INSERT OR REPLACE INTO sessions (id, token, user_id, school_id, ip_address, user_agent, expires_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
+    cacheDb.prepare(`
+      INSERT INTO sessions (id, token, user_id, school_id, impersonated_by, ip_address, user_agent, expires_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        token = excluded.token,
+        school_id = excluded.school_id,
+        expires_at = excluded.expires_at
     `).run(
       session.id,
       session.token,
       session.user_id,
-      session.school_id || null,
+      resolvedSchoolId || null,
+      session.impersonated_by || null,
       session.ip_address || null,
       session.user_agent || null,
       session.expires_at ? new Date(session.expires_at).toISOString() : new Date(Date.now() + 7 * 86400000).toISOString()

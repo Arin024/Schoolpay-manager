@@ -12,4 +12,6 @@ data/
 *.db-shm
 .wrangler/
 bun.lock*
-
+server.js
+cookies.txt
+.aistudio/

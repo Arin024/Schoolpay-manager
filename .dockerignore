@@ -1,0 +1,16 @@
+node_modules
+dist
+data
+*.db
+*.db-wal
+*.db-shm
+*.log
+.git
+.gitignore
+.env
+.env.*
+!.env.example
+server.js
+cookies.txt
+.wrangler
+coverage

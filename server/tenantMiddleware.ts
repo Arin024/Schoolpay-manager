@@ -31,28 +31,34 @@ export async function requireAuth(req: AuthenticatedRequest, res: Response, next
   }
 
   // 1. Check PostgreSQL first if pool or test connection is active
+  let pgChecked = false;
+  let pgErrored = false;
   try {
     const { getPgPool } = await import('./db.ts');
     const { validateSessionPg } = await import('./postgresAuthService.ts');
     const pool = getPgPool();
-    let pgClient: any = null;
-    let poolToClose: any = null;
 
-    if (!pool && process.env.TEST_POSTGRES_URL) {
+    if (pool) {
+      const sessionDataPg = await validateSessionPg(token);
+      pgChecked = true;
+      if (sessionDataPg) {
+        req.user = sessionDataPg.user as any;
+        req.roles = sessionDataPg.roles as any;
+        req.activeSchoolId = sessionDataPg.schoolId;
+        req.impersonatedBy = sessionDataPg.impersonatedBy;
+        return next();
+      }
+    } else if (process.env.TEST_POSTGRES_URL) {
       const pg = await import('pg');
-      poolToClose = new pg.default.Pool({
+      const poolToClose = new pg.default.Pool({
         connectionString: process.env.TEST_POSTGRES_URL,
         ssl: process.env.TEST_POSTGRES_URL.includes('localhost') ? false : { rejectUnauthorized: true },
         max: 2,
       });
-      pgClient = await poolToClose.connect();
-    } else if (pool) {
-      pgClient = await pool.connect();
-    }
-
-    if (pgClient) {
+      const pgClient = await poolToClose.connect();
       try {
         const sessionDataPg = await validateSessionPg(token, pgClient);
+        pgChecked = true;
         if (sessionDataPg) {
           req.user = sessionDataPg.user as any;
           req.roles = sessionDataPg.roles as any;
@@ -62,16 +68,33 @@ export async function requireAuth(req: AuthenticatedRequest, res: Response, next
         }
       } finally {
         pgClient.release();
-        if (poolToClose) await poolToClose.end();
+        await poolToClose.end();
       }
     }
-  } catch (err) {
-    // Continue to legacy validation fallback if PG check fails
+  } catch (err: any) {
+    pgErrored = true;
+    console.warn('[requireAuth PG Transient Notice]', err?.message);
+  }
+
+  // If PG successfully checked and confirmed the token does NOT exist or is expired, reject immediately
+  if (pgChecked) {
+    return res.status(401).json({
+      error: 'INVALID_SESSION',
+      message: 'Your session has expired or is invalid. Please sign in again.',
+    });
   }
 
   // 2. Fall back to local SQLite session validation
   const sessionData = validateSession(token);
   if (!sessionData) {
+    // CRITICAL: If PG had a transient connectivity failure and local cache is cold, return 503 (NOT 401!)
+    // so the browser retains its valid session token instead of wiping localStorage.
+    if (pgErrored) {
+      return res.status(503).json({
+        error: 'DATABASE_UNAVAILABLE',
+        message: 'Cloud database is waking up. Please retry in a moment.',
+      });
+    }
     return res.status(401).json({
       error: 'INVALID_SESSION',
       message: 'Your session has expired or is invalid. Please sign in again.',
@@ -104,25 +127,36 @@ export async function requireTenant(req: AuthenticatedRequest, res: Response, ne
       return res.status(400).json({ error: 'MISSING_TENANT_ID', message: 'Super admin must specify target school_id' });
     }
 
-    let school = db.prepare('SELECT * FROM schools WHERE id = ?').get(requestedSchoolId) as { id: string; status: string; name: string } | undefined;
-    if (!school) {
-      try {
-        const { getPgPool, isPgConnected } = await import('./db.ts');
-        const pool = getPgPool();
-        if (pool && isPgConnected()) {
-          const pgRes = await pool.query('SELECT * FROM schools WHERE id = $1', [requestedSchoolId]);
-          if (pgRes.rows.length > 0) {
-            school = pgRes.rows[0] as any;
-            try {
-              const s = pgRes.rows[0];
-              db.prepare(`
-                INSERT OR REPLACE INTO schools (id, name, slug, type, status, address, state, lga, phone, email, website)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-              `).run(s.id, s.name, s.slug, s.type, s.status, s.address, s.state, s.lga, s.phone, s.email, s.website);
-            } catch {}
-          }
+    let school: { id: string; status: string; name: string } | undefined;
+    try {
+      const { getPgPool, cacheDb, markPgConnected } = await import('./db.ts');
+      const pool = getPgPool();
+      if (pool) {
+        const pgRes = await pool.query('SELECT * FROM schools WHERE id = $1', [requestedSchoolId]);
+        markPgConnected();
+        if (pgRes.rows.length > 0) {
+          const s = pgRes.rows[0];
+          school = s as any;
+          try {
+            cacheDb.prepare(`
+              INSERT INTO schools (id, name, slug, type, status, address, state, lga, phone, email, website, current_plan_id)
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              ON CONFLICT(id) DO UPDATE SET
+                name = excluded.name,
+                status = excluded.status,
+                address = excluded.address,
+                state = excluded.state,
+                lga = excluded.lga,
+                phone = excluded.phone,
+                email = excluded.email,
+                website = excluded.website
+            `).run(s.id, s.name, s.slug, s.type || 'MIXED', s.status || 'TRIAL', s.address || '', s.state || '', s.lga || '', s.phone || '', s.email || '', s.website || null, s.current_plan_id || null);
+          } catch {}
         }
-      } catch {}
+      }
+    } catch {}
+    if (!school) {
+      school = db.prepare('SELECT * FROM schools WHERE id = ?').get(requestedSchoolId) as { id: string; status: string; name: string } | undefined;
     }
     if (!school) {
       return res.status(404).json({ error: 'SCHOOL_NOT_FOUND', message: 'School tenant does not exist' });
@@ -189,26 +223,37 @@ export async function requireTenant(req: AuthenticatedRequest, res: Response, ne
   }
   req.activeRole = matchedRole;
 
-  // Check school status (Authoritative Neon PostgreSQL fallback if local cache is cold)
-  let school = db.prepare('SELECT id, status, name FROM schools WHERE id = ?').get(req.targetSchoolId) as { id: string; status: string; name: string } | undefined;
-  if (!school) {
-    try {
-      const { getPgPool, isPgConnected } = await import('./db.ts');
-      const pool = getPgPool();
-      if (pool && isPgConnected()) {
-        const pgRes = await pool.query('SELECT id, status, name FROM schools WHERE id = $1', [req.targetSchoolId]);
-        if (pgRes.rows.length > 0) {
-          school = pgRes.rows[0] as any;
-          try {
-            const s = pgRes.rows[0];
-            db.prepare(`
-              INSERT OR REPLACE INTO schools (id, name, slug, type, status, address, state, lga, phone, email, website)
-              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            `).run(s.id, s.name, s.slug, s.type, s.status, s.address, s.state, s.lga, s.phone, s.email, s.website);
-          } catch {}
-        }
+  // Check school status (Authoritative Neon PostgreSQL first, local cache fallback)
+  let school: { id: string; status: string; name: string } | undefined;
+  try {
+    const { getPgPool, cacheDb, markPgConnected } = await import('./db.ts');
+    const pool = getPgPool();
+    if (pool) {
+      const pgRes = await pool.query('SELECT * FROM schools WHERE id = $1', [req.targetSchoolId]);
+      markPgConnected();
+      if (pgRes.rows.length > 0) {
+        const s = pgRes.rows[0];
+        school = s as any;
+        try {
+          cacheDb.prepare(`
+            INSERT INTO schools (id, name, slug, type, status, address, state, lga, phone, email, website, current_plan_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+              name = excluded.name,
+              status = excluded.status,
+              address = excluded.address,
+              state = excluded.state,
+              lga = excluded.lga,
+              phone = excluded.phone,
+              email = excluded.email,
+              website = excluded.website
+          `).run(s.id, s.name, s.slug, s.type || 'MIXED', s.status || 'TRIAL', s.address || '', s.state || '', s.lga || '', s.phone || '', s.email || '', s.website || null, s.current_plan_id || null);
+        } catch {}
       }
-    } catch {}
+    }
+  } catch {}
+  if (!school) {
+    school = db.prepare('SELECT id, status, name FROM schools WHERE id = ?').get(req.targetSchoolId) as { id: string; status: string; name: string } | undefined;
   }
   if (!school) {
     return res.status(404).json({ error: 'SCHOOL_NOT_FOUND', message: 'School tenant not found' });

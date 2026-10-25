@@ -44,6 +44,8 @@ export function translateSqlForPostgres(sql: string): string {
   translated = translated.replace(/datetime\('now',\s*'\+([0-9]+)\s+hours'\)/gi, "(CURRENT_TIMESTAMP + INTERVAL '$1 hours')");
   translated = translated.replace(/datetime\('now'\)/gi, "CURRENT_TIMESTAMP");
   translated = translated.replace(/datetime\(([^)]+)\)/gi, "($1)::TIMESTAMPTZ");
+  translated = translated.replace(/date\('now',\s*'\+([0-9]+)\s+days'\)/gi, "(CURRENT_DATE + INTERVAL '$1 days')::DATE");
+  translated = translated.replace(/date\('now'\)/gi, "CURRENT_DATE");
 
   // strftime('%Y-%m', col) -> TO_CHAR(col, 'YYYY-MM')
   translated = translated.replace(/strftime\('%Y-%m',\s*([^)]+)\)/gi, "TO_CHAR($1, 'YYYY-MM')");

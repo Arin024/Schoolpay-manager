@@ -2,7 +2,7 @@ import { Router } from 'express';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-import { db } from './db.ts';
+import { db, cacheDb, queryPg, getPgPool, isPgConnected, ensurePgConnected } from './db.ts';
 import { requireAuth, requireSuperAdmin, type AuthenticatedRequest } from './tenantMiddleware.ts';
 import { logAudit } from './audit.ts';
 import { toKobo, toNaira } from './financeUtils.ts';
@@ -512,26 +512,22 @@ adminRouter.patch('/schools/:schoolId/status', requireAuth, requireSuperAdmin, (
 // DELETE /admin/schools/:schoolId (Permanent purge of school account, users, and all associated tenant data)
 adminRouter.delete('/schools/:schoolId', requireAuth, requireSuperAdmin, async (req: AuthenticatedRequest, res) => {
   const { schoolId } = req.params;
-  const { confirmationName } = req.body || {};
+  const { confirmationName, mode = 'PURGE' } = req.body || {};
 
   // Find school authoritatively from Neon PG first, fallback to SQLite
   let school: any = null;
-  const { getPgPool } = await import('./db.ts');
-  const pool = getPgPool();
-  if (pool) {
-    try {
-      const schCheck = await pool.query('SELECT * FROM schools WHERE id = $1', [schoolId]);
-      if (schCheck.rows.length > 0) school = schCheck.rows[0];
-    } catch {}
+  const pgSchool = await queryPg('SELECT * FROM schools WHERE id = $1', [schoolId]);
+  if (pgSchool && pgSchool.rows.length > 0) {
+    school = pgSchool.rows[0];
+  } else {
+    school = cacheDb.prepare('SELECT * FROM schools WHERE id = ?').get(schoolId) as any;
   }
-  if (!school) {
-    school = db.prepare('SELECT * FROM schools WHERE id = ?').get(schoolId) as any;
-  }
+
   if (!school) {
     return res.status(404).json({ error: 'NOT_FOUND', message: 'School not found' });
   }
 
-  // Safety confirmation check if confirmationName is enforced
+  // Safety confirmation check if confirmationName is provided
   if (confirmationName && confirmationName.trim().toLowerCase().replace(/\s+/g, ' ') !== school.name.trim().toLowerCase().replace(/\s+/g, ' ')) {
     return res.status(400).json({
       error: 'CONFIRMATION_MISMATCH',
@@ -539,109 +535,142 @@ adminRouter.delete('/schools/:schoolId', requireAuth, requireSuperAdmin, async (
     });
   }
 
+  // ============================================================================
+  // MODE 1: ARCHIVE / DEACTIVATE (Safe, non-destructive status update)
+  // ============================================================================
+  if (mode === 'ARCHIVE') {
+    try {
+      await queryPg("UPDATE schools SET status = 'CANCELLED', updated_at = CURRENT_TIMESTAMP WHERE id = $1", [schoolId]);
+      await queryPg("UPDATE school_subscriptions SET status = 'CANCELLED', updated_at = CURRENT_TIMESTAMP WHERE school_id = $1 AND status = 'ACTIVE'", [schoolId]);
+
+      cacheDb.prepare("UPDATE schools SET status = 'CANCELLED', updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(schoolId);
+      cacheDb.prepare("UPDATE school_subscriptions SET status = 'CANCELLED', updated_at = CURRENT_TIMESTAMP WHERE school_id = ? AND status = 'ACTIVE'").run(schoolId);
+
+      // Invalidate active sessions for users belonging to this school
+      await queryPg("DELETE FROM sessions WHERE user_id IN (SELECT user_id FROM user_roles WHERE school_id = $1)", [schoolId]);
+      try {
+        cacheDb.prepare("DELETE FROM sessions WHERE user_id IN (SELECT user_id FROM user_roles WHERE school_id = ?)").run(schoolId);
+      } catch {}
+
+      logAudit({
+        actorId: req.user!.id,
+        actorEmail: req.user!.email,
+        schoolId,
+        action: 'SCHOOL_ARCHIVED',
+        entity: 'SCHOOL',
+        entityId: schoolId,
+        ipAddress: req.ip || '127.0.0.1',
+        metadata: { schoolName: school.name, archivedBy: req.user!.email },
+      });
+
+      return res.json({
+        success: true,
+        mode: 'ARCHIVE',
+        message: `School "${school.name}" has been safely archived and deactivated. All academic and financial records remain preserved.`,
+        schoolId,
+      });
+    } catch (err: any) {
+      console.error('[Archive School Error]', err);
+      return res.status(500).json({ error: 'ARCHIVE_FAILED', message: err.message });
+    }
+  }
+
+  // ============================================================================
+  // MODE 2: PURGE / PERMANENT DELETION (FK-safe authoritative database cleanup)
+  // ============================================================================
   try {
-    // 1. First, delete authoritatively from Neon PostgreSQL
-    const { getPgPool, isPgConnected } = await import('./db.ts');
     const pool = getPgPool();
-    if (pool && isPgConnected()) {
+    if (pool) {
       const client = await pool.connect();
       try {
         await client.query('BEGIN');
-        
-        // Find users strictly belonging to this school
-        const usersRes = await client.query(
-          `SELECT user_id FROM user_roles WHERE school_id = $1 AND user_id NOT IN (
-             SELECT id FROM users WHERE is_platform_admin = 1
-           )`,
-          [schoolId]
-        );
+
+        // 1. Break FK dependency in audit_logs before school row is removed
+        await client.query('UPDATE audit_logs SET school_id = NULL WHERE school_id = $1', [schoolId]);
+
+        // 2. Identify users attached to this school
+        const usersRes = await client.query('SELECT user_id FROM user_roles WHERE school_id = $1', [schoolId]);
         const userIds = usersRes.rows.map((r: any) => r.user_id);
 
-        // Cascade delete all existing child tables safely using SAVEPOINTS so non-existent tables do not abort the transaction
+        // 3. Child tables to delete safely using indexed numeric savepoints
         const tenantTables = [
           'receipts',
           'payments',
+          'payment_receipts',
           'invoice_items',
           'invoices',
+          'discount_assignments',
+          'discounts',
           'fee_structure_items',
           'fee_structures',
           'fee_categories',
+          'parent_students',
           'parents',
+          'student_enrollments',
           'students',
           'class_arms',
           'classes',
           'staff',
           'terms',
           'academic_sessions',
+          'school_bank_accounts',
+          'school_payment_configs',
           'school_subscriptions',
           'school_settings',
+          'recycle_bin',
           'notifications',
-          'sessions',
         ];
 
-        for (const tbl of tenantTables) {
+        for (let i = 0; i < tenantTables.length; i++) {
+          const tbl = tenantTables[i];
           try {
-            await client.query(`SAVEPOINT sp_${tbl}`);
+            await client.query(`SAVEPOINT sp_tbl_${i}`);
             await client.query(`DELETE FROM ${tbl} WHERE school_id = $1`, [schoolId]);
-            await client.query(`RELEASE SAVEPOINT sp_${tbl}`);
-          } catch (e) {
-            await client.query(`ROLLBACK TO SAVEPOINT sp_${tbl}`);
+            await client.query(`RELEASE SAVEPOINT sp_tbl_${i}`);
+          } catch (tblErr) {
+            await client.query(`ROLLBACK TO SAVEPOINT sp_tbl_${i}`);
           }
         }
 
-        // Delete user roles for this school
+        // 4. Remove school user_roles
         await client.query('DELETE FROM user_roles WHERE school_id = $1', [schoolId]);
 
-        // Delete users safely using SAVEPOINT
-        for (const uid of userIds) {
+        // 5. Clean up orphan users (users with no other school role and not platform admin)
+        for (let j = 0; j < userIds.length; j++) {
+          const uid = userIds[j];
           try {
-            await client.query(`SAVEPOINT sp_user_${uid}`);
+            await client.query(`SAVEPOINT sp_usr_${j}`);
             const otherRoles = await client.query('SELECT id FROM user_roles WHERE user_id = $1', [uid]);
             if (otherRoles.rows.length === 0) {
+              await client.query('UPDATE audit_logs SET actor_id = NULL WHERE actor_id = $1', [uid]);
+              await client.query('DELETE FROM password_resets WHERE user_id = $1', [uid]);
               await client.query('DELETE FROM sessions WHERE user_id = $1', [uid]);
               await client.query('DELETE FROM users WHERE id = $1 AND is_platform_admin = 0', [uid]);
             }
-            await client.query(`RELEASE SAVEPOINT sp_user_${uid}`);
-          } catch (e) {
-            await client.query(`ROLLBACK TO SAVEPOINT sp_user_${uid}`);
+            await client.query(`RELEASE SAVEPOINT sp_usr_${j}`);
+          } catch (uErr) {
+            await client.query(`ROLLBACK TO SAVEPOINT sp_usr_${j}`);
           }
         }
 
-        // Delete school record itself
+        // 6. Delete the school record itself
         await client.query('DELETE FROM schools WHERE id = $1', [schoolId]);
-
-        // Audit log
-        await client.query(
-          `INSERT INTO audit_logs (actor_id, actor_email, school_id, action, entity, entity_id, ip_address, metadata)
-           VALUES ($1, $2, $3, 'SCHOOL_DELETED_PERMANENTLY', 'SCHOOL', $3, $4, $5)`,
-          [
-            req.user!.id,
-            req.user!.email,
-            schoolId,
-            req.ip || '127.0.0.1',
-            JSON.stringify({ schoolName: school.name, deletedBy: req.user!.email }),
-          ]
-        );
 
         await client.query('COMMIT');
       } catch (pgErr) {
         await client.query('ROLLBACK');
-        console.error('[Admin Delete School PostgreSQL Error]', pgErr);
+        console.error('[Admin Purge School PostgreSQL Error]', pgErr);
         throw pgErr;
       } finally {
         client.release();
       }
     }
 
-    // 2. Cascade delete from local SQLite engine
+    // Mirror cleanup in local SQLite cacheDb
     try {
-      db.exec('BEGIN TRANSACTION;');
+      cacheDb.exec('BEGIN TRANSACTION;');
 
-      const localUsers = db.prepare(
-        `SELECT user_id FROM user_roles WHERE school_id = ? AND user_id NOT IN (
-           SELECT id FROM users WHERE is_platform_admin = 1
-         )`
-      ).all(schoolId) as any[];
+      const localUsers = cacheDb.prepare('SELECT user_id FROM user_roles WHERE school_id = ?').all(schoolId) as any[];
 
       const localTables = [
         'payment_receipts',
@@ -653,7 +682,7 @@ adminRouter.delete('/schools/:schoolId', requireAuth, requireSuperAdmin, async (
         'fee_structure_items',
         'fee_structures',
         'fee_categories',
-        'student_parents',
+        'parent_students',
         'parents',
         'student_enrollments',
         'students',
@@ -668,47 +697,48 @@ adminRouter.delete('/schools/:schoolId', requireAuth, requireSuperAdmin, async (
         'school_settings',
         'recycle_bin',
         'notifications',
-        'sessions',
       ];
 
       for (const tbl of localTables) {
         try {
-          db.prepare(`DELETE FROM ${tbl} WHERE school_id = ?`).run(schoolId);
-        } catch (e) {}
+          cacheDb.prepare(`DELETE FROM ${tbl} WHERE school_id = ?`).run(schoolId);
+        } catch {}
       }
 
-      db.prepare('DELETE FROM user_roles WHERE school_id = ?').run(schoolId);
+      cacheDb.prepare('DELETE FROM user_roles WHERE school_id = ?').run(schoolId);
 
       for (const u of localUsers) {
         try {
-          const remaining = db.prepare('SELECT id FROM user_roles WHERE user_id = ?').all(u.user_id);
+          const remaining = cacheDb.prepare('SELECT id FROM user_roles WHERE user_id = ?').all(u.user_id);
           if (remaining.length === 0) {
-            db.prepare('DELETE FROM sessions WHERE user_id = ?').run(u.user_id);
-            db.prepare('DELETE FROM users WHERE id = ? AND is_platform_admin = 0').run(u.user_id);
+            cacheDb.prepare('DELETE FROM password_resets WHERE user_id = ?').run(u.user_id);
+            cacheDb.prepare('DELETE FROM sessions WHERE user_id = ?').run(u.user_id);
+            cacheDb.prepare('DELETE FROM users WHERE id = ? AND is_platform_admin = 0').run(u.user_id);
           }
-        } catch (e) {}
+        } catch {}
       }
 
-      db.prepare('DELETE FROM schools WHERE id = ?').run(schoolId);
-      db.exec('COMMIT;');
+      cacheDb.prepare('DELETE FROM schools WHERE id = ?').run(schoolId);
+      cacheDb.exec('COMMIT;');
     } catch (sqliteErr) {
-      db.exec('ROLLBACK;');
+      try { cacheDb.exec('ROLLBACK;'); } catch {}
     }
 
     logAudit({
       actorId: req.user!.id,
       actorEmail: req.user!.email,
-      schoolId: null,
+      schoolId: null, // explicit null prevents FK violation against purged school
       action: 'SCHOOL_DELETED_PERMANENTLY',
       entity: 'SCHOOL',
       entityId: schoolId,
       ipAddress: req.ip || '127.0.0.1',
-      metadata: { schoolName: school.name, deletedBy: req.user!.email },
+      metadata: { schoolName: school.name, deletedBy: req.user!.email, mode: 'PURGE' },
     });
 
     return res.json({
       success: true,
-      message: `School "${school.name}" and all associated accounts were permanently deleted.`,
+      mode: 'PURGE',
+      message: `School "${school.name}" and all associated data were permanently purged.`,
       schoolId,
     });
   } catch (err: any) {
@@ -731,7 +761,14 @@ adminRouter.delete('/users/:userId', requireAuth, requireSuperAdmin, async (req:
     });
   }
 
-  const user = db.prepare('SELECT * FROM users WHERE id = ?').get(userId) as any;
+  let user: any = null;
+  const pgUser = await queryPg('SELECT * FROM users WHERE id = $1', [userId]);
+  if (pgUser && pgUser.rows.length > 0) {
+    user = pgUser.rows[0];
+  } else {
+    user = cacheDb.prepare('SELECT * FROM users WHERE id = ?').get(userId) as any;
+  }
+
   if (!user) {
     return res.status(404).json({ error: 'NOT_FOUND', message: 'User account not found' });
   }
@@ -744,13 +781,14 @@ adminRouter.delete('/users/:userId', requireAuth, requireSuperAdmin, async (req:
   }
 
   try {
-    // 1. Delete from Neon PostgreSQL
-    const { getPgPool, isPgConnected } = await import('./db.ts');
+    // 1. Delete authoritatively from Neon PostgreSQL
     const pool = getPgPool();
-    if (pool && isPgConnected()) {
+    if (pool) {
       const client = await pool.connect();
       try {
         await client.query('BEGIN');
+        await client.query('UPDATE audit_logs SET actor_id = NULL WHERE actor_id = $1', [userId]);
+        await client.query('DELETE FROM password_resets WHERE user_id = $1', [userId]);
         await client.query('DELETE FROM sessions WHERE user_id = $1', [userId]);
         await client.query('DELETE FROM user_roles WHERE user_id = $1', [userId]);
         await client.query('DELETE FROM users WHERE id = $1', [userId]);
@@ -763,10 +801,13 @@ adminRouter.delete('/users/:userId', requireAuth, requireSuperAdmin, async (req:
       }
     }
 
-    // 2. Delete from local SQLite
-    db.prepare('DELETE FROM sessions WHERE user_id = ?').run(userId);
-    db.prepare('DELETE FROM user_roles WHERE user_id = ?').run(userId);
-    db.prepare('DELETE FROM users WHERE id = ?').run(userId);
+    // 2. Delete from local SQLite cacheDb
+    try {
+      cacheDb.prepare('DELETE FROM password_resets WHERE user_id = ?').run(userId);
+      cacheDb.prepare('DELETE FROM sessions WHERE user_id = ?').run(userId);
+      cacheDb.prepare('DELETE FROM user_roles WHERE user_id = ?').run(userId);
+      cacheDb.prepare('DELETE FROM users WHERE id = ?').run(userId);
+    } catch {}
 
     logAudit({
       actorId: req.user!.id,
@@ -1216,17 +1257,55 @@ adminRouter.patch('/commissions/:id/status', requireAuth, requireSuperAdmin, (re
 // 7. PLATFORM USERS & AUDIT LOGS (SUPER ADMIN ONLY)
 // ==============================================================================
 
-adminRouter.get('/users', requireAuth, requireSuperAdmin, (_req: AuthenticatedRequest, res) => {
-  const users = db.prepare(`
-    SELECT u.id, u.email, u.full_name, u.phone, u.is_platform_admin, u.is_active, u.created_at,
-           COUNT(ur.school_id) as assigned_schools
-    FROM users u
-    LEFT JOIN user_roles ur ON u.id = ur.user_id
-    GROUP BY u.id
-    ORDER BY u.is_platform_admin DESC, u.created_at DESC
-  `).all();
+adminRouter.get('/users', requireAuth, requireSuperAdmin, async (_req: AuthenticatedRequest, res) => {
+  try {
+    let users: any[] = [];
+    const pgUsers = await queryPg(`
+      SELECT u.id, u.email, u.full_name, u.phone, u.is_platform_admin, u.is_active, u.created_at,
+             COUNT(ur.school_id) as assigned_schools
+      FROM users u
+      LEFT JOIN user_roles ur ON u.id = ur.user_id
+      GROUP BY u.id, u.email, u.full_name, u.phone, u.is_platform_admin, u.is_active, u.created_at
+      ORDER BY u.is_platform_admin DESC, u.created_at DESC
+    `);
 
-  return res.json({ success: true, users });
+    if (pgUsers) {
+      users = pgUsers.rows;
+      for (const u of users) {
+        cacheDb.prepare(`
+          INSERT INTO users (id, email, password_hash, salt, full_name, phone, is_platform_admin, is_active, created_at, updated_at)
+          VALUES (?, ?, '', '', ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+          ON CONFLICT(id) DO UPDATE SET
+            email = excluded.email,
+            full_name = excluded.full_name,
+            phone = excluded.phone,
+            is_platform_admin = excluded.is_platform_admin,
+            is_active = excluded.is_active
+        `).run(
+          u.id,
+          u.email,
+          u.full_name,
+          u.phone || null,
+          u.is_platform_admin ? 1 : 0,
+          u.is_active ? 1 : 0,
+          u.created_at || new Date().toISOString()
+        );
+      }
+    } else {
+      users = cacheDb.prepare(`
+        SELECT u.id, u.email, u.full_name, u.phone, u.is_platform_admin, u.is_active, u.created_at,
+               COUNT(ur.school_id) as assigned_schools
+        FROM users u
+        LEFT JOIN user_roles ur ON u.id = ur.user_id
+        GROUP BY u.id
+        ORDER BY u.is_platform_admin DESC, u.created_at DESC
+      `).all();
+    }
+
+    return res.json({ success: true, users });
+  } catch (err: any) {
+    return res.status(500).json({ error: 'FETCH_FAILED', message: err.message });
+  }
 });
 
 adminRouter.get('/audit-logs', requireAuth, requireSuperAdmin, (req: AuthenticatedRequest, res) => {

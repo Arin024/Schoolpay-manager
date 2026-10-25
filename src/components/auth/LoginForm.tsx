@@ -73,7 +73,7 @@ export const LoginForm: React.FC<LoginFormProps> = ({
           <form onSubmit={handleSubmit} className="space-y-4">
             <div>
               <label className="block text-xs font-semibold text-slate-700 mb-1.5">
-                Official Email Address
+                Official School or Proprietor Email
               </label>
               <div className="relative">
                 <div className="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none text-slate-400">
@@ -83,7 +83,7 @@ export const LoginForm: React.FC<LoginFormProps> = ({
                   type="email"
                   value={email}
                   onChange={(e) => setEmail(e.target.value)}
-                  placeholder="e.g. bursar@yourschool.edu.ng"
+                  placeholder="e.g. info@yourschool.com or proprietor@gmail.com"
                   required
                   autoComplete="email"
                   className="w-full pl-10 pr-3.5 py-2.5 text-sm bg-slate-50 focus:bg-white border border-slate-300 focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500 rounded-xl transition"
