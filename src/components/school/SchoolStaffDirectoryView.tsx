@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import {
   Briefcase,
-  Plus,
+  Plus, Download,
   Trash2,
   Edit2,
   Phone,
@@ -118,6 +118,22 @@ export const SchoolStaffDirectoryView: React.FC = () => {
     }
   };
 
+  const handleExportCsv = async () => {
+    try {
+      const blob = await api.exportStaffCsv();
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `staff_${activeSchool?.slug || 'export'}.csv`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      window.URL.revokeObjectURL(url);
+    } catch (err: any) {
+      alert(err?.message || 'Failed to export staff directory');
+    }
+  };
+
   const handleDeleteConfirm = async () => {
     if (!staffToDelete) return;
     try {
@@ -153,17 +169,27 @@ export const SchoolStaffDirectoryView: React.FC = () => {
           </p>
         </div>
 
-        <button
-          onClick={() => {
-            setFormData(initialFormState);
-            setFormError(null);
-            setIsAddModalOpen(true);
-          }}
-          className="px-4 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold transition flex items-center gap-1.5 shadow-sm self-start md:self-auto cursor-pointer"
-        >
-          <Plus className="w-4 h-4" />
-          <span>Add Staff Member</span>
-        </button>
+        <div className="flex items-center gap-2 self-start md:self-auto">
+          <button
+            onClick={handleExportCsv}
+            className="px-3.5 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-700 border border-slate-200 rounded-xl text-xs font-bold transition flex items-center gap-1.5 cursor-pointer"
+            title="Export staff directory as CSV"
+          >
+            <Download className="w-4 h-4 text-slate-600" />
+            <span>Export CSV</span>
+          </button>
+          <button
+            onClick={() => {
+              setFormData(initialFormState);
+              setFormError(null);
+              setIsAddModalOpen(true);
+            }}
+            className="px-4 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold transition flex items-center gap-1.5 shadow-sm cursor-pointer"
+          >
+            <Plus className="w-4 h-4" />
+            <span>Add Staff Member</span>
+          </button>
+        </div>
       </div>
 
       {/* Search and Counts */}

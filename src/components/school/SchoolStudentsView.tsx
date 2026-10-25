@@ -303,7 +303,7 @@ export const SchoolStudentsView: React.FC<SchoolStudentsViewProps> = ({
       return;
     }
 
-    const headers = lines[0].split(',').map((h) => h.replace(/^["']|["']$/g, '').trim().toLowerCase());
+    const headers = lines[0].split(',').map((h) => h.replace(/^["']|["']$/g, '').trim().toLowerCase().replace(/\s+/g, '_'));
     const rows: any[] = [];
 
     for (let i = 1; i < lines.length; i++) {
@@ -314,17 +314,52 @@ export const SchoolStudentsView: React.FC<SchoolStudentsViewProps> = ({
         rowObj[h] = values[idx] || '';
       });
 
-      // Map common column names
+      // Flexible extraction matching diverse Nigerian school spreadsheet schemas:
+      // Handles: admission_no, admission_number, adm_no, student_id, reg_no
+      const admNum = rowObj['admission_no'] || rowObj['admission_number'] || rowObj['adm_no'] || rowObj['reg_no'] || rowObj['student_id'] || rowObj['admission_id'] || '';
+      
+      // Handles: first_name, firstname, first, student_name (split if full name provided in single column)
+      let fn = rowObj['first_name'] || rowObj['firstname'] || rowObj['first'] || '';
+      let ln = rowObj['last_name'] || rowObj['lastname'] || rowObj['surname'] || rowObj['last'] || '';
+      let mn = rowObj['middle_name'] || rowObj['middlename'] || rowObj['middle'] || rowObj['other_name'] || '';
+      
+      // If only 'name' or 'student_name' or 'full_name' column exists without split names
+      const singleFullName = rowObj['student_name'] || rowObj['full_name'] || rowObj['name'] || '';
+      if (!fn && !ln && singleFullName) {
+        const parts = singleFullName.trim().split(/\s+/);
+        if (parts.length === 1) {
+          fn = parts[0];
+          ln = parts[0];
+        } else if (parts.length === 2) {
+          fn = parts[0];
+          ln = parts[1];
+        } else {
+          fn = parts[0];
+          mn = parts.slice(1, -1).join(' ');
+          ln = parts[parts.length - 1];
+        }
+      }
+
+      // If last_name is missing but first_name exists, fall back gracefully
+      if (fn && !ln) ln = fn;
+
+      const rawGender = rowObj['gender'] || rowObj['sex'] || '';
+      const genderVal = rawGender ? (rawGender.toLowerCase().startsWith('f') ? 'Female' : 'Male') : 'Male';
+      const className = rowObj['class_name'] || rowObj['class'] || rowObj['grade'] || rowObj['level'] || '';
+      const armName = rowObj['class_arm_name'] || rowObj['arm'] || rowObj['stream'] || rowObj['section'] || '';
+      const phone = rowObj['phone'] || rowObj['parent_phone'] || rowObj['phone_number'] || rowObj['mobile'] || '';
+      const email = rowObj['email'] || rowObj['parent_email'] || '';
+
       rows.push({
-        admission_number: rowObj['admission number'] || rowObj['admission no'] || rowObj.admission_number || '',
-        first_name: rowObj['first name'] || rowObj.first_name || '',
-        middle_name: rowObj['middle name'] || rowObj.middle_name || '',
-        last_name: rowObj['last name'] || rowObj.last_name || '',
-        gender: rowObj['gender'] || 'Male',
-        class_name: rowObj['class'] || rowObj.class_name || '',
-        class_arm_name: rowObj['arm'] || rowObj['stream'] || rowObj.class_arm_name || '',
-        phone: rowObj['phone'] || '',
-        email: rowObj['email'] || '',
+        admission_number: admNum,
+        first_name: fn,
+        middle_name: mn,
+        last_name: ln,
+        gender: genderVal,
+        class_name: className,
+        class_arm_name: armName,
+        phone,
+        email,
       });
     }
 

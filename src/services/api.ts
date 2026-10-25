@@ -411,6 +411,20 @@ export const api = {
     if (!res.ok) throw new ApiError(res.status, 'Failed to export students CSV');
     return await res.blob();
   },
+  async exportStaffCsv(): Promise<Blob> {
+    const res = await fetch(`${API_BASE}/school/staff/export`, {
+      headers: getAuthHeaders(),
+    });
+    if (!res.ok) throw new ApiError(res.status, 'Failed to export staff directory CSV');
+    return await res.blob();
+  },
+  async exportParentsCsv(): Promise<Blob> {
+    const res = await fetch(`${API_BASE}/school/parents/export`, {
+      headers: getAuthHeaders(),
+    });
+    if (!res.ok) throw new ApiError(res.status, 'Failed to export parents directory CSV');
+    return await res.blob();
+  },
 
   // Parents API
   async getSchoolParents(): Promise<{ parents: ParentItem[]; count: number }> {

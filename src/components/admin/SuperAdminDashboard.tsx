@@ -261,7 +261,10 @@ export const SuperAdminDashboard: React.FC = () => {
   const handleDeleteSchoolSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!deleteModalSchool) return;
-    if (deleteConfirmationText.trim().toLowerCase() !== deleteModalSchool.name.trim().toLowerCase()) {
+    const normInput = deleteConfirmationText.trim().toLowerCase().replace(/\s+/g, ' ');
+    const normTarget = deleteModalSchool.name.trim().toLowerCase().replace(/\s+/g, ' ');
+
+    if (normInput !== normTarget) {
       setDeleteError(`Please type the exact school name "${deleteModalSchool.name}" to confirm deletion.`);
       return;
     }
@@ -269,7 +272,7 @@ export const SuperAdminDashboard: React.FC = () => {
     setDeleteSubmitting(true);
     setDeleteError('');
     try {
-      await api.deleteSchool(deleteModalSchool.id, deleteConfirmationText.trim());
+      await api.deleteSchool(deleteModalSchool.id, deleteModalSchool.name);
       setDeleteModalSchool(null);
       setDeleteConfirmationText('');
       await loadData();

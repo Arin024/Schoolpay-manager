@@ -532,7 +532,7 @@ adminRouter.delete('/schools/:schoolId', requireAuth, requireSuperAdmin, async (
   }
 
   // Safety confirmation check if confirmationName is enforced
-  if (confirmationName && confirmationName.trim() !== school.name.trim()) {
+  if (confirmationName && confirmationName.trim().toLowerCase().replace(/\s+/g, ' ') !== school.name.trim().toLowerCase().replace(/\s+/g, ' ')) {
     return res.status(400).json({
       error: 'CONFIRMATION_MISMATCH',
       message: `To delete this school, please confirm by typing its exact name "${school.name}".`,

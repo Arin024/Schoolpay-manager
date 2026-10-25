@@ -687,12 +687,28 @@ apiRouter.get('/v1/auth/me', requireAuth, async (req: AuthenticatedRequest, res)
     }
   }
 
-  let activeSchool = null;
-  let activeSettings = null;
+  let activeSchool: any = null;
+  let activeSettings: any = null;
 
   if (effectiveSchoolId) {
-    activeSchool = db.prepare('SELECT * FROM schools WHERE id = ?').get(effectiveSchoolId);
-    activeSettings = db.prepare('SELECT * FROM school_settings WHERE school_id = ?').get(effectiveSchoolId);
+    const { getPgPool } = await import('./db.ts');
+    const pool = getPgPool();
+    if (pool) {
+      try {
+        const schRes = await pool.query('SELECT * FROM schools WHERE id = $1', [effectiveSchoolId]);
+        if (schRes.rows.length > 0) activeSchool = schRes.rows[0];
+        const setRes = await pool.query('SELECT * FROM school_settings WHERE school_id = $1', [effectiveSchoolId]);
+        if (setRes.rows.length > 0) activeSettings = setRes.rows[0];
+      } catch (err: any) {
+        console.warn('[/v1/auth/me Neon PG notice]', err?.message);
+      }
+    }
+    if (!activeSchool) {
+      activeSchool = db.prepare('SELECT * FROM schools WHERE id = ?').get(effectiveSchoolId);
+    }
+    if (!activeSettings) {
+      activeSettings = db.prepare('SELECT * FROM school_settings WHERE school_id = ?').get(effectiveSchoolId);
+    }
   }
 
   return res.json({
@@ -1480,25 +1496,44 @@ apiRouter.post(
     try {
       for (let i = 0; i < rawRows.length; i++) {
         const row = rawRows[i];
-        const rawAdm = (row.admission_number || row['Admission No'] || row['Admission Number'] || '').toString().trim();
-        const fn = (row.first_name || row['First Name'] || '').toString().trim();
-        const ln = (row.last_name || row['Last Name'] || '').toString().trim();
-        const mn = (row.middle_name || row['Middle Name'] || '').toString().trim();
-        const rawGender = (row.gender || row['Gender'] || '').toString().trim();
-        const gender = rawGender ? (rawGender.toLowerCase().startsWith('f') ? 'Female' : 'Male') : null;
-        const className = (row.class_name || row['Class'] || '').toString().trim();
-        const armName = (row.class_arm_name || row['Arm'] || row['Stream'] || '').toString().trim();
-        const phone = (row.phone || row['Phone'] || '').toString().trim();
-        const email = (row.email || row['Email'] || '').toString().trim();
+        const rawAdm = (
+          row.admission_number || row.admission_no || row['Admission No'] || row['Admission Number'] ||
+          row.adm_no || row.reg_no || row.student_id || row['Student ID'] || ''
+        ).toString().trim();
 
-        // VALIDATION RULE: Only first_name and last_name are strictly required!
-        if (!fn || !ln) {
+        let fn = (row.first_name || row['First Name'] || row.firstname || '').toString().trim();
+        let ln = (row.last_name || row['Last Name'] || row.lastname || row.surname || row['Surname'] || '').toString().trim();
+        const mn = (row.middle_name || row['Middle Name'] || row.middlename || row.other_name || '').toString().trim();
+
+        // If only student_name or full_name is present
+        const singleName = (row.student_name || row.full_name || row.name || '').toString().trim();
+        if (!fn && !ln && singleName) {
+          const parts = singleName.split(/\s+/);
+          if (parts.length === 1) {
+            fn = parts[0];
+            ln = parts[0];
+          } else {
+            fn = parts[0];
+            ln = parts[parts.length - 1];
+          }
+        }
+        if (fn && !ln) ln = fn;
+
+        const rawGender = (row.gender || row['Gender'] || row.sex || '').toString().trim();
+        const gender = rawGender ? (rawGender.toLowerCase().startsWith('f') ? 'Female' : 'Male') : null;
+        const className = (row.class_name || row['Class'] || row.class || row.grade || '').toString().trim();
+        const armName = (row.class_arm_name || row['Arm'] || row['Stream'] || row.arm || row.section || '').toString().trim();
+        const phone = (row.phone || row['Phone'] || row.parent_phone || row['Parent Phone'] || '').toString().trim();
+        const email = (row.email || row['Email'] || row.parent_email || row['Parent Email'] || '').toString().trim();
+
+        // VALIDATION RULE: Require at least a student name (first_name or single full name)
+        if (!fn) {
           failedCount++;
           errors.push({
             row: i + 1,
             admission_number: rawAdm || undefined,
             student_name: `${fn} ${ln}`.trim() || 'Unknown',
-            error: 'Missing required student name (First Name and Last Name are required)',
+            error: 'Missing student name: Please provide at least student first name or full name.',
           });
           continue;
         }
@@ -1641,14 +1676,34 @@ apiRouter.get(
   requireRole(['SCHOOL_OWNER', 'SCHOOL_ADMIN', 'BURSAR']),
   async (req: AuthenticatedRequest, res) => {
     const schoolId = req.targetSchoolId!;
-    const students = db.prepare(`
-      SELECT admission_number, first_name, middle_name, last_name, full_name, gender,
-             date_of_birth, phone, email, class_name, class_arm_name, student_status,
-             state, admission_date, emergency_contact, created_at
-      FROM students
-      WHERE school_id = ?
-      ORDER BY admission_number ASC
-    `).all(schoolId) as any[];
+    let students: any[] = [];
+    const { getPgPool } = await import('./db.ts');
+    const pool = getPgPool();
+    if (pool) {
+      try {
+        const pgRes = await pool.query(`
+          SELECT admission_number, first_name, middle_name, last_name, full_name, gender,
+                 date_of_birth, phone, email, class_name, class_arm_name, student_status,
+                 state, admission_date, emergency_contact, created_at
+          FROM students
+          WHERE school_id = $1 AND is_deleted = 0
+          ORDER BY COALESCE(admission_number, 'ZZZZ') ASC, last_name ASC, first_name ASC
+        `, [schoolId]);
+        students = pgRes.rows;
+      } catch (e: any) {
+        console.warn('[Student Export PG Notice]', e.message);
+      }
+    }
+    if (students.length === 0) {
+      students = db.prepare(`
+        SELECT admission_number, first_name, middle_name, last_name, full_name, gender,
+               date_of_birth, phone, email, class_name, class_arm_name, student_status,
+               state, admission_date, emergency_contact, created_at
+        FROM students
+        WHERE school_id = ? AND is_deleted = 0
+        ORDER BY COALESCE(admission_number, 'ZZZZ') ASC, last_name ASC, first_name ASC
+      `).all(schoolId) as any[];
+    }
 
     // Build standard CSV
     const headers = [
@@ -1723,8 +1778,9 @@ apiRouter.post(
     const schoolId = req.targetSchoolId!;
     const { first_name, last_name, phone, email, address, occupation, relationship, emergency_contact, student_ids } = req.body;
 
-    if (!first_name || !last_name || !phone) {
-      return res.status(400).json({ error: 'MISSING_FIELDS', message: 'First name, last name, and phone are required.' });
+    // Flexible Parent Validation: Schools without phone numbers can still record parent information
+    if (!first_name || !last_name) {
+      return res.status(400).json({ error: 'MISSING_FIELDS', message: 'Parent first name and last name are required.' });
     }
 
     const id = 'par_' + crypto.randomUUID().slice(0, 10);
@@ -2018,12 +2074,15 @@ apiRouter.post(
       date_joined = new Date().toISOString().slice(0, 10),
     } = req.body;
 
-    if (!staff_number || !first_name || !last_name || !email || !phone || !job_title) {
+    // Flexible Staff Validation: Schools without complete information can still keep records
+    if (!first_name || !last_name) {
       return res.status(400).json({
         error: 'MISSING_FIELDS',
-        message: 'Staff number, name, email, phone, and job title are required.',
+        message: 'Staff first name and last name are required.',
       });
     }
+    const effectiveStaffNo = staff_number ? staff_number.trim() : `STF-${crypto.randomBytes(3).toString('hex').toUpperCase()}`;
+    const effectiveJobTitle = job_title ? job_title.trim() : 'Staff Member';
 
     // Enforce Plan Staff Limit (Section 10: Usage Limit Enforcement)
     const currentStaffCount = (db.prepare('SELECT COUNT(*) as c FROM staff WHERE school_id = ?').get(schoolId) as any).c;
@@ -2059,7 +2118,7 @@ apiRouter.post(
     `).run(
       id,
       schoolId,
-      staff_number.trim(),
+      effectiveStaffNo,
       first_name.trim(),
       middle_name.trim(),
       last_name.trim(),
@@ -2067,7 +2126,7 @@ apiRouter.post(
       phone.trim(),
       gender || null,
       address || null,
-      job_title.trim(),
+      effectiveJobTitle,
       department || null,
       employment_status,
       date_joined
@@ -2414,3 +2473,108 @@ apiRouter.delete(['/v1/admin/schools/:schoolId', '/admin/schools/:schoolId'], re
 
   return res.json({ success: true, message: `School ${school.name} permanently purged from all databases.` });
 });
+
+
+// GET /api/v1/school/staff/export (Tenant-scoped staff directory export)
+apiRouter.get(
+  '/v1/school/staff/export',
+  requireAuth,
+  requireTenant,
+  requireRole(['SCHOOL_OWNER', 'SCHOOL_ADMIN']),
+  async (req: AuthenticatedRequest, res) => {
+    const schoolId = req.targetSchoolId!;
+    let staffList: any[] = [];
+    const { getPgPool } = await import('./db.ts');
+    const pool = getPgPool();
+    if (pool) {
+      try {
+        const pgRes = await pool.query(`
+          SELECT staff_number, first_name, middle_name, last_name, email, phone, gender, job_title, department, employment_status, date_joined
+          FROM staff
+          WHERE school_id = $1 AND (is_deleted = 0 OR is_deleted IS NULL)
+          ORDER BY last_name ASC, first_name ASC
+        `, [schoolId]);
+        staffList = pgRes.rows;
+      } catch {}
+    }
+    if (staffList.length === 0) {
+      staffList = db.prepare(`
+        SELECT staff_number, first_name, middle_name, last_name, email, phone, gender, job_title, department, employment_status, date_joined
+        FROM staff
+        WHERE school_id = ? AND (is_deleted = 0 OR is_deleted IS NULL)
+        ORDER BY last_name ASC, first_name ASC
+      `).all(schoolId) as any[];
+    }
+
+    const headers = ['Staff Number', 'First Name', 'Middle Name', 'Last Name', 'Email', 'Phone', 'Gender', 'Job Title', 'Department', 'Status', 'Date Joined'];
+    const csvRows = [headers.join(',')];
+    for (const s of staffList) {
+      csvRows.push([
+        `"${s.staff_number || ''}"`,
+        `"${s.first_name || ''}"`,
+        `"${s.middle_name || ''}"`,
+        `"${s.last_name || ''}"`,
+        `"${s.email || ''}"`,
+        `"${s.phone || ''}"`,
+        `"${s.gender || ''}"`,
+        `"${s.job_title || ''}"`,
+        `"${s.department || ''}"`,
+        `"${s.employment_status || 'ACTIVE'}"`,
+        `"${s.date_joined || ''}"`
+      ].join(','));
+    }
+    res.setHeader('Content-Type', 'text/csv');
+    res.setHeader('Content-Disposition', `attachment; filename=staff_${schoolId}.csv`);
+    return res.send(csvRows.join('\n'));
+  }
+);
+
+// GET /api/v1/school/parents/export (Tenant-scoped parents directory export)
+apiRouter.get(
+  '/v1/school/parents/export',
+  requireAuth,
+  requireTenant,
+  requireRole(['SCHOOL_OWNER', 'SCHOOL_ADMIN', 'BURSAR']),
+  async (req: AuthenticatedRequest, res) => {
+    const schoolId = req.targetSchoolId!;
+    let parentsList: any[] = [];
+    const { getPgPool } = await import('./db.ts');
+    const pool = getPgPool();
+    if (pool) {
+      try {
+        const pgRes = await pool.query(`
+          SELECT first_name, last_name, phone, email, address, occupation, relationship
+          FROM parents
+          WHERE school_id = $1 AND (is_deleted = 0 OR is_deleted IS NULL)
+          ORDER BY last_name ASC, first_name ASC
+        `, [schoolId]);
+        parentsList = pgRes.rows;
+      } catch {}
+    }
+    if (parentsList.length === 0) {
+      parentsList = db.prepare(`
+        SELECT first_name, last_name, phone, email, address, occupation, relationship
+        FROM parents
+        WHERE school_id = ? AND (is_deleted = 0 OR is_deleted IS NULL)
+        ORDER BY last_name ASC, first_name ASC
+      `).all(schoolId) as any[];
+    }
+
+    const headers = ['First Name', 'Last Name', 'Phone', 'Email', 'Address', 'Occupation', 'Relationship'];
+    const csvRows = [headers.join(',')];
+    for (const p of parentsList) {
+      csvRows.push([
+        `"${p.first_name || ''}"`,
+        `"${p.last_name || ''}"`,
+        `"${p.phone || ''}"`,
+        `"${p.email || ''}"`,
+        `"${p.address || ''}"`,
+        `"${p.occupation || ''}"`,
+        `"${p.relationship || ''}"`
+      ].join(','));
+    }
+    res.setHeader('Content-Type', 'text/csv');
+    res.setHeader('Content-Disposition', `attachment; filename=parents_${schoolId}.csv`);
+    return res.send(csvRows.join('\n'));
+  }
+);

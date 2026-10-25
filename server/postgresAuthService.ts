@@ -169,6 +169,15 @@ export async function validateSessionPg(
         `).run(s.id, s.name, s.slug, s.type, s.status, s.address || '', s.state || '', s.lga || '', s.phone || '', s.email || '', s.current_plan_id || null);
       }
     }
+    // Also sync user_roles to local cache so fallback queries find them
+    for (const r of roles) {
+      try {
+        db.prepare(`
+          INSERT OR REPLACE INTO user_roles (id, user_id, school_id, role_id, is_primary)
+          VALUES (?, ?, ?, ?, ?)
+        `).run(r.id, r.user_id, r.school_id, r.role_id, r.is_primary ? 1 : 0);
+      } catch {}
+    }
 
     db.prepare(`
       INSERT OR REPLACE INTO sessions (id, token, user_id, school_id, ip_address, user_agent, expires_at)
