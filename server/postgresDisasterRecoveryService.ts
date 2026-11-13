@@ -126,6 +126,19 @@ export const ALL_44_TABLES_ORDER = [
   'webhook_events',
   'schema_migrations',
   'database_backups',
+
+  // 8. Academic, Examination, Attendance, Behaviour & Portal Records
+  'school_academic_settings',
+  'subjects',
+  'examinations',
+  'student_scores',
+  'score_correction_logs',
+  'report_cards',
+  'attendance_records',
+  'attendance_publications',
+  'behaviour_records',
+  'teacher_remarks',
+  'school_announcements',
 ];
 
 /**

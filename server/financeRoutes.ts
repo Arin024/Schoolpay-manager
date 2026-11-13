@@ -17,11 +17,45 @@ import {
   generateInvoiceNumber,
   generatePaymentReference,
 } from './financeUtils.ts';
+import {
+  ACADEMIC_READ_ROLES,
+  canAccessStudent,
+  getAuthorizedStudentIds,
+  getEffectiveRoleName,
+  getSchoolAcademicSettings,
+} from './accessControl.ts';
+import { wrapRouterAsync, sanitizeCsvCell, safeClientError } from './securityUtils.ts';
 
 export const financeRouter = express.Router();
+wrapRouterAsync(financeRouter);
 
 // Allowed financial management roles
 const FINANCIAL_ADMIN_ROLES = ['SCHOOL_OWNER', 'SCHOOL_ADMIN', 'BURSAR'];
+
+async function checkFeeReadPolicy(req: AuthenticatedRequest, res: any): Promise<boolean> {
+  const role = getEffectiveRoleName(req);
+  const schoolId = req.targetSchoolId!;
+  if (role === 'TEACHER') {
+    const settings = await getSchoolAcademicSettings(schoolId);
+    if (!settings.teachers_can_view_fees) {
+      res.status(403).json({
+        error: 'FEE_VISIBILITY_DISABLED',
+        message: 'School policy restricts teacher access to student fee records.',
+      });
+      return false;
+    }
+  } else if (role === 'STUDENT') {
+    const settings = await getSchoolAcademicSettings(schoolId);
+    if (!settings.students_can_view_fees) {
+      res.status(403).json({
+        error: 'FEE_VISIBILITY_DISABLED',
+        message: 'School policy restricts student access to fee records.',
+      });
+      return false;
+    }
+  }
+  return true;
+}
 
 // ==============================================================================
 // 1. FEE CATEGORIES
@@ -32,8 +66,10 @@ financeRouter.get(
   '/fee-categories',
   requireAuth,
   requireTenant,
-  (req: AuthenticatedRequest, res) => {
-      const schoolId = req.targetSchoolId!;
+  requireRole(ACADEMIC_READ_ROLES),
+  async (req: AuthenticatedRequest, res) => {
+    if (!(await checkFeeReadPolicy(req, res))) return;
+    const schoolId = req.targetSchoolId!;
     const categories = db
       .prepare(
         `SELECT * FROM fee_categories WHERE school_id = ? ORDER BY name ASC`
@@ -198,7 +234,9 @@ financeRouter.get(
   '/fee-structures',
   requireAuth,
   requireTenant,
-  (req: AuthenticatedRequest, res) => {
+  requireRole(ACADEMIC_READ_ROLES),
+  async (req: AuthenticatedRequest, res) => {
+    if (!(await checkFeeReadPolicy(req, res))) return;
     const schoolId = req.targetSchoolId!;
     const { class_id, session_id, term_id } = req.query;
 
@@ -521,7 +559,7 @@ financeRouter.post(
       });
     } catch (err: any) {
       db.exec('ROLLBACK;');
-      return res.status(500).json({ error: 'CLONE_FAILED', message: err.message });
+      return res.status(500).json({ error: 'CLONE_FAILED', message: safeClientError(err) });
     }
   }
 );
@@ -535,8 +573,11 @@ financeRouter.get(
   '/invoices',
   requireAuth,
   requireTenant,
-  (req: AuthenticatedRequest, res) => {
+  async (req: AuthenticatedRequest, res) => {
+    if (!(await checkFeeReadPolicy(req, res))) return;
     const schoolId = req.targetSchoolId!;
+    const roleName = getEffectiveRoleName(req);
+    const allowedIds = await getAuthorizedStudentIds(req.user!.id, schoolId, roleName);
     const {
       student_id,
       class_id,
@@ -549,6 +590,18 @@ financeRouter.get(
       limit = '50',
       offset = '0',
     } = req.query;
+
+    if (allowedIds !== null) {
+      if (student_id && !allowedIds.includes(String(student_id))) {
+        return res.status(403).json({
+          error: 'UNAUTHORIZED_STUDENT_ACCESS',
+          message: 'You are not authorized to view invoices for this student.',
+        });
+      }
+      if (allowedIds.length === 0) {
+        return res.json({ success: true, total: 0, count: 0, invoices: [] });
+      }
+    }
 
     let sql = `
       SELECT inv.*,
@@ -568,6 +621,11 @@ financeRouter.get(
       WHERE inv.school_id = ?
     `;
     const params: any[] = [schoolId];
+
+    if (allowedIds !== null) {
+      sql += ` AND inv.student_id IN (${allowedIds.map(() => '?').join(', ')})`;
+      params.push(...allowedIds);
+    }
 
     if (student_id) {
       sql += ` AND inv.student_id = ?`;
@@ -643,7 +701,8 @@ financeRouter.get(
   '/invoices/:id',
   requireAuth,
   requireTenant,
-  (req: AuthenticatedRequest, res) => {
+  async (req: AuthenticatedRequest, res) => {
+    if (!(await checkFeeReadPolicy(req, res))) return;
     const schoolId = req.targetSchoolId!;
     const { id } = req.params;
 
@@ -675,6 +734,13 @@ financeRouter.get(
 
     if (!invoice) {
       return res.status(404).json({ error: 'NOT_FOUND', message: 'Invoice not found in your school.' });
+    }
+
+    if (!(await canAccessStudent(req, invoice.student_id))) {
+      return res.status(403).json({
+        error: 'UNAUTHORIZED_STUDENT_ACCESS',
+        message: 'You are not authorized to access this invoice.',
+      });
     }
 
     // Line items
@@ -1135,7 +1201,7 @@ financeRouter.post(
       count: generatedInvoices.length,
       invoices: generatedInvoices,
     });
-  } catch (err: any) { console.error('[GENERATE_ERROR_LOG]:', err); return res.status(500).json({ error: err.message }); }
+  } catch (err: any) { console.error('[GENERATE_ERROR_LOG]:', err); return res.status(500).json({ error: 'GENERATE_FAILED', message: safeClientError(err) }); }
   }
 );
 
@@ -1356,9 +1422,24 @@ financeRouter.get(
   '/payments',
   requireAuth,
   requireTenant,
-  (req: AuthenticatedRequest, res) => {
+  async (req: AuthenticatedRequest, res) => {
+    if (!(await checkFeeReadPolicy(req, res))) return;
     const schoolId = req.targetSchoolId!;
+    const roleName = getEffectiveRoleName(req);
+    const allowedIds = await getAuthorizedStudentIds(req.user!.id, schoolId, roleName);
     const { student_id, payment_method, start_date, end_date, limit = '50', offset = '0' } = req.query;
+
+    if (allowedIds !== null) {
+      if (student_id && !allowedIds.includes(String(student_id))) {
+        return res.status(403).json({
+          error: 'UNAUTHORIZED_STUDENT_ACCESS',
+          message: 'You are not authorized to view payments for this student.',
+        });
+      }
+      if (allowedIds.length === 0) {
+        return res.json({ success: true, count: 0, payments: [] });
+      }
+    }
 
     let sql = `
       SELECT p.*,
@@ -1374,6 +1455,11 @@ financeRouter.get(
       WHERE p.school_id = ?
     `;
     const params: any[] = [schoolId];
+
+    if (allowedIds !== null) {
+      sql += ` AND p.student_id IN (${allowedIds.map(() => '?').join(', ')})`;
+      params.push(...allowedIds);
+    }
 
     if (student_id) {
       sql += ` AND p.student_id = ?`;
@@ -1536,6 +1622,7 @@ financeRouter.get(
   '/finance/dashboard',
   requireAuth,
   requireTenant,
+  requireRole(FINANCIAL_ADMIN_ROLES),
   (req: AuthenticatedRequest, res) => {
     const schoolId = req.targetSchoolId!;
 
@@ -1627,6 +1714,7 @@ financeRouter.get(
   '/finance/reports',
   requireAuth,
   requireTenant,
+  requireRole(FINANCIAL_ADMIN_ROLES),
   (req: AuthenticatedRequest, res) => {
     const schoolId = req.targetSchoolId!;
     const { academic_session_id, term_id } = req.query;
@@ -1665,6 +1753,7 @@ financeRouter.get(
   '/finance/reports/summary',
   requireAuth,
   requireTenant,
+  requireRole(FINANCIAL_ADMIN_ROLES),
   (req: AuthenticatedRequest, res) => {
     const schoolId = req.targetSchoolId!;
     const { academic_session_id, term_id } = req.query;
@@ -1770,9 +1859,16 @@ financeRouter.get(
       const rows = payments
         .map((p) => {
           const naira = (p.amount_kobo / 100).toFixed(2);
-          const safeName = `"${(p.student_name || '').replace(/"/g, '""')}"`;
-          const safeNotes = `"${(p.notes || '').replace(/"/g, '""')}"`;
-          return `${p.payment_reference},${p.payment_date},${p.admission_number},${safeName},${p.invoice_number},${naira},${p.payment_method},${safeNotes}`;
+          return [
+            sanitizeCsvCell(p.payment_reference),
+            sanitizeCsvCell(p.payment_date),
+            sanitizeCsvCell(p.admission_number),
+            sanitizeCsvCell(p.student_name || ''),
+            sanitizeCsvCell(p.invoice_number),
+            naira,
+            sanitizeCsvCell(p.payment_method),
+            sanitizeCsvCell(p.notes || ''),
+          ].join(',');
         })
         .join('\n');
 
@@ -1823,10 +1919,21 @@ financeRouter.get(
         const total = (inv.total / 100).toFixed(2);
         const paid = (inv.amount_paid / 100).toFixed(2);
         const balance = (inv.balance / 100).toFixed(2);
-        const safeName = `"${(inv.student_name || '').replace(/"/g, '""')}"`;
-        const safeClass = `"${(inv.class_name || '').replace(/"/g, '""')}"`;
-        const safeNotes = `"${(inv.notes || '').replace(/"/g, '""')}"`;
-        return `${inv.invoice_number},${inv.admission_number},${safeName},${safeClass},${inv.issue_date},${inv.due_date},${subtotal},${discount},${total},${paid},${balance},${inv.status},${safeNotes}`;
+        return [
+          sanitizeCsvCell(inv.invoice_number),
+          sanitizeCsvCell(inv.admission_number),
+          sanitizeCsvCell(inv.student_name || ''),
+          sanitizeCsvCell(inv.class_name || ''),
+          sanitizeCsvCell(inv.issue_date),
+          sanitizeCsvCell(inv.due_date),
+          subtotal,
+          discount,
+          total,
+          paid,
+          balance,
+          sanitizeCsvCell(inv.status),
+          sanitizeCsvCell(inv.notes || ''),
+        ].join(',');
       })
       .join('\n');
 
@@ -1841,9 +1948,17 @@ financeRouter.get(
   '/students/:id/finance',
   requireAuth,
   requireTenant,
-  (req: AuthenticatedRequest, res) => {
+  async (req: AuthenticatedRequest, res) => {
+    if (!(await checkFeeReadPolicy(req, res))) return;
     const schoolId = req.targetSchoolId!;
     const { id: studentId } = req.params;
+
+    if (!(await canAccessStudent(req, studentId))) {
+      return res.status(403).json({
+        error: 'UNAUTHORIZED_STUDENT_ACCESS',
+        message: 'You are not authorized to view financial records for this student.',
+      });
+    }
 
     const student = db.prepare(`SELECT * FROM students WHERE id = ? AND school_id = ?`).get(studentId, schoolId) as any;
     if (!student) {

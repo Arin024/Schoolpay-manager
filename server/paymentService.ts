@@ -1,6 +1,7 @@
 import crypto from 'node:crypto';
 import { db } from './db.ts';
 import { toKobo, toNaira } from './financeUtils.ts';
+import { timingSafeEqualStr } from './securityUtils.ts';
 
 export type PaymentMethod = 'CASH' | 'BANK_TRANSFER' | 'POS' | 'ONLINE' | 'OTHER' | 'CHEQUE';
 export type PaymentStatus = 'PENDING' | 'SUCCESS' | 'FAILED' | 'CANCELLED' | 'REFUNDED';
@@ -231,7 +232,7 @@ export class PaystackProvider implements PaymentGatewayProvider {
     const secretKey = this.getSecretKey(schoolId);
     if (!secretKey || !signature) return false;
     const hash = crypto.createHmac('sha512', secretKey).update(rawBody).digest('hex');
-    return hash === signature;
+    return timingSafeEqualStr(hash.toLowerCase(), signature.trim().toLowerCase());
   }
 }
 
@@ -405,7 +406,7 @@ export class FlutterwaveProvider implements PaymentGatewayProvider {
   verifyWebhookSignature(_rawBody: string, signature: string | undefined, schoolId?: string): boolean {
     const secret = this.getWebhookSecret(schoolId);
     if (!secret || !signature) return false;
-    return secret === signature;
+    return timingSafeEqualStr(secret, signature.trim());
   }
 }
 
@@ -417,10 +418,19 @@ export class TestSandboxProvider implements PaymentGatewayProvider {
   displayName = 'Instant Sandbox Checkout (Testing & Demo Verification)';
 
   isConfigured(_schoolId?: string): boolean {
-    return true; // Always available in demo / sandbox mode
+    return process.env.NODE_ENV !== 'production' || process.env.ALLOW_SANDBOX_PAYMENTS === 'true';
   }
 
   async initializePayment(params: InitializePaymentParams): Promise<PaymentInitResult> {
+    if (!this.isConfigured(params.schoolId)) {
+      return {
+        success: false,
+        provider: this.name,
+        providerReference: '',
+        internalReference: '',
+        message: 'Test sandbox payments are disabled in production.',
+      };
+    }
     const providerRef = `test_sndbx_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`;
     const countRow = db.prepare('SELECT COUNT(*) as c FROM payments WHERE school_id = ?').get(params.schoolId) as { c: number };
     const internalRef = generateInternalPaymentReference('SNDBX', countRow.c + 1);
@@ -435,7 +445,18 @@ export class TestSandboxProvider implements PaymentGatewayProvider {
     };
   }
 
-  async verifyPayment(providerReference: string): Promise<PaymentVerificationResult> {
+  async verifyPayment(providerReference: string, schoolId?: string): Promise<PaymentVerificationResult> {
+    if (!this.isConfigured(schoolId)) {
+      return {
+        success: false,
+        status: 'FAILED',
+        amountKobo: 0,
+        currency: 'NGN',
+        providerReference,
+        internalReference: '',
+        message: 'Test sandbox payments are disabled in production.',
+      };
+    }
     return {
       success: true,
       status: 'SUCCESS',
@@ -448,8 +469,9 @@ export class TestSandboxProvider implements PaymentGatewayProvider {
     };
   }
 
-  verifyWebhookSignature(_rawBody: string, signature: string | undefined): boolean {
-    return !signature || signature === 'sandbox-test-sig';
+  verifyWebhookSignature(_rawBody: string, signature: string | undefined, schoolId?: string): boolean {
+    if (!this.isConfigured(schoolId)) return false;
+    return signature === 'sandbox-test-sig';
   }
 }
 
@@ -617,6 +639,17 @@ export class BachsPaymentProvider implements PaymentGatewayProvider {
   async verifyPayment(providerReference: string, schoolId?: string): Promise<PaymentVerificationResult> {
     const apiKey = this.getApiKey(schoolId);
     if (!apiKey) {
+      if (process.env.NODE_ENV === 'production' && process.env.ALLOW_SANDBOX_PAYMENTS !== 'true') {
+        return {
+          success: false,
+          status: 'FAILED',
+          amountKobo: 0,
+          currency: 'NGN',
+          providerReference,
+          internalReference: '',
+          message: 'Bachs API key is not configured for live verification.',
+        };
+      }
       return {
         success: true,
         status: 'SUCCESS',
@@ -742,8 +775,13 @@ export class BachsPaymentProvider implements PaymentGatewayProvider {
       }
     }
 
-    // If NO secret is configured, allow local sandbox demo signatures
-    if (!signature || signature === 'bachs-sandbox-sig' || signature === 'test-signature') {
+    // In production, never accept webhooks without a configured secret unless sandbox is explicitly enabled
+    if (process.env.NODE_ENV === 'production' && process.env.ALLOW_SANDBOX_PAYMENTS !== 'true') {
+      return false;
+    }
+
+    // In non-production / explicit sandbox mode, require an explicit sandbox signature (never empty)
+    if (signature === 'bachs-sandbox-sig' || signature === 'test-signature') {
       return true;
     }
 

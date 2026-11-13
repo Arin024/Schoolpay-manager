@@ -169,6 +169,44 @@ export function createImpersonationSession(
   return token;
 }
 
+export async function createImpersonationSessionAsync(
+  targetUserId: string,
+  targetSchoolId: string,
+  superAdminId: string,
+  ip?: string,
+  userAgent?: string
+): Promise<string> {
+  const token = 'imp_' + crypto.randomBytes(32).toString('hex');
+  const sessionId = 'ses_imp_' + crypto.randomUUID();
+
+  const pool = getPgPool();
+  if (pool) {
+    const client = await pool.connect();
+    try {
+      await client.query(
+        `INSERT INTO sessions (id, token, user_id, school_id, impersonated_by, ip_address, user_agent, expires_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, CURRENT_TIMESTAMP + INTERVAL '2 hours')
+         ON CONFLICT (id) DO NOTHING`,
+        [sessionId, token, targetUserId, targetSchoolId, superAdminId, ip || null, userAgent || null]
+      );
+      markPgConnected();
+    } finally {
+      client.release();
+    }
+  } else if (process.env.NODE_ENV === 'production' || process.env.DATABASE_URL) {
+    throw new Error('Database pool unavailable for impersonation session creation');
+  }
+
+  try {
+    cacheDb.prepare(`
+      INSERT INTO sessions (id, token, user_id, school_id, impersonated_by, ip_address, user_agent, expires_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now', '+2 hours'))
+    `).run(sessionId, token, targetUserId, targetSchoolId, superAdminId, ip || null, userAgent || null);
+  } catch {}
+
+  return token;
+}
+
 export async function validateSessionAsync(token: string): Promise<{
   user: UserRecord;
   schoolId: string | null;

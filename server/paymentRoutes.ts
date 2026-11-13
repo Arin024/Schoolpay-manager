@@ -1,5 +1,5 @@
 import { recordPaymentPg, reversePaymentPg } from './postgresFinancialService.ts';
-import { getPgPool, isPgConnected } from './db.ts';
+import { getPgPool, isPgConnected, queryPg, cacheDb } from './db.ts';
 import { Router } from 'express';
 import crypto from 'node:crypto';
 import { db } from './db.ts';
@@ -8,10 +8,120 @@ import { logAudit } from './audit.ts';
 import { toKobo, toNaira, determineInvoiceStatus } from './financeUtils.ts';
 import { paymentService, generateInternalPaymentReference, generateReceiptNumber, type GatewayProvider, type PaymentMethod } from './paymentService.ts';
 import { notificationService } from './notificationService.ts';
+import {
+  canAccessStudent,
+  getAuthorizedStudentIds,
+  getEffectiveRoleName,
+  getSchoolAcademicSettings,
+} from './accessControl.ts';
+import { wrapRouterAsync, sanitizeCsvCell, safeClientError } from './securityUtils.ts';
 
 export const paymentRouter = Router();
+wrapRouterAsync(paymentRouter);
+
+function toSqlVal(v: any): string | number | null {
+  if (v === undefined || v === null) return null;
+  if (v instanceof Date) return v.toISOString();
+  if (typeof v === 'object') return JSON.stringify(v);
+  return v;
+}
+
+export function syncPgFinancialStateToCache(data: { payment?: any; invoice?: any; receipt?: any | null }) {
+  if (data.payment) {
+    try {
+      const p = data.payment;
+      cacheDb.prepare(`
+        INSERT INTO payments (
+          id, school_id, invoice_id, student_id, payment_reference, internal_reference,
+          amount, currency, payment_method, provider, provider_reference, status,
+          payment_date, paid_at, verified_at, verified_by, notes, received_by,
+          is_reversed, reversed_at, reversed_by, reversal_reason, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, CURRENT_TIMESTAMP), CURRENT_TIMESTAMP)
+        ON CONFLICT(id) DO UPDATE SET
+          status = excluded.status,
+          is_reversed = excluded.is_reversed,
+          reversed_at = excluded.reversed_at,
+          reversed_by = excluded.reversed_by,
+          reversal_reason = excluded.reversal_reason,
+          notes = excluded.notes,
+          updated_at = CURRENT_TIMESTAMP
+      `).run(
+        toSqlVal(p.id), toSqlVal(p.school_id), toSqlVal(p.invoice_id), toSqlVal(p.student_id),
+        toSqlVal(p.payment_reference), toSqlVal(p.internal_reference),
+        Number(p.amount), toSqlVal(p.currency || 'NGN'), toSqlVal(p.payment_method), toSqlVal(p.provider || 'MANUAL'),
+        toSqlVal(p.provider_reference), toSqlVal(p.status),
+        toSqlVal(p.payment_date), toSqlVal(p.paid_at), toSqlVal(p.verified_at), toSqlVal(p.verified_by),
+        toSqlVal(p.notes), toSqlVal(p.received_by),
+        p.is_reversed ? 1 : 0, toSqlVal(p.reversed_at), toSqlVal(p.reversed_by), toSqlVal(p.reversal_reason),
+        toSqlVal(p.created_at)
+      );
+    } catch (syncErr: any) {
+      console.warn('[CacheDb Payment Sync Notice]', syncErr?.message);
+    }
+  }
+  if (data.invoice) {
+    try {
+      const inv = data.invoice;
+      cacheDb.prepare(`
+        UPDATE invoices SET
+          amount_paid = ?,
+          balance = ?,
+          status = ?,
+          updated_at = CURRENT_TIMESTAMP
+        WHERE id = ? AND school_id = ?
+      `).run(Number(inv.amount_paid), Number(inv.balance), String(inv.status), String(inv.id), String(inv.school_id));
+    } catch (syncErr: any) {
+      console.warn('[CacheDb Invoice Sync Notice]', syncErr?.message);
+    }
+  }
+  if (data.receipt) {
+    try {
+      const r = data.receipt;
+      cacheDb.prepare(`
+        INSERT INTO receipts (
+          id, school_id, receipt_number, payment_id, invoice_id, student_id,
+          amount, previous_balance, current_balance, issue_date, issued_by, notes, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, CURRENT_TIMESTAMP))
+        ON CONFLICT(id) DO NOTHING
+      `).run(
+        toSqlVal(r.id), toSqlVal(r.school_id), toSqlVal(r.receipt_number), toSqlVal(r.payment_id),
+        toSqlVal(r.invoice_id), toSqlVal(r.student_id),
+        Number(r.amount), Number(r.previous_balance), Number(r.current_balance),
+        toSqlVal(r.issue_date || new Date().toISOString().slice(0, 10)), toSqlVal(r.issued_by), toSqlVal(r.notes),
+        toSqlVal(r.created_at)
+      );
+    } catch (syncErr: any) {
+      console.warn('[CacheDb Receipt Sync Notice]', syncErr?.message);
+    }
+  }
+}
 
 const FINANCIAL_ADMIN_ROLES = ['SUPER_ADMIN', 'SCHOOL_OWNER', 'SCHOOL_ADMIN', 'BURSAR'];
+
+async function checkFeeReadPolicy(req: AuthenticatedRequest, res: any): Promise<boolean> {
+  const role = getEffectiveRoleName(req);
+  const schoolId = req.targetSchoolId!;
+  if (role === 'TEACHER') {
+    const settings = await getSchoolAcademicSettings(schoolId);
+    if (!settings.teachers_can_view_fees) {
+      res.status(403).json({
+        error: 'FEE_VISIBILITY_DISABLED',
+        message: 'School policy restricts teacher access to fee & payment records.',
+      });
+      return false;
+    }
+  } else if (role === 'STUDENT') {
+    const settings = await getSchoolAcademicSettings(schoolId);
+    if (!settings.students_can_view_fees) {
+      res.status(403).json({
+        error: 'FEE_VISIBILITY_DISABLED',
+        message: 'School policy restricts student access to fee & payment records.',
+      });
+      return false;
+    }
+  }
+  return true;
+}
 
 /**
  * Helper to generate official receipt for a successful payment
@@ -96,8 +206,11 @@ paymentRouter.get(
   '/payments',
   requireAuth,
   requireTenant,
-  (req: AuthenticatedRequest, res) => {
+  async (req: AuthenticatedRequest, res) => {
+    if (!(await checkFeeReadPolicy(req, res))) return;
     const schoolId = req.targetSchoolId!;
+    const roleName = getEffectiveRoleName(req);
+    const allowedIds = await getAuthorizedStudentIds(req.user!.id, schoolId, roleName);
     const {
       student_id,
       class_id,
@@ -112,6 +225,18 @@ paymentRouter.get(
       limit = '50',
       offset = '0',
     } = req.query;
+
+    if (allowedIds !== null) {
+      if (student_id && !allowedIds.includes(String(student_id))) {
+        return res.status(403).json({
+          error: 'UNAUTHORIZED_STUDENT_ACCESS',
+          message: 'You are not authorized to view payments for this student.',
+        });
+      }
+      if (allowedIds.length === 0) {
+        return res.json({ success: true, count: 0, payments: [] });
+      }
+    }
 
     let sql = `
       SELECT p.*,
@@ -136,6 +261,11 @@ paymentRouter.get(
       WHERE p.school_id = ?
     `;
     const params: any[] = [schoolId];
+
+    if (allowedIds !== null) {
+      sql += ` AND p.student_id IN (${allowedIds.map(() => '?').join(', ')})`;
+      params.push(...allowedIds);
+    }
 
     if (student_id) {
       sql += ` AND p.student_id = ?`;
@@ -204,7 +334,8 @@ paymentRouter.get(
   '/payments/:id',
   requireAuth,
   requireTenant,
-  (req: AuthenticatedRequest, res) => {
+  async (req: AuthenticatedRequest, res) => {
+    if (!(await checkFeeReadPolicy(req, res))) return;
     const schoolId = req.targetSchoolId!;
     const { id } = req.params;
 
@@ -235,6 +366,13 @@ paymentRouter.get(
 
     if (!payment) {
       return res.status(404).json({ error: 'NOT_FOUND', message: 'Payment record not found.' });
+    }
+
+    if (!(await canAccessStudent(req, payment.student_id))) {
+      return res.status(403).json({
+        error: 'UNAUTHORIZED_STUDENT_ACCESS',
+        message: 'You are not authorized to access this payment record.',
+      });
     }
 
     return res.json({
@@ -321,8 +459,8 @@ paymentRouter.post(
     let receiptData: { receiptId: string; receiptNumber: string } | null = null;
 
     
-    // Feature Flag: Controlled routing to PostgreSQL-native financial service
-    if (process.env.FEATURE_POSTGRES_FINANCIAL_SERVICE === 'true' && isPgConnected()) {
+    // Route through authoritative PostgreSQL financial engine with FOR UPDATE locking whenever connected
+    if (isPgConnected()) {
       const pgResult = await recordPaymentPg({
         schoolId,
         invoiceId,
@@ -338,30 +476,44 @@ paymentRouter.post(
         isPending: is_pending,
       });
 
-      if (!pgResult.success || !pgResult.data) {
-        return res.status(pgResult.code === 'OVERPAYMENT_NOT_ALLOWED' ? 400 : 500).json({
-          error: pgResult.code || 'PAYMENT_FAILED',
-          message: pgResult.error,
+      if (pgResult.success && pgResult.data) {
+        syncPgFinancialStateToCache(pgResult.data);
+
+        logAudit({
+          actorId: req.user?.id,
+          actorEmail: req.user?.email,
+          schoolId,
+          action: 'RECORD_PAYMENT_PG',
+          entity: 'PAYMENT',
+          entityId: pgResult.data.payment.id,
+          metadata: { amountKobo: payKobo, invoiceId, paymentMethod: payment_method },
+        });
+
+        return res.status(201).json({
+          success: true,
+          message: is_pending ? 'Payment logged as PENDING verification.' : 'Payment recorded successfully via PostgreSQL financial engine',
+          invoice_balance: Number(pgResult.data.invoice.balance),
+          invoice_status: pgResult.data.invoice.status,
+          payment: pgResult.data.payment,
+          invoice: pgResult.data.invoice,
+          receipt: pgResult.data.receipt,
         });
       }
 
-      logAudit({
-        actorId: req.user?.id,
-        actorEmail: req.user?.email,
-        schoolId,
-        action: 'RECORD_PAYMENT_PG',
-        entity: 'PAYMENT',
-        entityId: pgResult.data.payment.id,
-        metadata: { amountKobo: payKobo, invoiceId, paymentMethod: payment_method },
-      });
-
-      return res.status(201).json({
-        success: true,
-        message: 'Payment recorded successfully via PostgreSQL financial engine',
-        payment: pgResult.data.payment,
-        invoice: pgResult.data.invoice,
-        receipt: pgResult.data.receipt,
-      });
+      if (pgResult.code !== 'INVOICE_NOT_FOUND' && pgResult.code !== 'DATABASE_OFFLINE') {
+        const status =
+          pgResult.code === 'OVERPAYMENT_NOT_ALLOWED' ||
+          pgResult.code === 'ALREADY_PAID' ||
+          pgResult.code === 'INVOICE_CANCELLED' ||
+          pgResult.code === 'INVALID_AMOUNT' ||
+          pgResult.code === 'DUPLICATE_PAYMENT_REFERENCE'
+            ? 400
+            : 500;
+        return res.status(status).json({
+          error: pgResult.code || 'PAYMENT_FAILED',
+          message: status >= 500 ? 'Payment processing failed. Please try again.' : pgResult.error,
+        });
+      }
     }
 
     // Atomic transaction for payment recording and ledger balance update
@@ -411,7 +563,8 @@ paymentRouter.post(
       db.exec('COMMIT;');
     } catch (txnErr: any) {
       db.exec('ROLLBACK;');
-      return res.status(500).json({ error: 'PAYMENT_TRANSACTION_FAILED', message: txnErr.message });
+      console.error('[PAYMENT_TXN_ERR]:', txnErr);
+      return res.status(500).json({ error: 'PAYMENT_TRANSACTION_FAILED', message: safeClientError(txnErr) });
     }
 
     // Authoritative synchronous replication to Neon PostgreSQL
@@ -738,9 +891,24 @@ paymentRouter.get(
   '/receipts',
   requireAuth,
   requireTenant,
-  (req: AuthenticatedRequest, res) => {
+  async (req: AuthenticatedRequest, res) => {
+    if (!(await checkFeeReadPolicy(req, res))) return;
     const schoolId = req.targetSchoolId!;
+    const roleName = getEffectiveRoleName(req);
+    const allowedIds = await getAuthorizedStudentIds(req.user!.id, schoolId, roleName);
     const { student_id, search, limit = '50', offset = '0' } = req.query;
+
+    if (allowedIds !== null) {
+      if (student_id && !allowedIds.includes(String(student_id))) {
+        return res.status(403).json({
+          error: 'UNAUTHORIZED_STUDENT_ACCESS',
+          message: 'You are not authorized to view receipts for this student.',
+        });
+      }
+      if (allowedIds.length === 0) {
+        return res.json({ success: true, count: 0, receipts: [] });
+      }
+    }
 
     let sql = `
       SELECT r.*,
@@ -760,6 +928,11 @@ paymentRouter.get(
       WHERE r.school_id = ?
     `;
     const params: any[] = [schoolId];
+
+    if (allowedIds !== null) {
+      sql += ` AND r.student_id IN (${allowedIds.map(() => '?').join(', ')})`;
+      params.push(...allowedIds);
+    }
 
     if (student_id) {
       sql += ` AND r.student_id = ?`;
@@ -794,7 +967,8 @@ paymentRouter.get(
   '/receipts/:id',
   requireAuth,
   requireTenant,
-  (req: AuthenticatedRequest, res) => {
+  async (req: AuthenticatedRequest, res) => {
+    if (!(await checkFeeReadPolicy(req, res))) return;
     const schoolId = req.targetSchoolId!;
     const { id } = req.params;
 
@@ -842,6 +1016,13 @@ paymentRouter.get(
       return res.status(404).json({ error: 'NOT_FOUND', message: 'Receipt not found.' });
     }
 
+    if (!(await canAccessStudent(req, receipt.student_id))) {
+      return res.status(403).json({
+        error: 'UNAUTHORIZED_STUDENT_ACCESS',
+        message: 'You are not authorized to view this receipt.',
+      });
+    }
+
     return res.json({
       success: true,
       receipt: {
@@ -860,13 +1041,21 @@ paymentRouter.get(
   '/payments/:paymentId/receipt',
   requireAuth,
   requireTenant,
-  (req: AuthenticatedRequest, res) => {
+  async (req: AuthenticatedRequest, res) => {
+    if (!(await checkFeeReadPolicy(req, res))) return;
     const schoolId = req.targetSchoolId!;
     const { paymentId } = req.params;
 
-    const receipt = db.prepare(`SELECT id FROM receipts WHERE payment_id = ? AND school_id = ?`).get(paymentId, schoolId) as { id: string } | undefined;
+    const receipt = db.prepare(`SELECT id, student_id FROM receipts WHERE payment_id = ? AND school_id = ?`).get(paymentId, schoolId) as { id: string; student_id: string } | undefined;
     if (!receipt) {
       return res.status(404).json({ error: 'NOT_FOUND', message: 'Receipt not found for this payment.' });
+    }
+
+    if (!(await canAccessStudent(req, receipt.student_id))) {
+      return res.status(403).json({
+        error: 'UNAUTHORIZED_STUDENT_ACCESS',
+        message: 'You are not authorized to access this receipt.',
+      });
     }
 
     return res.redirect(`/api/v1/school/receipts/${receipt.id}`);
@@ -882,6 +1071,7 @@ paymentRouter.get(
   '/gateways/status',
   requireAuth,
   requireTenant,
+  requireRole([...FINANCIAL_ADMIN_ROLES, 'PARENT']),
   (req: AuthenticatedRequest, res) => {
     const schoolId = req.targetSchoolId!;
     const providers = paymentService.getAllProviders(schoolId);
@@ -894,6 +1084,7 @@ paymentRouter.post(
   '/invoices/:id/checkout',
   requireAuth,
   requireTenant,
+  requireRole([...FINANCIAL_ADMIN_ROLES, 'PARENT']),
   async (req: AuthenticatedRequest, res) => {
     const schoolId = req.targetSchoolId!;
     const { id: invoiceId } = req.params;
@@ -910,6 +1101,13 @@ paymentRouter.post(
       return res.status(404).json({ error: 'NOT_FOUND', message: 'Invoice not found.' });
     }
 
+    if (!(await canAccessStudent(req, invoice.student_id))) {
+      return res.status(403).json({
+        error: 'UNAUTHORIZED_STUDENT_ACCESS',
+        message: 'You are not authorized to pay fees for this student.',
+      });
+    }
+
     if (invoice.balance <= 0) {
       return res.status(400).json({ error: 'ALREADY_PAID', message: 'Invoice is already settled in full.' });
     }
@@ -923,7 +1121,18 @@ paymentRouter.post(
     const payerEmail = email || req.user?.email || invoice.student_email || 'guardian@student.sch.ng';
 
     try {
-      const selectedProvider = paymentService.getProvider(provider as GatewayProvider);
+      const providerName = String(provider).toUpperCase() as GatewayProvider;
+      if (
+        (providerName === 'TEST_SANDBOX' || providerName === 'MANUAL') &&
+        process.env.NODE_ENV === 'production' &&
+        process.env.ALLOW_SANDBOX_PAYMENTS !== 'true'
+      ) {
+        return res.status(403).json({
+          error: 'SANDBOX_DISABLED',
+          message: 'Sandbox checkout is disabled in production.',
+        });
+      }
+      const selectedProvider = paymentService.getProvider(providerName);
       const initResult = await selectedProvider.initializePayment({
         schoolId,
         studentId: invoice.student_id,
@@ -941,7 +1150,8 @@ paymentRouter.post(
         amountNaira: toNaira(payKobo),
       });
     } catch (err: any) {
-      return res.status(500).json({ error: 'GATEWAY_ERROR', message: err.message || 'Payment gateway initialization failed' });
+      console.error('[Checkout Initialization Error]', err);
+      return res.status(500).json({ error: 'GATEWAY_ERROR', message: safeClientError(err, 'Payment gateway initialization failed') });
     }
   }
 );
@@ -951,17 +1161,47 @@ paymentRouter.post(
   '/payments/verify-online',
   requireAuth,
   requireTenant,
+  requireRole([...FINANCIAL_ADMIN_ROLES, 'PARENT']),
   async (req: AuthenticatedRequest, res) => {
     const schoolId = req.targetSchoolId!;
     const { provider = 'TEST_SANDBOX', reference, invoice_id, amount_kobo } = req.body;
+    const providerName = String(provider).toUpperCase() as GatewayProvider;
 
-    if (!reference) {
+    if (!reference || typeof reference !== 'string') {
       return res.status(400).json({ error: 'MISSING_REFERENCE', message: 'Payment reference is required.' });
     }
 
-    // Check idempotency: has this reference already been processed?
-    const existingPayment = db.prepare('SELECT * FROM payments WHERE provider_reference = ? OR payment_reference = ?').get(reference, reference) as any;
+    if (
+      (providerName === 'TEST_SANDBOX' || providerName === 'MANUAL') &&
+      process.env.NODE_ENV === 'production' &&
+      process.env.ALLOW_SANDBOX_PAYMENTS !== 'true'
+    ) {
+      return res.status(403).json({
+        error: 'SANDBOX_DISABLED',
+        message: 'Sandbox online verification is disabled in production.',
+      });
+    }
+
+    // Check idempotency across PG and cacheDb
+    let existingPayment: any = null;
+    if (isPgConnected()) {
+      const pgExist = await queryPg(
+        `SELECT * FROM payments WHERE (provider_reference = $1 OR payment_reference = $1) AND school_id = $2 LIMIT 1`,
+        [reference, schoolId]
+      );
+      if (pgExist && pgExist.rows.length > 0) existingPayment = pgExist.rows[0];
+    }
+    if (!existingPayment) {
+      existingPayment = db.prepare('SELECT * FROM payments WHERE (provider_reference = ? OR payment_reference = ?) AND school_id = ?').get(reference, reference, schoolId) as any;
+    }
+
     if (existingPayment) {
+      if (!(await canAccessStudent(req, existingPayment.student_id))) {
+        return res.status(403).json({
+          error: 'UNAUTHORIZED_STUDENT_ACCESS',
+          message: 'You are not authorized to verify this payment.',
+        });
+      }
       return res.json({
         success: true,
         alreadyProcessed: true,
@@ -970,13 +1210,27 @@ paymentRouter.post(
       });
     }
 
-    const invoice = db.prepare('SELECT * FROM invoices WHERE id = ? AND school_id = ?').get(invoice_id, schoolId) as any;
+    let invoice: any = null;
+    if (isPgConnected()) {
+      const pgInv = await queryPg('SELECT * FROM invoices WHERE id = $1 AND school_id = $2', [invoice_id, schoolId]);
+      if (pgInv && pgInv.rows.length > 0) invoice = pgInv.rows[0];
+    }
+    if (!invoice) {
+      invoice = db.prepare('SELECT * FROM invoices WHERE id = ? AND school_id = ?').get(invoice_id, schoolId) as any;
+    }
     if (!invoice) {
       return res.status(404).json({ error: 'NOT_FOUND', message: 'Invoice not found.' });
     }
 
+    if (!(await canAccessStudent(req, invoice.student_id))) {
+      return res.status(403).json({
+        error: 'UNAUTHORIZED_STUDENT_ACCESS',
+        message: 'You are not authorized to verify payments for this student.',
+      });
+    }
+
     try {
-      const gateway = paymentService.getProvider(provider as GatewayProvider);
+      const gateway = paymentService.getProvider(providerName);
       const verification = await gateway.verifyPayment(reference, schoolId);
 
       if (!verification.success || verification.status !== 'SUCCESS') {
@@ -987,10 +1241,29 @@ paymentRouter.post(
         });
       }
 
-      // Minor unit kobo validation
-      const confirmedKobo = verification.amountKobo > 0 ? verification.amountKobo : (amount_kobo ? Math.round(Number(amount_kobo)) : invoice.balance);
+      // Live gateways MUST return an authoritative verified amountKobo > 0; never fall back to client amount_kobo!
+      let confirmedKobo = 0;
+      if (providerName === 'TEST_SANDBOX') {
+        confirmedKobo = amount_kobo !== undefined ? Math.round(Number(amount_kobo)) : Number(invoice.balance);
+      } else {
+        if (!verification.amountKobo || verification.amountKobo <= 0) {
+          return res.status(400).json({
+            success: false,
+            error: 'VERIFICATION_AMOUNT_MISSING',
+            message: 'Gateway verification did not return a confirmed settlement amount.',
+          });
+        }
+        confirmedKobo = Math.round(Number(verification.amountKobo));
+      }
 
-      if (confirmedKobo > invoice.balance) {
+      if (!Number.isFinite(confirmedKobo) || confirmedKobo <= 0) {
+        return res.status(400).json({
+          error: 'INVALID_AMOUNT',
+          message: 'Payment amount must be greater than zero.',
+        });
+      }
+
+      if (confirmedKobo > Number(invoice.balance)) {
         return res.status(400).json({
           error: 'OVERPAYMENT_NOT_ALLOWED',
           message: 'Confirmed gateway amount exceeds invoice balance.',
@@ -1001,63 +1274,142 @@ paymentRouter.post(
       const slug = schoolRow?.slug || 'SCH';
       const countRow = db.prepare('SELECT COUNT(*) as c FROM payments WHERE school_id = ?').get(schoolId) as { c: number };
       const internalRef = generateInternalPaymentReference(slug, countRow.c + 1);
-      const paymentId = `pay_${crypto.randomBytes(8).toString('hex')}`;
-      const now = new Date().toISOString();
 
-      // Record successful payment
-      db.prepare(`
-        INSERT INTO payments (
-          id, school_id, invoice_id, student_id, payment_reference, internal_reference,
-          amount, currency, payment_method, provider, provider_reference, status,
-          payment_date, paid_at, verified_at, notes, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, 'NGN', 'ONLINE', ?, ?, 'SUCCESS', ?, ?, ?, 'Online gateway verified payment', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-      `).run(
-        paymentId,
-        schoolId,
-        invoice.id,
-        invoice.student_id,
-        internalRef,
-        internalRef,
-        confirmedKobo,
-        provider,
-        reference,
-        now.slice(0, 10),
-        now,
-        now
-      );
+      let paymentId = `pay_${crypto.randomBytes(8).toString('hex')}`;
+      let newAmountPaid = Number(invoice.amount_paid) + confirmedKobo;
+      let newBalance = Math.max(0, Number(invoice.total) - newAmountPaid);
+      let newStatus = determineInvoiceStatus(Number(invoice.total), newAmountPaid, invoice.due_date, invoice.status);
+      let receiptData: { receiptId: string; receiptNumber: string } | null = null;
 
-      // Update invoice
-      const newAmountPaid = invoice.amount_paid + confirmedKobo;
-      const newBalance = Math.max(0, invoice.total - newAmountPaid);
-      const newStatus = determineInvoiceStatus(invoice.total, newAmountPaid, invoice.due_date, invoice.status);
+      // Authoritative row-locked PostgreSQL transaction against race conditions
+      if (isPgConnected()) {
+        const pgResult = await recordPaymentPg({
+          schoolId,
+          invoiceId: invoice.id,
+          amountKobo: confirmedKobo,
+          paymentMethod: 'ONLINE',
+          paymentReference: internalRef,
+          internalReference: internalRef,
+          provider: providerName,
+          providerReference: reference,
+          notes: `Online Checkout via ${providerName}`,
+          receivedByUserId: req.user!.id,
+          isPending: false,
+        });
 
-      db.prepare(`
-        UPDATE invoices SET
-          amount_paid = ?,
-          balance = ?,
-          status = ?,
-          updated_at = CURRENT_TIMESTAMP
-        WHERE id = ? AND school_id = ?
-      `).run(newAmountPaid, newBalance, newStatus, invoice.id, schoolId);
+        if (pgResult.success && pgResult.data) {
+          syncPgFinancialStateToCache(pgResult.data);
+          paymentId = pgResult.data.payment.id;
+          newAmountPaid = Number(pgResult.data.invoice.amount_paid);
+          newBalance = Number(pgResult.data.invoice.balance);
+          newStatus = pgResult.data.invoice.status;
+          if (pgResult.data.receipt) {
+            receiptData = {
+              receiptId: pgResult.data.receipt.id,
+              receiptNumber: pgResult.data.receipt.receipt_number,
+            };
+          }
+        } else if (pgResult.code === 'DUPLICATE_PAYMENT_REFERENCE') {
+          const pgExisting = await queryPg(
+            `SELECT * FROM payments WHERE (provider_reference = $1 OR payment_reference = $1) AND school_id = $2 LIMIT 1`,
+            [reference, schoolId]
+          );
+          return res.json({
+            success: true,
+            alreadyProcessed: true,
+            message: 'Payment has already been confirmed and processed.',
+            payment: pgExisting?.rows[0] || null,
+          });
+        } else if (pgResult.code !== 'INVOICE_NOT_FOUND' && pgResult.code !== 'DATABASE_OFFLINE') {
+          const errStatus =
+            pgResult.code === 'ALREADY_PAID' ||
+            pgResult.code === 'OVERPAYMENT_NOT_ALLOWED' ||
+            pgResult.code === 'INVOICE_CANCELLED'
+              ? 400
+              : 500;
+          return res.status(errStatus).json({
+            error: pgResult.code || 'VERIFICATION_ERROR',
+            message: errStatus >= 500 ? 'Payment verification failed.' : pgResult.error,
+          });
+        }
+      }
 
-      // Issue Receipt
-      const receiptData = issueOfficialReceipt({
-        schoolId,
-        paymentId,
-        invoiceId: invoice.id,
-        studentId: invoice.student_id,
-        amountKobo: confirmedKobo,
-        previousBalanceKobo: invoice.balance,
-        currentBalanceKobo: newBalance,
-        notes: `Online Checkout via ${provider}`,
-      });
+      // SQLite-only fallback (when PG offline or invoice exists only locally)
+      if (!receiptData) {
+        const now = new Date().toISOString();
+        db.exec('BEGIN IMMEDIATE;');
+        try {
+          const freshInv = db.prepare('SELECT * FROM invoices WHERE id = ? AND school_id = ?').get(invoice.id, schoolId) as any;
+          if (!freshInv || freshInv.balance <= 0 || confirmedKobo > freshInv.balance) {
+            db.exec('ROLLBACK;');
+            return res.status(400).json({
+              error: 'OVERPAYMENT_NOT_ALLOWED',
+              message: 'Confirmed gateway amount exceeds current invoice balance.',
+            });
+          }
+          const dupCheck = db.prepare('SELECT id FROM payments WHERE (provider_reference = ? OR payment_reference = ?) AND school_id = ?').get(reference, reference, schoolId);
+          if (dupCheck) {
+            db.exec('ROLLBACK;');
+            return res.json({ success: true, alreadyProcessed: true, message: 'Payment has already been confirmed and processed.' });
+          }
+
+          db.prepare(`
+            INSERT INTO payments (
+              id, school_id, invoice_id, student_id, payment_reference, internal_reference,
+              amount, currency, payment_method, provider, provider_reference, status,
+              payment_date, paid_at, verified_at, notes, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, 'NGN', 'ONLINE', ?, ?, 'SUCCESS', ?, ?, ?, 'Online gateway verified payment', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+          `).run(
+            paymentId,
+            schoolId,
+            freshInv.id,
+            freshInv.student_id,
+            internalRef,
+            internalRef,
+            confirmedKobo,
+            providerName,
+            reference,
+            now.slice(0, 10),
+            now,
+            now
+          );
+
+          newAmountPaid = freshInv.amount_paid + confirmedKobo;
+          newBalance = Math.max(0, freshInv.total - newAmountPaid);
+          newStatus = determineInvoiceStatus(freshInv.total, newAmountPaid, freshInv.due_date, freshInv.status);
+
+          db.prepare(`
+            UPDATE invoices SET
+              amount_paid = ?,
+              balance = ?,
+              status = ?,
+              updated_at = CURRENT_TIMESTAMP
+            WHERE id = ? AND school_id = ?
+          `).run(newAmountPaid, newBalance, newStatus, freshInv.id, schoolId);
+
+          receiptData = issueOfficialReceipt({
+            schoolId,
+            paymentId,
+            invoiceId: freshInv.id,
+            studentId: freshInv.student_id,
+            amountKobo: confirmedKobo,
+            previousBalanceKobo: freshInv.balance,
+            currentBalanceKobo: newBalance,
+            notes: `Online Checkout via ${providerName}`,
+          });
+          db.exec('COMMIT;');
+        } catch (txnErr) {
+          try { db.exec('ROLLBACK;'); } catch {}
+          throw txnErr;
+        }
+      }
 
       // Dispatch Notifications
       notificationService.notifySchoolAdmins(
         schoolId,
         'PAYMENT_VERIFIED',
         `Online Payment Verified: ₦${toNaira(confirmedKobo).toLocaleString()}`,
-        `Payment ${reference} verified successfully via ${provider}. Receipt #${receiptData.receiptNumber} issued.`,
+        `Payment ${reference} verified successfully via ${providerName}. Receipt #${receiptData.receiptNumber} issued.`,
         { invoiceId: invoice.id, paymentId, receiptId: receiptData.receiptId, amountKobo: confirmedKobo }
       );
 
@@ -1078,7 +1430,7 @@ paymentRouter.post(
         entity: 'PAYMENT',
         entityId: paymentId,
         ipAddress: req.ip,
-        metadata: { provider, reference, internalRef, amountKobo: confirmedKobo, receiptNumber: receiptData.receiptNumber },
+        metadata: { provider: providerName, reference, internalRef, amountKobo: confirmedKobo, receiptNumber: receiptData.receiptNumber },
       });
 
       return res.json({
@@ -1101,7 +1453,8 @@ paymentRouter.post(
         },
       });
     } catch (err: any) {
-      return res.status(500).json({ error: 'VERIFICATION_ERROR', message: err.message || 'Payment verification failed' });
+      console.error('[Verify Online Payment Error]', err);
+      return res.status(500).json({ error: 'VERIFICATION_ERROR', message: safeClientError(err, 'Payment verification failed') });
     }
   }
 );
@@ -1115,30 +1468,72 @@ paymentRouter.get(
   '/notifications',
   requireAuth,
   requireTenant,
-  (req: AuthenticatedRequest, res) => {
+  async (req: AuthenticatedRequest, res) => {
     const schoolId = req.targetSchoolId!;
-    const userId = req.user?.id;
+    const userId = req.user!.id;
+    const roleName = getEffectiveRoleName(req);
+    const strictPersonal = roleName === 'PARENT' || roleName === 'STUDENT' || roleName === 'TEACHER';
 
-    const notifications = db.prepare(`
+    let notifications: any[] = [];
+    let unreadCount = 0;
+
+    const pool = getPgPool();
+    if (pool) {
+      try {
+        const whereClause = strictPersonal
+          ? 'school_id = $1 AND user_id = $2'
+          : 'school_id = $1 AND (user_id IS NULL OR user_id = $2)';
+        const nRes = await queryPg(
+          `SELECT * FROM notifications WHERE ${whereClause} ORDER BY created_at DESC LIMIT 50`,
+          [schoolId, userId]
+        );
+        const uRes = await queryPg(
+          `SELECT COUNT(*) as unread FROM notifications WHERE ${whereClause} AND read_at IS NULL`,
+          [schoolId, userId]
+        );
+        notifications = nRes.rows;
+        unreadCount = Number(uRes.rows[0]?.unread || 0);
+        return res.json({
+          success: true,
+          unreadCount,
+          notifications: notifications.map((n) => {
+            let parsedData = null;
+            if (n.data) {
+              try { parsedData = typeof n.data === 'string' ? JSON.parse(n.data) : n.data; } catch {}
+            }
+            return { ...n, message: n.message || n.body || '', data: parsedData };
+          }),
+        });
+      } catch {}
+    }
+
+    const sqliteWhere = strictPersonal
+      ? 'school_id = ? AND user_id = ?'
+      : 'school_id = ? AND (user_id IS NULL OR user_id = ?)';
+
+    notifications = cacheDb.prepare(`
       SELECT * FROM notifications
-      WHERE school_id = ? AND (user_id IS NULL OR user_id = ?)
+      WHERE ${sqliteWhere}
       ORDER BY created_at DESC
       LIMIT 50
-    `).all(schoolId, userId || '') as any[];
+    `).all(schoolId, userId) as any[];
 
-    const unreadCountRow = db.prepare(`
+    const unreadCountRow = cacheDb.prepare(`
       SELECT COUNT(*) as unread
       FROM notifications
-      WHERE school_id = ? AND (user_id IS NULL OR user_id = ?) AND read_at IS NULL
-    `).get(schoolId, userId || '') as { unread: number };
+      WHERE ${sqliteWhere} AND read_at IS NULL
+    `).get(schoolId, userId) as { unread: number };
 
     return res.json({
       success: true,
       unreadCount: unreadCountRow.unread || 0,
-      notifications: notifications.map((n) => ({
-        ...n,
-        data: n.data ? JSON.parse(n.data) : null,
-      })),
+      notifications: notifications.map((n) => {
+        let parsedData = null;
+        if (n.data) {
+          try { parsedData = JSON.parse(n.data); } catch {}
+        }
+        return { ...n, data: parsedData };
+      }),
     });
   }
 );
@@ -1148,15 +1543,27 @@ paymentRouter.patch(
   '/notifications/:id/read',
   requireAuth,
   requireTenant,
-  (req: AuthenticatedRequest, res) => {
+  async (req: AuthenticatedRequest, res) => {
     const schoolId = req.targetSchoolId!;
+    const userId = req.user!.id;
+    const roleName = getEffectiveRoleName(req);
+    const strictPersonal = roleName === 'PARENT' || roleName === 'STUDENT' || roleName === 'TEACHER';
     const { id } = req.params;
 
-    db.prepare(`
-      UPDATE notifications
-      SET read_at = CURRENT_TIMESTAMP
-      WHERE id = ? AND school_id = ?
-    `).run(id, schoolId);
+    const pool = getPgPool();
+    if (pool) {
+      try {
+        const sql = strictPersonal
+          ? 'UPDATE notifications SET read_at = CURRENT_TIMESTAMP WHERE id = $1 AND school_id = $2 AND user_id = $3'
+          : 'UPDATE notifications SET read_at = CURRENT_TIMESTAMP WHERE id = $1 AND school_id = $2 AND (user_id IS NULL OR user_id = $3)';
+        await queryPg(sql, [id, schoolId, userId]);
+      } catch {}
+    }
+
+    const sqliteSql = strictPersonal
+      ? 'UPDATE notifications SET read_at = CURRENT_TIMESTAMP WHERE id = ? AND school_id = ? AND user_id = ?'
+      : 'UPDATE notifications SET read_at = CURRENT_TIMESTAMP WHERE id = ? AND school_id = ? AND (user_id IS NULL OR user_id = ?)';
+    cacheDb.prepare(sqliteSql).run(id, schoolId, userId);
 
     return res.json({ success: true, message: 'Notification marked as read.' });
   }
@@ -1167,15 +1574,26 @@ paymentRouter.post(
   '/notifications/mark-all-read',
   requireAuth,
   requireTenant,
-  (req: AuthenticatedRequest, res) => {
+  async (req: AuthenticatedRequest, res) => {
     const schoolId = req.targetSchoolId!;
-    const userId = req.user?.id;
+    const userId = req.user!.id;
+    const roleName = getEffectiveRoleName(req);
+    const strictPersonal = roleName === 'PARENT' || roleName === 'STUDENT' || roleName === 'TEACHER';
 
-    db.prepare(`
-      UPDATE notifications
-      SET read_at = CURRENT_TIMESTAMP
-      WHERE school_id = ? AND (user_id IS NULL OR user_id = ?) AND read_at IS NULL
-    `).run(schoolId, userId || '');
+    const pool = getPgPool();
+    if (pool) {
+      try {
+        const sql = strictPersonal
+          ? 'UPDATE notifications SET read_at = CURRENT_TIMESTAMP WHERE school_id = $1 AND user_id = $2 AND read_at IS NULL'
+          : 'UPDATE notifications SET read_at = CURRENT_TIMESTAMP WHERE school_id = $1 AND (user_id IS NULL OR user_id = $2) AND read_at IS NULL';
+        await queryPg(sql, [schoolId, userId]);
+      } catch {}
+    }
+
+    const sqliteSql = strictPersonal
+      ? 'UPDATE notifications SET read_at = CURRENT_TIMESTAMP WHERE school_id = ? AND user_id = ? AND read_at IS NULL'
+      : 'UPDATE notifications SET read_at = CURRENT_TIMESTAMP WHERE school_id = ? AND (user_id IS NULL OR user_id = ?) AND read_at IS NULL';
+    cacheDb.prepare(sqliteSql).run(schoolId, userId);
 
     return res.json({ success: true, message: 'All notifications marked as read.' });
   }
@@ -1190,6 +1608,7 @@ paymentRouter.get(
   '/finance/reports/daily',
   requireAuth,
   requireTenant,
+  requireRole(FINANCIAL_ADMIN_ROLES),
   (req: AuthenticatedRequest, res) => {
     const schoolId = req.targetSchoolId!;
     const days = Math.min(parseInt((req.query.days as string) || '14', 10), 90);
@@ -1222,6 +1641,7 @@ paymentRouter.get(
   '/finance/reports/monthly',
   requireAuth,
   requireTenant,
+  requireRole(FINANCIAL_ADMIN_ROLES),
   (req: AuthenticatedRequest, res) => {
     const schoolId = req.targetSchoolId!;
 
@@ -1253,6 +1673,7 @@ paymentRouter.get(
   '/finance/reports/defaulters',
   requireAuth,
   requireTenant,
+  requireRole(FINANCIAL_ADMIN_ROLES),
   (req: AuthenticatedRequest, res) => {
     const schoolId = req.targetSchoolId!;
     const { class_id, min_balance } = req.query;
@@ -1476,11 +1897,21 @@ paymentRouter.get(
 
     const header = 'Invoice Number,Admission Number,Student Name,Class,Issue Date,Due Date,Subtotal (NGN),Discount (NGN),Total (NGN),Paid (NGN),Balance (NGN),Status,Notes\n';
     const rows = invoices
-      .map((i) => {
-        const safeName = `"${(i.student_name || '').replace(/"/g, '""')}"`;
-        const safeNotes = `"${(i.notes || '').replace(/"/g, '""')}"`;
-        return `${i.invoice_number},${i.admission_number},${safeName},"${i.class_name || ''}",${i.issue_date},${i.due_date},${(i.subtotal/100).toFixed(2)},${(i.discount/100).toFixed(2)},${(i.total/100).toFixed(2)},${(i.amount_paid/100).toFixed(2)},${(i.balance/100).toFixed(2)},${i.status},${safeNotes}`;
-      })
+      .map((i) => [
+        sanitizeCsvCell(i.invoice_number),
+        sanitizeCsvCell(i.admission_number),
+        sanitizeCsvCell(i.student_name || ''),
+        sanitizeCsvCell(i.class_name || ''),
+        sanitizeCsvCell(i.issue_date),
+        sanitizeCsvCell(i.due_date),
+        (i.subtotal / 100).toFixed(2),
+        (i.discount / 100).toFixed(2),
+        (i.total / 100).toFixed(2),
+        (i.amount_paid / 100).toFixed(2),
+        (i.balance / 100).toFixed(2),
+        sanitizeCsvCell(i.status),
+        sanitizeCsvCell(i.notes || ''),
+      ].join(','))
       .join('\n');
 
     res.setHeader('Content-Type', 'text/csv');
@@ -1515,10 +1946,15 @@ paymentRouter.get(
 
     const header = 'Admission Number,Student Name,Class,Total Billed (NGN),Total Paid (NGN),Outstanding Balance (NGN),Unpaid Invoices Count\n';
     const rows = defaulters
-      .map((d) => {
-        const safeName = `"${(d.student_name || '').replace(/"/g, '""')}"`;
-        return `${d.admission_number},${safeName},"${d.class_name || ''}",${(d.total_billed/100).toFixed(2)},${(d.total_paid/100).toFixed(2)},${(d.outstanding_balance/100).toFixed(2)},${d.unpaid_invoices_count}`;
-      })
+      .map((d) => [
+        sanitizeCsvCell(d.admission_number),
+        sanitizeCsvCell(d.student_name || ''),
+        sanitizeCsvCell(d.class_name || ''),
+        (d.total_billed / 100).toFixed(2),
+        (d.total_paid / 100).toFixed(2),
+        (d.outstanding_balance / 100).toFixed(2),
+        d.unpaid_invoices_count,
+      ].join(','))
       .join('\n');
 
     res.setHeader('Content-Type', 'text/csv');
@@ -1578,8 +2014,8 @@ paymentRouter.post(
     const reversalId = `rev_${crypto.randomBytes(8).toString('hex')}`;
 
     
-    // Feature Flag: Controlled routing to PostgreSQL-native financial service
-    if (process.env.FEATURE_POSTGRES_FINANCIAL_SERVICE === 'true' && isPgConnected()) {
+    // Route through authoritative PostgreSQL financial service whenever PG is connected
+    if (isPgConnected()) {
       const pgRevResult = await reversePaymentPg({
         schoolId,
         paymentId,
@@ -1588,33 +2024,41 @@ paymentRouter.post(
         reversedByUserEmail: req.user!.email,
       });
 
-      if (!pgRevResult.success || !pgRevResult.data) {
-        return res.status(pgRevResult.code === 'ALREADY_REVERSED' ? 400 : 500).json({
-          error: pgRevResult.code || 'REVERSAL_FAILED',
-          message: pgRevResult.error,
+      if (pgRevResult.success && pgRevResult.data) {
+        syncPgFinancialStateToCache({
+          payment: pgRevResult.data.payment,
+          invoice: pgRevResult.data.invoice,
+        });
+
+        logAudit({
+          actorId: req.user!.id,
+          actorEmail: req.user!.email,
+          schoolId,
+          action: 'PAYMENT_REVERSED_PG',
+          entity: 'PAYMENT',
+          entityId: paymentId,
+          metadata: { reversalAmount, reason: reason.trim() },
+        });
+
+        return res.json({
+          success: true,
+          message: 'Payment reversed successfully via PostgreSQL financial engine.',
+          reversal: pgRevResult.data.reversal,
+          payment: pgRevResult.data.payment,
+          invoice: pgRevResult.data.invoice,
         });
       }
 
-      logAudit({
-        actorId: req.user!.id,
-        actorEmail: req.user!.email,
-        schoolId,
-        action: 'PAYMENT_REVERSED_PG',
-        entity: 'PAYMENT',
-        entityId: paymentId,
-        metadata: { reversalAmount, reason: reason.trim() },
-      });
-
-      return res.json({
-        success: true,
-        message: 'Payment reversed successfully via PostgreSQL financial engine.',
-        reversal: pgRevResult.data.reversal,
-        payment: pgRevResult.data.payment,
-        invoice: pgRevResult.data.invoice,
-      });
+      if (pgRevResult.code !== 'PAYMENT_NOT_FOUND' && pgRevResult.code !== 'DATABASE_OFFLINE') {
+        const status = pgRevResult.code === 'ALREADY_REVERSED' || pgRevResult.code === 'INVALID_STATUS' ? 400 : 500;
+        return res.status(status).json({
+          error: pgRevResult.code || 'REVERSAL_FAILED',
+          message: status >= 500 ? 'Payment reversal failed.' : pgRevResult.error,
+        });
+      }
     }
 
-    // Execute atomic reversal
+    // Execute atomic reversal (SQLite fallback)
     db.exec('BEGIN TRANSACTION;');
     try {
       // 1. Mark payment record as REVERSED (preserves original event, never deletes)
@@ -1661,7 +2105,8 @@ paymentRouter.post(
       db.exec('COMMIT;');
     } catch (err: any) {
       db.exec('ROLLBACK;');
-      console.error("[REVERSAL_ERROR_DETAIL]:", err); return res.status(500).json({ error: 'REVERSAL_FAILED', message: err.message });
+      console.error('[REVERSAL_ERROR_DETAIL]:', err);
+      return res.status(500).json({ error: 'REVERSAL_FAILED', message: safeClientError(err) });
     }
 
     // 4. Audit logging
@@ -1783,7 +2228,8 @@ paymentRouter.post(
       db.exec('COMMIT;');
     } catch (err: any) {
       db.exec('ROLLBACK;');
-      return res.status(500).json({ error: 'REFUND_FAILED', message: err.message });
+      console.error('[REFUND_ERROR_DETAIL]:', err);
+      return res.status(500).json({ error: 'REFUND_FAILED', message: safeClientError(err) });
     }
 
     logAudit({
@@ -1900,7 +2346,7 @@ paymentRouter.get(
         })),
       });
     } catch (err: any) {
-      return res.status(500).json({ error: 'RECONCILIATION_ERROR', message: err.message });
+      return res.status(500).json({ error: 'RECONCILIATION_ERROR', message: safeClientError(err) });
     }
   }
 );
@@ -2044,7 +2490,7 @@ paymentRouter.post(
       db.exec('COMMIT;');
     } catch (err: any) {
       db.exec('ROLLBACK;');
-      console.error("[IMPORT_STATEMENT_ERR]:", err); return res.status(500).json({ error: 'IMPORT_FAILED', message: err.message });
+      console.error("[IMPORT_STATEMENT_ERR]:", err); return res.status(500).json({ error: 'IMPORT_FAILED', message: safeClientError(err) });
     }
 
     logAudit({
@@ -2150,7 +2596,7 @@ paymentRouter.get(
         },
       });
     } catch (err: any) {
-      console.error("[ARCHIVE_EXPORT_ERR]:", err); return res.status(500).json({ error: 'ARCHIVE_EXPORT_FAILED', message: err.message });
+      console.error("[ARCHIVE_EXPORT_ERR]:", err); return res.status(500).json({ error: 'ARCHIVE_EXPORT_FAILED', message: safeClientError(err) });
     }
   }
 );

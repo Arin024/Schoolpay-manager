@@ -153,6 +153,50 @@ function applyMigration002ReconciliationAndReversals(): boolean {
 }
 
 /**
+ * Migration 3: Performance Management, Report Cards, Attendance, Behaviour & Portal Accounts
+ */
+function applyMigration003PerformanceAndPortals(): boolean {
+  console.log('[Migration] Applying Migration 003: Performance Management & Portals...');
+
+  try {
+    db.exec(`
+      INSERT OR IGNORE INTO roles (id, name, display_name, description, scope)
+      VALUES ('role_student', 'STUDENT', 'Student / Learner', 'Student portal read-only access to published results, attendance, and report cards', 'SCHOOL');
+    `);
+  } catch {}
+
+  const stuCols = (db.prepare('PRAGMA table_info("students")').all() as any[]).map((c) => c.name);
+  if (!stuCols.includes('user_id')) {
+    try { db.exec('ALTER TABLE students ADD COLUMN user_id TEXT REFERENCES users(id) ON DELETE SET NULL;'); } catch {}
+  }
+
+  const psCols = (db.prepare('PRAGMA table_info("parent_students")').all() as any[]).map((c) => c.name);
+  if (!psCols.includes('verified_by')) {
+    try { db.exec('ALTER TABLE parent_students ADD COLUMN verified_by TEXT;'); } catch {}
+  }
+  if (!psCols.includes('verified_at')) {
+    try { db.exec('ALTER TABLE parent_students ADD COLUMN verified_at DATETIME;'); } catch {}
+  }
+
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_students_user ON students(user_id);
+    CREATE INDEX IF NOT EXISTS idx_subjects_school ON subjects(school_id, is_deleted);
+    CREATE INDEX IF NOT EXISTS idx_examinations_school_status ON examinations(school_id, status, is_deleted);
+    CREATE INDEX IF NOT EXISTS idx_scores_school_exam ON student_scores(school_id, examination_id);
+    CREATE INDEX IF NOT EXISTS idx_scores_student_status ON student_scores(school_id, student_id, status);
+    CREATE INDEX IF NOT EXISTS idx_score_corrections_school ON score_correction_logs(school_id, examination_id);
+    CREATE INDEX IF NOT EXISTS idx_report_cards_school_student ON report_cards(school_id, student_id, status);
+    CREATE INDEX IF NOT EXISTS idx_attendance_school_date ON attendance_records(school_id, attendance_date);
+    CREATE INDEX IF NOT EXISTS idx_attendance_student_pub ON attendance_records(school_id, student_id, is_published);
+    CREATE INDEX IF NOT EXISTS idx_behaviour_school_student ON behaviour_records(school_id, student_id, is_deleted);
+    CREATE INDEX IF NOT EXISTS idx_teacher_remarks_school_student ON teacher_remarks(school_id, student_id);
+    CREATE INDEX IF NOT EXISTS idx_announcements_school ON school_announcements(school_id, is_published, is_deleted);
+  `);
+
+  return true;
+}
+
+/**
  * Runs safe, version-controlled incremental schema migrations
  */
 export async function runSafeMigrations() {
@@ -186,6 +230,11 @@ export async function runSafeMigrations() {
       version: 2,
       name: 'add_payment_reversals_refunds_and_reconciliation_workspace',
       apply: applyMigration002ReconciliationAndReversals,
+    },
+    {
+      version: 3,
+      name: 'add_performance_report_cards_attendance_behaviour_and_portals',
+      apply: applyMigration003PerformanceAndPortals,
     },
   ];
 

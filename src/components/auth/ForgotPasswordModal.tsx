@@ -74,18 +74,7 @@ export const ForgotPasswordModal: React.FC<ForgotPasswordModalProps> = ({
   // Manual / verified ticket
   const [recoveryTicket, setRecoveryTicket] = useState(initialTicket);
 
-  // Reclaim missing / wiped account states
-  const [reclaimData, setReclaimData] = useState({
-    schoolName: '',
-    email: '',
-    phone: '',
-    ownerName: '',
-    newPassword: '',
-    confirmPassword: '',
-  });
-  const [reclaimLoading, setReclaimLoading] = useState(false);
-  const [reclaimError, setReclaimError] = useState('');
-  const [reclaimSuccess, setReclaimSuccess] = useState('');
+  const [emailDelivered, setEmailDelivered] = useState(false);
 
   // New password state
   const [newPassword, setNewPassword] = useState('');
@@ -243,17 +232,16 @@ export const ForgotPasswordModal: React.FC<ForgotPasswordModalProps> = ({
     }
   };
 
-  // Step 5: Email Link / Instant Verification Request
+  // Step 5: Email Link Verification Request
   const handleRequestEmailLink = async () => {
     setError(null);
     setMessage(null);
     setLoading(true);
 
     try {
-      const res = await api.requestVerifiedRecoveryLink(challengeId);
-      setRecoveryTicket(res.recoveryTicket);
+      const res: any = await api.requestVerifiedRecoveryLink(challengeId);
+      setEmailDelivered(Boolean(res.emailDelivered));
       setMessage(res.message);
-      // Seamless progression: In development/demo, user can immediately proceed without copy-pasting!
       setStep('email_link');
     } catch (err: any) {
       setError(err?.message || 'Failed to dispatch recovery request.');
@@ -313,53 +301,6 @@ export const ForgotPasswordModal: React.FC<ForgotPasswordModalProps> = ({
   };
 
   const strength = getPasswordStrength(newPassword);
-
-  const handleReclaimAccount = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setReclaimError('');
-    if (!reclaimData.email.trim() || !reclaimData.email.includes('@')) {
-      setReclaimError('Please enter a valid official email address.');
-      return;
-    }
-    if (reclaimData.newPassword.length < 8) {
-      setReclaimError('Password must be at least 8 characters long.');
-      return;
-    }
-    if (reclaimData.newPassword !== reclaimData.confirmPassword) {
-      setReclaimError('Passwords do not match.');
-      return;
-    }
-
-    setReclaimLoading(true);
-    try {
-      const res = await fetch('/api/v1/recovery/claim-wiped-account', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          schoolName: reclaimData.schoolName.trim(),
-          email: reclaimData.email.trim(),
-          phone: reclaimData.phone.trim(),
-          ownerName: reclaimData.ownerName.trim(),
-          newPassword: reclaimData.newPassword,
-        }),
-      });
-      const data = await res.json();
-      if (!res.ok) {
-        throw new Error(data.message || 'Failed to reclaim account');
-      }
-      setReclaimSuccess(data.message || 'Account successfully reclaimed! You can now log in.');
-      if (data.token) {
-        localStorage.setItem('auth_token', data.token);
-        setTimeout(() => {
-          window.location.reload();
-        }, 1500);
-      }
-    } catch (err: any) {
-      setReclaimError(err.message || 'An error occurred during account recovery.');
-    } finally {
-      setReclaimLoading(false);
-    }
-  };
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-xs p-3 sm:p-4 overflow-y-auto">
@@ -503,146 +444,27 @@ export const ForgotPasswordModal: React.FC<ForgotPasswordModalProps> = ({
             </form>
           )}
 
-          {/* STEP 1B: LOOKUP IDENTIFIER (FORGOT EMAIL/PHONE) */}
+          {/* STEP 1B: SUPPORT GUIDANCE FOR RECLAIM */}
           {step === 'reclaim_account' && (
-          <form onSubmit={handleReclaimAccount} className="space-y-4">
-            <div className="bg-emerald-50 dark:bg-emerald-950/40 p-3 rounded-xl border border-emerald-200 dark:border-emerald-800 text-xs text-emerald-800 dark:text-emerald-200">
-              <p className="font-bold flex items-center gap-1.5 mb-1">
-                <Sparkles className="w-4 h-4 text-emerald-600" />
-                Disaster Recovery & Account Re-Claim
-              </p>
-              <p className="text-[11px] leading-relaxed">
-                If your account was impacted during a server reset or cannot be found, enter your school and proprietor details below. Our PostgreSQL recovery engine will immediately verify or restore your tenant and let you set a new secure password.
-              </p>
+            <div className="space-y-4">
+              <div className="bg-amber-50 p-4 rounded-xl border border-amber-200 text-xs text-amber-900 space-y-2">
+                <p className="font-bold flex items-center gap-1.5">
+                  <ShieldAlert className="w-4 h-4 text-amber-700" />
+                  <span>Verified Recovery Required</span>
+                </p>
+                <p className="text-[11px] leading-relaxed">
+                  For tenant security, unauthenticated account reclamation is disabled. Please recover access using your pre-configured Security Questions, a Single-Use Backup Code, or request an Administrator-Assisted Recovery Ticket from your school administrator or platform support.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setStep('identify')}
+                className="w-full py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold transition cursor-pointer"
+              >
+                &larr; Return to Verified Account Recovery
+              </button>
             </div>
-
-            {reclaimError && (
-              <div className="bg-red-50 dark:bg-red-950/50 p-3 rounded-xl border border-red-200 dark:border-red-800 text-xs text-red-600 dark:text-red-300 flex items-center gap-2">
-                <AlertCircle className="w-4 h-4 shrink-0" />
-                <span>{reclaimError}</span>
-              </div>
-            )}
-
-            {reclaimSuccess && (
-              <div className="bg-emerald-50 dark:bg-emerald-950/50 p-3 rounded-xl border border-emerald-200 dark:border-emerald-800 text-xs text-emerald-700 dark:text-emerald-300 flex items-center gap-2">
-                <CheckCircle2 className="w-4 h-4 shrink-0" />
-                <span>{reclaimSuccess}</span>
-              </div>
-            )}
-
-            <div>
-              <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-1">
-                Official School Name
-              </label>
-              <input
-                type="text"
-                required
-                value={reclaimData.schoolName}
-                onChange={(e) => setReclaimData({ ...reclaimData, schoolName: e.target.value })}
-                placeholder="e.g. Winner International School"
-                className="w-full px-3 py-2 text-xs rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-800 dark:text-white focus:ring-2 focus:ring-emerald-500 outline-hidden"
-              />
-            </div>
-
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-              <div>
-                <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-1">
-                  Registered Email Address
-                </label>
-                <input
-                  type="email"
-                  required
-                  value={reclaimData.email}
-                  onChange={(e) => setReclaimData({ ...reclaimData, email: e.target.value })}
-                  placeholder="proprietor@school.edu.ng"
-                  className="w-full px-3 py-2 text-xs rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-800 dark:text-white focus:ring-2 focus:ring-emerald-500 outline-hidden"
-                />
-              </div>
-              <div>
-                <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-1">
-                  Proprietor Phone Number
-                </label>
-                <input
-                  type="tel"
-                  value={reclaimData.phone}
-                  onChange={(e) => setReclaimData({ ...reclaimData, phone: e.target.value })}
-                  placeholder="080XXXXXXXX"
-                  className="w-full px-3 py-2 text-xs rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-800 dark:text-white focus:ring-2 focus:ring-emerald-500 outline-hidden"
-                />
-              </div>
-            </div>
-
-            <div>
-              <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-1">
-                Proprietor Full Name (Optional)
-              </label>
-              <input
-                type="text"
-                value={reclaimData.ownerName}
-                onChange={(e) => setReclaimData({ ...reclaimData, ownerName: e.target.value })}
-                placeholder="e.g. Chief Dr. Adeleke"
-                className="w-full px-3 py-2 text-xs rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-800 dark:text-white focus:ring-2 focus:ring-emerald-500 outline-hidden"
-              />
-            </div>
-
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-              <div>
-                <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-1">
-                  Set New Password
-                </label>
-                <input
-                  type="password"
-                  required
-                  minLength={8}
-                  value={reclaimData.newPassword}
-                  onChange={(e) => setReclaimData({ ...reclaimData, newPassword: e.target.value })}
-                  placeholder="Min 8 characters"
-                  className="w-full px-3 py-2 text-xs rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-800 dark:text-white focus:ring-2 focus:ring-emerald-500 outline-hidden"
-                />
-              </div>
-              <div>
-                <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-1">
-                  Confirm Password
-                </label>
-                <input
-                  type="password"
-                  required
-                  minLength={8}
-                  value={reclaimData.confirmPassword}
-                  onChange={(e) => setReclaimData({ ...reclaimData, confirmPassword: e.target.value })}
-                  placeholder="Repeat new password"
-                  className="w-full px-3 py-2 text-xs rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-800 dark:text-white focus:ring-2 focus:ring-emerald-500 outline-hidden"
-                />
-              </div>
-            </div>
-
-            <button
-              type="submit"
-              disabled={reclaimLoading}
-              className="w-full py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold shadow-md transition disabled:opacity-50 cursor-pointer flex items-center justify-center gap-2"
-            >
-              {reclaimLoading ? (
-                <>
-                  <div className="w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin" />
-                  <span>Verifying & Restoring Account...</span>
-                </>
-              ) : (
-                <>
-                  <ShieldCheck className="w-4 h-4" />
-                  <span>Reclaim & Restore Account</span>
-                </>
-              )}
-            </button>
-
-            <button
-              type="button"
-              onClick={() => setStep('identify')}
-              className="w-full text-center text-xs text-slate-500 hover:text-slate-700 dark:text-slate-400 dark:hover:text-slate-200"
-            >
-              ← Back to standard login recovery
-            </button>
-          </form>
-        )}
+          )}
 
         {step === 'lookup_identifier' && (
             <form onSubmit={handleLookupIdentifier} className="space-y-4">
@@ -998,39 +820,59 @@ export const ForgotPasswordModal: React.FC<ForgotPasswordModalProps> = ({
             </form>
           )}
 
-          {/* STEP 3C: EMAIL LINK DISPATCHED / INSTANT 1-CLICK PROGRESSION */}
+          {/* STEP 3C: EMAIL LINK STATUS */}
           {step === 'email_link' && (
             <div className="space-y-4 text-center py-2">
               <div className="w-12 h-12 rounded-2xl bg-emerald-100 text-emerald-700 flex items-center justify-center mx-auto shadow-sm">
                 <Mail className="w-6 h-6" />
               </div>
-              <div>
-                <h4 className="font-bold text-slate-900 text-sm">
-                  Verified Recovery Link Generated!
-                </h4>
-                <p className="text-xs text-slate-600 mt-1 max-w-sm mx-auto">
-                  A cryptographic time-limited recovery ticket has been authorized for <strong>{maskedIdentifier}</strong>.
-                </p>
-              </div>
-
-              <div className="p-3 bg-emerald-50 border border-emerald-200 rounded-xl text-xs text-emerald-800 text-left space-y-1">
-                <p className="font-semibold flex items-center gap-1.5">
-                  <Sparkles className="w-4 h-4 text-emerald-600" />
-                  <span>Instant Verification Ready</span>
-                </p>
-                <p className="text-[11px] text-slate-600">
-                  In this live development environment, your session has been verified immediately. Tap below to create your new secure password without copying any tokens!
-                </p>
-              </div>
-
-              <button
-                type="button"
-                onClick={() => setStep('new_password')}
-                className="w-full py-3 bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs rounded-xl shadow-md transition cursor-pointer flex items-center justify-center gap-2"
-              >
-                <span>Proceed to Set New Password</span>
-                <ArrowRight className="w-4 h-4" />
-              </button>
+              {emailDelivered ? (
+                <>
+                  <div>
+                    <h4 className="font-bold text-slate-900 text-sm">
+                      Check Your Registered Inbox
+                    </h4>
+                    <p className="text-xs text-slate-600 mt-1 max-w-sm mx-auto">
+                      If an account matches <strong>{maskedIdentifier}</strong>, a cryptographic recovery ticket has been sent to that email address.
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setStep('manual_token')}
+                    className="w-full py-3 bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs rounded-xl shadow-md transition cursor-pointer flex items-center justify-center gap-2"
+                  >
+                    <span>Enter Emailed Recovery Ticket</span>
+                    <ArrowRight className="w-4 h-4" />
+                  </button>
+                </>
+              ) : (
+                <>
+                  <div>
+                    <h4 className="font-bold text-slate-900 text-sm">
+                      Outbound Email Relay Unavailable
+                    </h4>
+                    <p className="text-xs text-slate-600 mt-1 max-w-sm mx-auto">
+                      Email recovery links are unavailable on this instance. Please verify your identity using Security Questions, a Single-Use Backup Code, or an Administrator-Assisted Recovery Ticket.
+                    </p>
+                  </div>
+                  <div className="flex flex-col sm:flex-row gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setStep('choose_method')}
+                      className="flex-1 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-800 font-bold text-xs rounded-xl transition cursor-pointer"
+                    >
+                      &larr; Choose Verified Method
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setStep('manual_token')}
+                      className="flex-1 py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs rounded-xl shadow-md transition cursor-pointer"
+                    >
+                      Enter Admin Ticket &rarr;
+                    </button>
+                  </div>
+                </>
+              )}
             </div>
           )}
 

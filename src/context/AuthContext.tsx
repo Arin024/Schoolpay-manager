@@ -191,19 +191,28 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   const switchSchool = async (schoolId: string) => {
     const matched = roles.find((r) => r.school_id === schoolId);
-    if (!matched) return;
+    if (!matched && !isSuperAdmin) return;
 
     localStorage.setItem('bursariq_active_school', schoolId);
     localStorage.setItem('schoolpay_active_school', schoolId);
     setActiveSchoolId(schoolId);
-    setActiveRole(matched);
+    if (matched) {
+      setActiveRole(matched);
+    }
 
     try {
-      const details = await api.getSchoolProfile(schoolId);
-      setActiveSchool(details.school);
-      setActiveSettings(details.settings);
-    } catch (e) {
-      console.error('Failed to switch school profile:', e);
+      const switched = await api.switchActiveSchool(schoolId);
+      if (switched.activeSchool) setActiveSchool(switched.activeSchool);
+      if (switched.activeSettings) setActiveSettings(switched.activeSettings);
+      if (switched.activeRole) setActiveRole(switched.activeRole);
+    } catch {
+      try {
+        const details = await api.getSchoolProfile(schoolId);
+        setActiveSchool(details.school);
+        setActiveSettings(details.settings);
+      } catch (e) {
+        console.error('Failed to switch school profile:', e);
+      }
     }
   };
 

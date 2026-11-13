@@ -16,6 +16,7 @@ export type RoleName =
   | 'TEACHER'
   | 'STAFF'
   | 'PARENT'
+  | 'STUDENT'
   | 'PARTNER';
 
 export interface User {
@@ -108,6 +109,7 @@ export interface Student {
   guardian_email?: string | null;
   created_at: string;
   updated_at?: string;
+  user_id?: string | null;
   parents?: ParentWithRelationship[];
 }
 
@@ -128,6 +130,9 @@ export interface ParentWithRelationship {
 export interface ParentItem {
   id: string;
   school_id: string;
+  user_id?: string | null;
+  portal_user_email?: string | null;
+  portal_user_name?: string | null;
   first_name: string;
   last_name: string;
   phone: string;
@@ -730,5 +735,436 @@ export interface AuditLog {
   metadata?: string | null;
   created_at: string;
 }
+
+// ============================================================================
+// SCHOOL PERFORMANCE, ATTENDANCE, BEHAVIOUR, REPORT CARDS & PORTALS
+// ============================================================================
+
+export type ExamWorkflowStatus = 'DRAFT' | 'REVIEW' | 'APPROVED' | 'PUBLISHED';
+export type AttendanceStatus = 'PRESENT' | 'ABSENT' | 'LATE' | 'EXCUSED';
+export type BehaviourCategory = 'POSITIVE' | 'COMMENDATION' | 'DISCIPLINE' | 'INCIDENT' | 'OBSERVATION';
+export type BehaviourSeverity = 'LOW' | 'MEDIUM' | 'HIGH';
+export type AnnouncementAudience = 'ALL' | 'PARENTS' | 'STUDENTS' | 'TEACHERS' | 'CLASS';
+export type AnnouncementPriority = 'NORMAL' | 'IMPORTANT' | 'URGENT';
+
+export interface GradingScaleBand {
+  grade: string;
+  min: number;
+  max: number;
+  remark: string;
+}
+
+export interface AcademicSettings {
+  school_id: string;
+  ca_max_score: number;
+  exam_max_score: number;
+  grading_scale: GradingScaleBand[];
+  missing_score_policy: 'EXCLUDE' | 'ZERO';
+  show_class_position: boolean;
+  students_can_view_fees: boolean;
+  teachers_can_view_fees: boolean;
+  require_review_before_approve: boolean;
+  component_structure?: Array<{ key: string; label: string; max: number }> | null;
+}
+
+export interface SubjectItem {
+  id: string;
+  school_id: string;
+  name: string;
+  code: string;
+  department?: string | null;
+  class_id?: string | null;
+  class_name?: string | null;
+  status: 'ACTIVE' | 'INACTIVE';
+  created_at?: string;
+}
+
+export interface ExaminationItem {
+  id: string;
+  school_id: string;
+  academic_session_id?: string | null;
+  session_name?: string | null;
+  term_id?: string | null;
+  term_name?: string | null;
+  class_id?: string | null;
+  class_name?: string | null;
+  title: string;
+  exam_type: string;
+  ca_max_score: number;
+  exam_max_score: number;
+  total_max_score: number;
+  status: ExamWorkflowStatus;
+  scores_count?: number;
+  published_at?: string | null;
+  created_at?: string;
+}
+
+export interface StudentScoreItem {
+  id: string;
+  school_id: string;
+  examination_id: string;
+  student_id: string;
+  student_name?: string;
+  admission_number?: string;
+  class_id?: string | null;
+  subject_id: string;
+  subject_name?: string;
+  subject_code?: string;
+  academic_session_id?: string | null;
+  session_name?: string | null;
+  term_id?: string | null;
+  term_name?: string | null;
+  exam_title?: string;
+  exam_type?: string;
+  ca_max_score?: number;
+  exam_max_score?: number;
+  total_max_score?: number;
+  ca_score: number | null;
+  exam_score: number | null;
+  total_score: number | null;
+  grade?: string | null;
+  grade_remark?: string | null;
+  subject_remark?: string | null;
+  status: ExamWorkflowStatus;
+  updated_at?: string;
+}
+
+export interface ScoreCorrectionLogItem {
+  id: string;
+  score_id: string;
+  examination_id: string;
+  exam_title?: string;
+  student_id: string;
+  student_name?: string;
+  admission_number?: string;
+  subject_id: string;
+  subject_name?: string;
+  previous_ca_score: number | null;
+  new_ca_score: number | null;
+  previous_exam_score: number | null;
+  new_exam_score: number | null;
+  previous_total: number | null;
+  new_total: number | null;
+  previous_grade?: string | null;
+  new_grade?: string | null;
+  reason: string;
+  corrected_by: string;
+  corrected_by_email?: string | null;
+  created_at: string;
+}
+
+export interface ReportCardBreakdown {
+  reportCardId: string;
+  verificationCode: string;
+  school?: Partial<School>;
+  student?: Partial<Student>;
+  sessionName: string;
+  termName: string;
+  showClassPosition: boolean;
+  total_score: number;
+  average_score: number;
+  subjects_count: number;
+  class_position: number | null;
+  class_size: number | null;
+  overall_grade?: { grade: string; remark: string };
+  subjects: Array<{
+    subject_id: string;
+    subject_name: string;
+    subject_code?: string;
+    ca_score: number | null;
+    exam_score: number | null;
+    ca_max_score?: number;
+    exam_max_score?: number;
+    total_score: number | null;
+    grade?: string | null;
+    grade_remark?: string | null;
+    subject_remark?: string | null;
+  }>;
+  attendance_summary?: {
+    totalDays: number;
+    present: number;
+    absent: number;
+    late: number;
+    excused: number;
+    attendanceRatePct: number;
+  };
+  behaviour_summary?: {
+    totalRecords: number;
+    positiveCount: number;
+    disciplineCount: number;
+    highlights?: Array<{ category: string; severity: string; title: string; record_date: string }>;
+  };
+  teacher_remark?: string;
+  teacher_remark_author?: string;
+  principal_remark?: string;
+  published_at?: string;
+}
+
+export interface ReportCardItem {
+  id: string;
+  school_id: string;
+  student_id: string;
+  student_name?: string;
+  admission_number?: string;
+  class_id?: string | null;
+  class_name?: string | null;
+  academic_session_id: string;
+  session_name?: string;
+  term_id: string;
+  term_name?: string;
+  examination_id?: string | null;
+  status: ExamWorkflowStatus;
+  total_score: number;
+  average_score: number;
+  subjects_count: number;
+  class_position: number | null;
+  class_size: number | null;
+  teacher_remark?: string | null;
+  principal_remark?: string | null;
+  verification_code?: string | null;
+  published_at?: string | null;
+  overall_grade?: { grade: string; remark: string };
+  breakdown?: ReportCardBreakdown | null;
+}
+
+export interface AttendanceRecordItem {
+  id: string;
+  school_id: string;
+  student_id: string;
+  student_name?: string;
+  admission_number?: string;
+  class_id?: string | null;
+  class_name?: string | null;
+  academic_session_id?: string | null;
+  session_name?: string | null;
+  term_id?: string | null;
+  term_name?: string | null;
+  attendance_date: string;
+  status: AttendanceStatus;
+  notes?: string | null;
+  is_published: number;
+}
+
+export interface AttendancePublicationItem {
+  id: string;
+  class_id?: string | null;
+  class_name?: string | null;
+  academic_session_id?: string | null;
+  session_name?: string | null;
+  term_id?: string | null;
+  term_name?: string | null;
+  status: string;
+  published_at?: string | null;
+  notes?: string | null;
+}
+
+export interface BehaviourRecordItem {
+  id: string;
+  school_id: string;
+  student_id: string;
+  student_name?: string;
+  admission_number?: string;
+  class_id?: string | null;
+  class_name?: string | null;
+  academic_session_id?: string | null;
+  session_name?: string | null;
+  term_id?: string | null;
+  term_name?: string | null;
+  record_date: string;
+  category: BehaviourCategory;
+  severity: BehaviourSeverity;
+  title: string;
+  description: string;
+  action_taken?: string | null;
+  admin_remarks?: string | null;
+  visible_to_parent: number;
+  visible_to_student: number;
+  visible_to_teacher: number;
+}
+
+export interface TeacherRemarkItem {
+  id: string;
+  school_id: string;
+  student_id: string;
+  student_name?: string;
+  admission_number?: string;
+  class_id?: string | null;
+  class_name?: string | null;
+  academic_session_id: string;
+  session_name?: string;
+  term_id: string;
+  term_name?: string;
+  remark_text: string;
+  staff_name?: string | null;
+  visible_to_parent: number;
+  visible_to_student: number;
+  updated_at?: string;
+}
+
+export interface SchoolAnnouncementItem {
+  id: string;
+  school_id: string;
+  title: string;
+  content: string;
+  audience: AnnouncementAudience;
+  target_class_id?: string | null;
+  target_class_name?: string | null;
+  priority: AnnouncementPriority;
+  is_published: number;
+  published_at?: string | null;
+  created_by_name?: string | null;
+  created_at?: string;
+}
+
+export interface PerformanceOverviewData {
+  summary: {
+    studentsAssessed: number;
+    scoredEntriesCount: number;
+    overallAveragePct: number;
+    passRatePct: number;
+    publishedExamsCount: number;
+    draftExamsCount: number;
+    reportCardsPublished: number;
+    reportCardsTotal: number;
+    attendanceRecordsCount: number;
+    attendanceRatePct: number;
+    positiveBehaviourCount: number;
+    disciplineBehaviourCount: number;
+  };
+  classRankings: Array<{
+    classId: string;
+    className: string;
+    studentsCount: number;
+    entriesCount: number;
+    averagePct: number;
+    passRatePct: number;
+  }>;
+  subjectTrends: Array<{
+    subjectId: string;
+    subjectName: string;
+    entriesCount: number;
+    averagePct: number;
+    minPct: number;
+    maxPct: number;
+    passRatePct: number;
+  }>;
+  termTrend: Array<{
+    key: string;
+    label: string;
+    entriesCount: number;
+    averagePct: number;
+    passRatePct: number;
+  }>;
+  gradeDistribution: Array<{ grade: string; count: number }>;
+  topStudents: Array<{
+    studentId: string;
+    studentName: string;
+    admissionNumber: string;
+    className: string;
+    averagePct: number;
+    attendancePct: number | null;
+    count: number;
+  }>;
+  atRiskStudents: Array<{
+    studentId: string;
+    studentName: string;
+    admissionNumber: string;
+    className: string;
+    averagePct: number;
+    attendancePct: number | null;
+    count: number;
+  }>;
+}
+
+export interface PortalChildSummary {
+  id: string;
+  admission_number: string;
+  full_name: string;
+  first_name: string;
+  last_name: string;
+  gender?: string | null;
+  class_id?: string | null;
+  class_name?: string | null;
+  class_arm_name?: string | null;
+  student_status?: string;
+  relationship_type?: string;
+  is_primary_contact?: number;
+}
+
+export interface ParentDashboardData {
+  school: School | null;
+  settings: AcademicSettings;
+  schools: Array<{
+    school_id: string;
+    school_name: string;
+    school_status: string;
+    role_name: string;
+    role_display_name: string;
+  }>;
+  children: PortalChildSummary[];
+  selectedChild: PortalChildSummary | null;
+  results: StudentScoreItem[];
+  termTrend: Array<{ key: string; label: string; averagePct: number; subjectsCount: number }>;
+  reportCards: ReportCardItem[];
+  attendance: {
+    summary: {
+      totalDays: number;
+      present: number;
+      absent: number;
+      late: number;
+      excused: number;
+      attendanceRatePct: number;
+    };
+    records: AttendanceRecordItem[];
+  };
+  behaviour: BehaviourRecordItem[];
+  teacherRemarks: TeacherRemarkItem[];
+  feeSummary: {
+    totalBilledKobo: number;
+    totalPaidKobo: number;
+    outstandingKobo: number;
+    totalBilledNaira: number;
+    totalPaidNaira: number;
+    outstandingNaira: number;
+    invoicesCount: number;
+    unpaidInvoicesCount: number;
+  } | null;
+  invoices: InvoiceDef[];
+  payments: PaymentItem[];
+  receipts: ReceiptItem[];
+  gateways: GatewayStatus[];
+  announcements: SchoolAnnouncementItem[];
+  notifications: NotificationItem[];
+}
+
+export interface StudentDashboardData {
+  school: School | null;
+  settings: AcademicSettings;
+  student: Student | null;
+  results: StudentScoreItem[];
+  termTrend: Array<{ key: string; label: string; averagePct: number; subjectsCount: number }>;
+  reportCards: ReportCardItem[];
+  attendance: {
+    summary: {
+      totalDays: number;
+      present: number;
+      absent: number;
+      late: number;
+      excused: number;
+      attendanceRatePct: number;
+    };
+    records: AttendanceRecordItem[];
+  };
+  behaviour: BehaviourRecordItem[];
+  teacherRemarks: TeacherRemarkItem[];
+  feesVisible: boolean;
+  feeSummary: ParentDashboardData['feeSummary'];
+  invoices: InvoiceDef[];
+  payments: PaymentItem[];
+  receipts: ReceiptItem[];
+  announcements: SchoolAnnouncementItem[];
+  notifications: NotificationItem[];
+}
+
 
 

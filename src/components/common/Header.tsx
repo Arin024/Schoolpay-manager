@@ -31,6 +31,15 @@ export const Header: React.FC<HeaderProps> = ({
     logout,
   } = useAuth();
 
+  const schoolRoles = React.useMemo(() => {
+    const seen = new Set<string>();
+    return roles.filter((r) => {
+      if (!r.school_id || seen.has(r.school_id)) return false;
+      seen.add(r.school_id);
+      return true;
+    });
+  }, [roles]);
+
   return (
     <>
       {/* Super Admin Support Impersonation Alert Banner */}
@@ -61,7 +70,7 @@ export const Header: React.FC<HeaderProps> = ({
           <button
             type="button"
             onClick={() => setActiveView(user ? (isSuperAdmin && !activeSchool ? 'superadmin' : 'school') : 'login')}
-            className="flex items-center gap-3 text-left cursor-pointer group focus:outline-hidden"
+            className="flex items-center gap-3 text-left cursor-pointer group focus:outline-hidden whitespace-nowrap shrink-0"
           >
             <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-emerald-500 to-teal-700 flex items-center justify-center shadow-lg shadow-emerald-950/40 border border-emerald-400/30 group-hover:scale-105 transition">
               <span className="font-extrabold text-white text-lg tracking-tight">₦</span>
@@ -71,12 +80,9 @@ export const Header: React.FC<HeaderProps> = ({
                 <span className="font-bold text-base sm:text-lg tracking-tight text-white group-hover:text-emerald-300 transition">
                   Bursar<span className="text-emerald-400">IQ</span>
                 </span>
-                <span className="hidden sm:inline-block px-1.5 py-0.5 text-[10px] font-bold tracking-wider uppercase bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 rounded">
-                  BURSARY SAAS
-                </span>
               </div>
               <p className="hidden md:block text-[11px] text-slate-400">
-                Simple school payments. Smarter bursary management.
+                School Operations, Academics &amp; Bursary
               </p>
             </div>
           </button>
@@ -88,12 +94,34 @@ export const Header: React.FC<HeaderProps> = ({
 
             {user ? (
               <>
-
+                {/* Multi-School Switcher */}
+                {schoolRoles.length > 1 && (
+                  <div className="flex items-center gap-1.5 bg-slate-800 border border-slate-700 rounded-lg px-2 py-1">
+                    <Building2 className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                    <select
+                      aria-label="Switch active school"
+                      value={activeSchoolId || ''}
+                      onChange={(e) => {
+                        if (e.target.value) {
+                          switchSchool(e.target.value);
+                          setActiveView('school');
+                        }
+                      }}
+                      className="bg-transparent text-xs font-medium text-slate-100 focus:outline-hidden max-w-[160px] truncate cursor-pointer"
+                    >
+                      {schoolRoles.map((sr) => (
+                        <option key={sr.school_id} value={sr.school_id || ''} className="bg-slate-900 text-white">
+                          {sr.school_name || sr.school_id} ({sr.role_name})
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                )}
 
                 {/* Account Security & Recovery Settings */}
                 <button
                   onClick={onOpenSecuritySettings}
-                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-xs font-semibold text-slate-200 hover:text-white transition"
+                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-xs font-semibold text-slate-200 hover:text-white transition whitespace-nowrap shrink-0"
                   title="Account Security & Recovery Questions"
                 >
                   <KeyRound className="w-3.5 h-3.5 text-emerald-400" />

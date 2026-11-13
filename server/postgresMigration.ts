@@ -97,6 +97,17 @@ export const MIGRATION_ORDER = [
   'webhook_events',
   'schema_migrations',
   'database_backups',
+  'school_academic_settings',
+  'subjects',
+  'examinations',
+  'student_scores',
+  'score_correction_logs',
+  'report_cards',
+  'attendance_records',
+  'attendance_publications',
+  'behaviour_records',
+  'teacher_remarks',
+  'school_announcements',
 ];
 
 /**
@@ -174,6 +185,20 @@ export async function migrateSqliteToPostgres(
       const migration003Sql = fs.readFileSync(migration003Path, 'utf8');
       await pgClient.query(migration003Sql);
       report.notes.push('Applied migration 003_adjust_check_constraints.sql in destination PostgreSQL');
+    }
+
+    const migration004Path = path.resolve(process.cwd(), 'migrations/004_invoice_schema_parity.sql');
+    if (fs.existsSync(migration004Path)) {
+      const migration004Sql = fs.readFileSync(migration004Path, 'utf8');
+      await pgClient.query(migration004Sql);
+      report.notes.push('Applied migration 004_invoice_schema_parity.sql in destination PostgreSQL');
+    }
+
+    const migration005Path = path.resolve(process.cwd(), 'migrations/005_performance_parent_portal.sql');
+    if (fs.existsSync(migration005Path)) {
+      const migration005Sql = fs.readFileSync(migration005Path, 'utf8');
+      await pgClient.query(migration005Sql);
+      report.notes.push('Applied migration 005_performance_parent_portal.sql in destination PostgreSQL');
     }
 
     // 2. Perform table-by-table migration in transaction

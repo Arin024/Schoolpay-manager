@@ -234,6 +234,7 @@ CREATE TABLE IF NOT EXISTS parents (
 CREATE TABLE IF NOT EXISTS students (
     id TEXT PRIMARY KEY,
     school_id TEXT NOT NULL REFERENCES schools(id) ON DELETE CASCADE,
+    user_id TEXT REFERENCES users(id) ON DELETE SET NULL,
     admission_number TEXT,
     first_name TEXT NOT NULL,
     middle_name TEXT,
@@ -269,6 +270,8 @@ CREATE TABLE IF NOT EXISTS parent_students (
     student_id TEXT NOT NULL REFERENCES students(id) ON DELETE CASCADE,
     relationship_type TEXT DEFAULT 'Parent',
     is_primary_contact INTEGER DEFAULT 1,
+    verified_by TEXT,
+    verified_at DATETIME,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     UNIQUE (parent_id, student_id)
 );
@@ -715,6 +718,7 @@ INSERT OR IGNORE INTO roles (id, name, display_name, description, scope) VALUES
 ('role_teacher', 'TEACHER', 'Teacher / Educator', 'Class management, attendance, and student performance tracking', 'SCHOOL'),
 ('role_staff', 'STAFF', 'Administrative Staff', 'General support and administrative staff', 'SCHOOL'),
 ('role_parent', 'PARENT', 'Parent / Guardian', 'Parent portal access to view student balances and payment receipts', 'SCHOOL'),
+('role_student', 'STUDENT', 'Student / Learner', 'Student portal read-only access to published results, attendance, and report cards', 'SCHOOL'),
 ('role_partner', 'PARTNER', 'Integration / Bank Partner', 'Read-only financial audit and settlement reconciliation partner', 'SCHOOL');
 
 INSERT OR IGNORE INTO permissions (id, code, name, category) VALUES
@@ -758,3 +762,247 @@ CREATE TABLE IF NOT EXISTS bank_statement_entries (
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 CREATE INDEX IF NOT EXISTS idx_bank_entries_school ON bank_statement_entries(school_id);
+
+-- ==============================================================================
+-- PERFORMANCE MANAGEMENT, REPORT CARDS, ATTENDANCE, BEHAVIOUR & PORTALS
+-- ==============================================================================
+
+CREATE TABLE IF NOT EXISTS school_academic_settings (
+    id TEXT PRIMARY KEY,
+    school_id TEXT UNIQUE NOT NULL REFERENCES schools(id) ON DELETE CASCADE,
+    ca_max_score REAL NOT NULL DEFAULT 40,
+    exam_max_score REAL NOT NULL DEFAULT 60,
+    component_structure_json TEXT,
+    grading_scale_json TEXT NOT NULL,
+    missing_score_policy TEXT NOT NULL DEFAULT 'EXCLUDE' CHECK(missing_score_policy IN ('EXCLUDE', 'ZERO')),
+    show_class_position INTEGER NOT NULL DEFAULT 1,
+    students_can_view_fees INTEGER NOT NULL DEFAULT 1,
+    teachers_can_view_fees INTEGER NOT NULL DEFAULT 0,
+    require_review_before_approve INTEGER NOT NULL DEFAULT 0,
+    updated_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS subjects (
+    id TEXT PRIMARY KEY,
+    school_id TEXT NOT NULL REFERENCES schools(id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    code TEXT,
+    department TEXT,
+    class_id TEXT REFERENCES classes(id) ON DELETE SET NULL,
+    status TEXT NOT NULL DEFAULT 'ACTIVE' CHECK(status IN ('ACTIVE', 'INACTIVE')),
+    is_deleted INTEGER DEFAULT 0,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (school_id, name)
+);
+CREATE INDEX IF NOT EXISTS idx_subjects_school ON subjects(school_id, is_deleted);
+
+CREATE TABLE IF NOT EXISTS examinations (
+    id TEXT PRIMARY KEY,
+    school_id TEXT NOT NULL REFERENCES schools(id) ON DELETE CASCADE,
+    academic_session_id TEXT REFERENCES academic_sessions(id) ON DELETE SET NULL,
+    term_id TEXT REFERENCES terms(id) ON DELETE SET NULL,
+    class_id TEXT REFERENCES classes(id) ON DELETE SET NULL,
+    title TEXT NOT NULL,
+    exam_type TEXT NOT NULL DEFAULT 'TERMLY',
+    ca_max_score REAL NOT NULL DEFAULT 40,
+    exam_max_score REAL NOT NULL DEFAULT 60,
+    total_max_score REAL NOT NULL DEFAULT 100,
+    component_weights_json TEXT,
+    status TEXT NOT NULL DEFAULT 'DRAFT' CHECK(status IN ('DRAFT', 'REVIEW', 'APPROVED', 'PUBLISHED')),
+    created_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+    reviewed_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+    reviewed_at DATETIME,
+    approved_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+    approved_at DATETIME,
+    published_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+    published_at DATETIME,
+    is_deleted INTEGER DEFAULT 0,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_examinations_school_status ON examinations(school_id, status, is_deleted);
+
+CREATE TABLE IF NOT EXISTS student_scores (
+    id TEXT PRIMARY KEY,
+    school_id TEXT NOT NULL REFERENCES schools(id) ON DELETE CASCADE,
+    examination_id TEXT NOT NULL REFERENCES examinations(id) ON DELETE CASCADE,
+    student_id TEXT NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+    class_id TEXT REFERENCES classes(id) ON DELETE SET NULL,
+    subject_id TEXT NOT NULL REFERENCES subjects(id) ON DELETE CASCADE,
+    academic_session_id TEXT REFERENCES academic_sessions(id) ON DELETE SET NULL,
+    term_id TEXT REFERENCES terms(id) ON DELETE SET NULL,
+    ca_score REAL,
+    exam_score REAL,
+    component_scores_json TEXT,
+    total_score REAL,
+    grade TEXT,
+    grade_remark TEXT,
+    subject_remark TEXT,
+    status TEXT NOT NULL DEFAULT 'DRAFT' CHECK(status IN ('DRAFT', 'REVIEW', 'APPROVED', 'PUBLISHED')),
+    entered_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+    updated_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+    approved_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+    approved_at DATETIME,
+    published_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+    published_at DATETIME,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (examination_id, student_id, subject_id)
+);
+CREATE INDEX IF NOT EXISTS idx_scores_school_exam ON student_scores(school_id, examination_id);
+CREATE INDEX IF NOT EXISTS idx_scores_student_status ON student_scores(school_id, student_id, status);
+
+CREATE TABLE IF NOT EXISTS score_correction_logs (
+    id TEXT PRIMARY KEY,
+    school_id TEXT NOT NULL REFERENCES schools(id) ON DELETE CASCADE,
+    score_id TEXT NOT NULL REFERENCES student_scores(id) ON DELETE CASCADE,
+    examination_id TEXT NOT NULL REFERENCES examinations(id) ON DELETE CASCADE,
+    student_id TEXT NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+    subject_id TEXT NOT NULL REFERENCES subjects(id) ON DELETE CASCADE,
+    previous_ca_score REAL,
+    new_ca_score REAL,
+    previous_exam_score REAL,
+    new_exam_score REAL,
+    previous_total REAL,
+    new_total REAL,
+    previous_grade TEXT,
+    new_grade TEXT,
+    reason TEXT NOT NULL,
+    corrected_by TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    corrected_by_email TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_score_corrections_school ON score_correction_logs(school_id, examination_id);
+
+CREATE TABLE IF NOT EXISTS report_cards (
+    id TEXT PRIMARY KEY,
+    school_id TEXT NOT NULL REFERENCES schools(id) ON DELETE CASCADE,
+    student_id TEXT NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+    class_id TEXT REFERENCES classes(id) ON DELETE SET NULL,
+    academic_session_id TEXT NOT NULL REFERENCES academic_sessions(id) ON DELETE CASCADE,
+    term_id TEXT NOT NULL REFERENCES terms(id) ON DELETE CASCADE,
+    examination_id TEXT REFERENCES examinations(id) ON DELETE SET NULL,
+    status TEXT NOT NULL DEFAULT 'DRAFT' CHECK(status IN ('DRAFT', 'REVIEW', 'APPROVED', 'PUBLISHED')),
+    total_score REAL DEFAULT 0,
+    average_score REAL DEFAULT 0,
+    subjects_count INTEGER DEFAULT 0,
+    class_position INTEGER,
+    class_size INTEGER,
+    attendance_summary_json TEXT,
+    behaviour_summary_json TEXT,
+    teacher_remark TEXT,
+    principal_remark TEXT,
+    snapshot_json TEXT,
+    verification_code TEXT,
+    approved_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+    approved_at DATETIME,
+    published_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+    published_at DATETIME,
+    created_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (school_id, student_id, academic_session_id, term_id)
+);
+CREATE INDEX IF NOT EXISTS idx_report_cards_school_student ON report_cards(school_id, student_id, status);
+
+CREATE TABLE IF NOT EXISTS attendance_records (
+    id TEXT PRIMARY KEY,
+    school_id TEXT NOT NULL REFERENCES schools(id) ON DELETE CASCADE,
+    student_id TEXT NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+    class_id TEXT REFERENCES classes(id) ON DELETE SET NULL,
+    class_arm_id TEXT REFERENCES class_arms(id) ON DELETE SET NULL,
+    academic_session_id TEXT REFERENCES academic_sessions(id) ON DELETE SET NULL,
+    term_id TEXT REFERENCES terms(id) ON DELETE SET NULL,
+    attendance_date TEXT NOT NULL,
+    status TEXT NOT NULL CHECK(status IN ('PRESENT', 'ABSENT', 'LATE', 'EXCUSED')),
+    notes TEXT,
+    is_published INTEGER NOT NULL DEFAULT 0,
+    recorded_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+    updated_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (school_id, student_id, attendance_date)
+);
+CREATE INDEX IF NOT EXISTS idx_attendance_school_date ON attendance_records(school_id, attendance_date);
+CREATE INDEX IF NOT EXISTS idx_attendance_student_pub ON attendance_records(school_id, student_id, is_published);
+
+CREATE TABLE IF NOT EXISTS attendance_publications (
+    id TEXT PRIMARY KEY,
+    school_id TEXT NOT NULL REFERENCES schools(id) ON DELETE CASCADE,
+    class_id TEXT REFERENCES classes(id) ON DELETE SET NULL,
+    academic_session_id TEXT REFERENCES academic_sessions(id) ON DELETE SET NULL,
+    term_id TEXT REFERENCES terms(id) ON DELETE SET NULL,
+    status TEXT NOT NULL DEFAULT 'DRAFT' CHECK(status IN ('DRAFT', 'PUBLISHED')),
+    published_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+    published_at DATETIME,
+    notes TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (school_id, class_id, academic_session_id, term_id)
+);
+
+CREATE TABLE IF NOT EXISTS behaviour_records (
+    id TEXT PRIMARY KEY,
+    school_id TEXT NOT NULL REFERENCES schools(id) ON DELETE CASCADE,
+    student_id TEXT NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+    class_id TEXT REFERENCES classes(id) ON DELETE SET NULL,
+    academic_session_id TEXT REFERENCES academic_sessions(id) ON DELETE SET NULL,
+    term_id TEXT REFERENCES terms(id) ON DELETE SET NULL,
+    record_date TEXT NOT NULL,
+    category TEXT NOT NULL CHECK(category IN ('POSITIVE', 'COMMENDATION', 'DISCIPLINE', 'INCIDENT', 'PASTORAL')),
+    severity TEXT NOT NULL DEFAULT 'LOW' CHECK(severity IN ('LOW', 'MODERATE', 'HIGH')),
+    title TEXT NOT NULL,
+    description TEXT NOT NULL,
+    action_taken TEXT,
+    admin_remarks TEXT,
+    visible_to_parent INTEGER NOT NULL DEFAULT 1,
+    visible_to_student INTEGER NOT NULL DEFAULT 1,
+    visible_to_teacher INTEGER NOT NULL DEFAULT 1,
+    recorded_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+    updated_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+    is_deleted INTEGER NOT NULL DEFAULT 0,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_behaviour_school_student ON behaviour_records(school_id, student_id, is_deleted);
+
+CREATE TABLE IF NOT EXISTS teacher_remarks (
+    id TEXT PRIMARY KEY,
+    school_id TEXT NOT NULL REFERENCES schools(id) ON DELETE CASCADE,
+    student_id TEXT NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+    class_id TEXT REFERENCES classes(id) ON DELETE SET NULL,
+    academic_session_id TEXT NOT NULL REFERENCES academic_sessions(id) ON DELETE CASCADE,
+    term_id TEXT NOT NULL REFERENCES terms(id) ON DELETE CASCADE,
+    remark_text TEXT NOT NULL,
+    staff_name TEXT,
+    visible_to_parent INTEGER NOT NULL DEFAULT 1,
+    visible_to_student INTEGER NOT NULL DEFAULT 1,
+    author_admin_id TEXT REFERENCES users(id) ON DELETE SET NULL,
+    updated_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (school_id, student_id, academic_session_id, term_id)
+);
+CREATE INDEX IF NOT EXISTS idx_teacher_remarks_school_student ON teacher_remarks(school_id, student_id);
+
+CREATE TABLE IF NOT EXISTS school_announcements (
+    id TEXT PRIMARY KEY,
+    school_id TEXT NOT NULL REFERENCES schools(id) ON DELETE CASCADE,
+    title TEXT NOT NULL,
+    content TEXT NOT NULL,
+    audience TEXT NOT NULL DEFAULT 'ALL' CHECK(audience IN ('ALL', 'PARENTS', 'STUDENTS', 'TEACHERS', 'CLASS')),
+    target_class_id TEXT REFERENCES classes(id) ON DELETE SET NULL,
+    priority TEXT NOT NULL DEFAULT 'NORMAL' CHECK(priority IN ('NORMAL', 'IMPORTANT', 'URGENT')),
+    is_published INTEGER NOT NULL DEFAULT 1,
+    published_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    created_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+    created_by_name TEXT,
+    is_deleted INTEGER NOT NULL DEFAULT 0,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_announcements_school ON school_announcements(school_id, is_published, is_deleted);
+

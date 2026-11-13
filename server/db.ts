@@ -342,6 +342,14 @@ export async function initDatabase() {
               // Column may already be nullable
             }
           }
+
+          // Execute idempotent 005_performance_parent_portal.sql migration on Neon PostgreSQL before hydration
+          const mig005Path = path.resolve(process.cwd(), 'migrations/005_performance_parent_portal.sql');
+          if (fs.existsSync(mig005Path)) {
+            const mig005Sql = fs.readFileSync(mig005Path, 'utf8');
+            await client.query(mig005Sql);
+            console.log('[Neon PostgreSQL] Verified/applied migration 005_performance_parent_portal.sql');
+          }
         } finally {
           client.release();
         }
@@ -480,6 +488,7 @@ function migrateNullableDirectoryColumnsSqlite() {
         CREATE TABLE students_mig (
           id TEXT PRIMARY KEY,
           school_id TEXT NOT NULL REFERENCES schools(id) ON DELETE CASCADE,
+          user_id TEXT REFERENCES users(id) ON DELETE SET NULL,
           admission_number TEXT,
           first_name TEXT NOT NULL,
           middle_name TEXT,
@@ -612,6 +621,7 @@ function migrateStep2Columns() {
   if (studentTableExists) {
     const studentCols = db.prepare('PRAGMA table_info(students)').all().map((c: any) => c.name);
     const requiredStudentCols: Record<string, string> = {
+      user_id: "TEXT",
       first_name: "TEXT DEFAULT ''",
       middle_name: "TEXT DEFAULT ''",
       last_name: "TEXT DEFAULT ''",
@@ -632,6 +642,24 @@ function migrateStep2Columns() {
       updated_at: "DATETIME DEFAULT CURRENT_TIMESTAMP",
     };
 
+    try {
+      db.exec(`
+        INSERT OR IGNORE INTO roles (id, name, display_name, description, scope)
+        VALUES ('role_student', 'STUDENT', 'Student / Learner', 'Student portal read-only access to published results, attendance, and report cards', 'SCHOOL');
+      `);
+    } catch {}
+
+    const psExists = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='parent_students'").get();
+    if (psExists) {
+      const psCols = db.prepare('PRAGMA table_info(parent_students)').all().map((c: any) => c.name);
+      if (!psCols.includes('verified_by')) {
+        try { db.exec('ALTER TABLE parent_students ADD COLUMN verified_by TEXT;'); } catch {}
+      }
+      if (!psCols.includes('verified_at')) {
+        try { db.exec('ALTER TABLE parent_students ADD COLUMN verified_at DATETIME;'); } catch {}
+      }
+    }
+
     for (const [col, colType] of Object.entries(requiredStudentCols)) {
       if (!studentCols.includes(col)) {
         try {
@@ -639,6 +667,19 @@ function migrateStep2Columns() {
         } catch (e) {
           // column may already exist
         }
+      }
+    }
+
+    try {
+      db.exec('CREATE INDEX IF NOT EXISTS idx_students_user ON students(user_id);');
+    } catch {}
+
+    // Ensure parents table also has user_id column in legacy SQLite DBs
+    const parentTableExists = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='parents'").get();
+    if (parentTableExists) {
+      const parentCols = db.prepare('PRAGMA table_info(parents)').all().map((c: any) => c.name);
+      if (!parentCols.includes('user_id')) {
+        try { db.exec('ALTER TABLE parents ADD COLUMN user_id TEXT REFERENCES users(id) ON DELETE SET NULL;'); } catch {}
       }
     }
 

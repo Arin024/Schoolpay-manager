@@ -14,8 +14,10 @@ import { requireAuth, requireSuperAdmin } from './tenantMiddleware.ts';
 import { createPostgresBackup, ALL_44_TABLES_ORDER } from './postgresDisasterRecoveryService.ts';
 import { getPgPool } from './db.ts';
 import fs from 'node:fs';
+import { safeClientError, wrapRouterAsync } from './securityUtils.ts';
 
 export const superAdminBackupRouter = express.Router();
+wrapRouterAsync(superAdminBackupRouter);
 
 superAdminBackupRouter.get(
   '/admin/system/backup/download',
@@ -64,6 +66,35 @@ superAdminBackupRouter.get(
             ...u,
             password_hash: '[REDACTED_FOR_SECURITY]',
             salt: '[REDACTED_FOR_SECURITY]',
+            security_answer_hash_1: u.security_answer_hash_1 ? '[REDACTED_FOR_SECURITY]' : null,
+            security_answer_salt_1: u.security_answer_salt_1 ? '[REDACTED_FOR_SECURITY]' : null,
+            security_answer_hash_2: u.security_answer_hash_2 ? '[REDACTED_FOR_SECURITY]' : null,
+            security_answer_salt_2: u.security_answer_salt_2 ? '[REDACTED_FOR_SECURITY]' : null,
+          }));
+        }
+
+        if (backupData.data && backupData.data.user_recovery_codes) {
+          backupData.data.user_recovery_codes = backupData.data.user_recovery_codes.map((c: any) => ({
+            ...c,
+            code_hash: '[REDACTED_FOR_SECURITY]',
+          }));
+        }
+
+        if (backupData.data && backupData.data.password_resets) {
+          backupData.data.password_resets = backupData.data.password_resets.map((r: any) => ({
+            ...r,
+            token: '[REDACTED_FOR_SECURITY]',
+          }));
+        }
+
+        if (backupData.data && backupData.data.school_settings) {
+          backupData.data.school_settings = backupData.data.school_settings.map((s: any) => ({
+            ...s,
+            paystack_secret_key: s.paystack_secret_key ? '[REDACTED_FOR_SECURITY]' : null,
+            flutterwave_secret_key: s.flutterwave_secret_key ? '[REDACTED_FOR_SECURITY]' : null,
+            bachs_api_key: s.bachs_api_key ? '[REDACTED_FOR_SECURITY]' : null,
+            bachs_webhook_secret: s.bachs_webhook_secret ? '[REDACTED_FOR_SECURITY]' : null,
+            webhook_secret: s.webhook_secret ? '[REDACTED_FOR_SECURITY]' : null,
           }));
         }
 
@@ -98,9 +129,10 @@ superAdminBackupRouter.get(
         if (poolToClose) await poolToClose.end();
       }
     } catch (err: any) {
+      console.error('[SuperAdmin Backup Download Error]', err?.message);
       return res.status(500).json({
         success: false,
-        error: err.message,
+        error: safeClientError(err),
       });
     }
   }

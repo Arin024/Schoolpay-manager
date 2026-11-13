@@ -25,6 +25,9 @@ import {
   ChevronLeft,
   ChevronRight,
   MoreVertical,
+  KeyRound,
+  BarChart3,
+  UserCheck,
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext.js';
 import { api } from '../../services/api.js';
@@ -66,6 +69,17 @@ export const SchoolStudentsView: React.FC<SchoolStudentsViewProps> = ({
 
   // Cross-tenant probe state
   const [probeResult, setProbeResult] = useState<any | null>(null);
+
+  // Student Portal Login & Academic Profile state
+  const [loginStudent, setLoginStudent] = useState<Student | null>(null);
+  const [studentLoginForm, setStudentLoginForm] = useState({ email: '', password: '' });
+  const [studentLoginSaving, setStudentLoginSaving] = useState(false);
+  const [studentLoginError, setStudentLoginError] = useState<string | null>(null);
+  const [studentStatusMsg, setStudentStatusMsg] = useState<string | null>(null);
+
+  const [acadStudent, setAcadStudent] = useState<Student | null>(null);
+  const [acadData, setAcadData] = useState<any | null>(null);
+  const [acadLoading, setAcadLoading] = useState(false);
 
   // Form states for Enroll / Edit
   const initialFormState = {
@@ -145,6 +159,40 @@ export const SchoolStudentsView: React.FC<SchoolStudentsViewProps> = ({
       setSelectedStudent(res.student);
     } catch (err: any) {
       alert(err?.message || 'Failed to fetch student details');
+    }
+  };
+
+  const openAcademicProfile = async (st: Student) => {
+    setAcadStudent(st);
+    setAcadData(null);
+    setAcadLoading(true);
+    try {
+      const res = await api.getStudentPerformance(st.id);
+      setAcadData(res);
+    } catch (err: any) {
+      setAcadData({ error: err?.message || 'Failed to load student academic profile' });
+    } finally {
+      setAcadLoading(false);
+    }
+  };
+
+  const handleStudentLoginSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!loginStudent) return;
+    setStudentLoginSaving(true);
+    setStudentLoginError(null);
+    try {
+      const res = await api.provisionStudentAccount(loginStudent.id, {
+        email: studentLoginForm.email.trim(),
+        password: studentLoginForm.password,
+      });
+      setStudentStatusMsg(res.message || `Student portal login created for ${loginStudent.full_name}.`);
+      setLoginStudent(null);
+      await loadStudents();
+    } catch (err: any) {
+      setStudentLoginError(err?.message || 'Failed to provision student account');
+    } finally {
+      setStudentLoginSaving(false);
     }
   };
 
@@ -457,6 +505,18 @@ export const SchoolStudentsView: React.FC<SchoolStudentsViewProps> = ({
         </div>
       </div>
 
+      {studentStatusMsg && (
+        <div className="p-3 rounded-xl bg-emerald-50 border border-emerald-200 text-emerald-800 text-xs flex items-center justify-between">
+          <span className="flex items-center gap-2">
+            <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+            <span>{studentStatusMsg}</span>
+          </span>
+          <button type="button" onClick={() => setStudentStatusMsg(null)} className="text-emerald-700 hover:text-emerald-900">
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+      )}
+
       {/* Cross-Tenant Probe Result Banner */}
       {probeResult && (
         <div
@@ -662,23 +722,46 @@ export const SchoolStudentsView: React.FC<SchoolStudentsViewProps> = ({
                       <p className="text-[10px] text-slate-400 truncate max-w-[140px]">{st.email || '—'}</p>
                     </td>
                     <td className="py-3.5 px-4">
-                      <span
-                        className={`inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[10px] font-bold border ${
-                          (st.student_status || st.status) === 'ACTIVE'
-                            ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
-                            : 'bg-slate-100 text-slate-600 border-slate-300'
-                        }`}
-                      >
-                        <span
-                          className={`w-1.5 h-1.5 rounded-full ${
-                            (st.student_status || st.status) === 'ACTIVE' ? 'bg-emerald-500' : 'bg-slate-400'
-                          }`}
-                        />
-                        {st.student_status || st.status || 'ACTIVE'}
-                      </span>
+                        <div className="flex items-center gap-2">
+                          <span
+                            className={`inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[10px] font-bold border ${
+                              (st.student_status || st.status) === 'ACTIVE'
+                                ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
+                                : 'bg-slate-100 text-slate-600 border-slate-300'
+                            }`}
+                          >
+                            {st.student_status || st.status || 'ACTIVE'}
+                          </span>
+                          {st.user_id && (
+                            <span className="inline-flex items-center gap-0.5 text-[10px] font-semibold text-cyan-700" title="Student portal login active">
+                              <UserCheck className="w-3 h-3" />
+                              <span>Portal</span>
+                            </span>
+                          )}
+                        </div>
                     </td>
                     <td className="py-3.5 px-4 text-right">
                       <div className="flex items-center justify-end gap-1">
+                        <button
+                          onClick={() => openAcademicProfile(st)}
+                          className="p-1.5 rounded-lg text-slate-500 hover:text-indigo-700 hover:bg-indigo-50 transition"
+                          title="Academic Profile"
+                        >
+                          <BarChart3 className="w-4 h-4" />
+                        </button>
+                        {!st.user_id && (
+                          <button
+                            onClick={() => {
+                              setLoginStudent(st);
+                              setStudentLoginForm({ email: st.email || '', password: '' });
+                              setStudentLoginError(null);
+                            }}
+                            className="p-1.5 rounded-lg text-slate-500 hover:text-cyan-700 hover:bg-cyan-50 transition"
+                            title="Provision Student Portal Login"
+                          >
+                            <KeyRound className="w-4 h-4" />
+                          </button>
+                        )}
                         <button
                           onClick={() => openStudentProfile(st.id)}
                           className="p-1.5 rounded-lg text-slate-500 hover:text-emerald-700 hover:bg-emerald-50 transition"
@@ -1439,6 +1522,188 @@ export const SchoolStudentsView: React.FC<SchoolStudentsViewProps> = ({
               >
                 Confirm Delete
               </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ========================================================================= */}
+      {/* MODAL 6: PROVISION STUDENT PORTAL LOGIN */}
+      {/* ========================================================================= */}
+      {loginStudent && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-xs p-4">
+          <div className="bg-white rounded-2xl max-w-md w-full shadow-2xl border border-slate-200 overflow-hidden">
+            <div className="bg-slate-900 px-6 py-4 flex items-center justify-between text-white">
+              <div className="flex items-center gap-2">
+                <KeyRound className="w-4 h-4 text-emerald-400" />
+                <h3 className="font-bold text-sm">Provision Student Portal Account</h3>
+              </div>
+              <button onClick={() => setLoginStudent(null)} className="p-1 rounded-lg text-slate-400 hover:text-white">
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <form onSubmit={handleStudentLoginSubmit} className="p-6 space-y-4 text-xs">
+              <p className="text-slate-600">
+                Bind a Student Portal login directly to <strong>{loginStudent.full_name}</strong> ({loginStudent.admission_number}).
+              </p>
+              {studentLoginError && (
+                <div className="p-3 bg-rose-50 border border-rose-200 text-rose-700 rounded-xl">{studentLoginError}</div>
+              )}
+              <div>
+                <label className="block font-semibold text-slate-700 mb-1">Student Login Email *</label>
+                <input
+                  type="email"
+                  required
+                  value={studentLoginForm.email}
+                  onChange={(e) => setStudentLoginForm({ ...studentLoginForm, email: e.target.value })}
+                  placeholder="student@school.edu.ng"
+                  className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl"
+                />
+              </div>
+              <div>
+                <label className="block font-semibold text-slate-700 mb-1">Initial Password * (min 8 chars)</label>
+                <input
+                  type="password"
+                  required
+                  minLength={8}
+                  value={studentLoginForm.password}
+                  onChange={(e) => setStudentLoginForm({ ...studentLoginForm, password: e.target.value })}
+                  placeholder="••••••••"
+                  className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl"
+                />
+              </div>
+              <div className="pt-3 border-t border-slate-200 flex items-center justify-end gap-2">
+                <button
+                  type="button"
+                  onClick={() => setLoginStudent(null)}
+                  className="px-4 py-2 border border-slate-300 text-slate-700 rounded-xl hover:bg-slate-50"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={studentLoginSaving}
+                  className="px-5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl font-bold disabled:opacity-60"
+                >
+                  {studentLoginSaving ? 'Provisioning...' : 'Create Student Login'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* ========================================================================= */}
+      {/* MODAL 7: STUDENT ACADEMIC PROFILE */}
+      {/* ========================================================================= */}
+      {acadStudent && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-xs p-4 overflow-y-auto">
+          <div className="bg-white rounded-2xl max-w-3xl w-full shadow-2xl border border-slate-200 overflow-hidden my-8">
+            <div className="bg-slate-900 px-6 py-4 flex items-center justify-between text-white">
+              <div>
+                <h3 className="font-bold text-sm">Academic Performance Profile · {acadStudent.full_name}</h3>
+                <p className="text-[11px] text-slate-300 font-mono">
+                  {acadStudent.admission_number} · {acadStudent.class_name || 'Unassigned'}
+                </p>
+              </div>
+              <button onClick={() => setAcadStudent(null)} className="p-1 rounded-lg text-slate-400 hover:text-white">
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <div className="p-6 space-y-5 text-xs max-h-[80vh] overflow-y-auto">
+              {acadLoading ? (
+                <div className="py-12 text-center text-slate-400">Loading academic records...</div>
+              ) : acadData?.error ? (
+                <div className="p-3 bg-rose-50 border border-rose-200 text-rose-700 rounded-xl">{acadData.error}</div>
+              ) : (
+                <>
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                    <div className="p-3 rounded-xl border border-slate-200 bg-slate-50">
+                      <p className="text-[11px] text-slate-500">Exam Scores</p>
+                      <p className="text-lg font-bold text-slate-900 tabular-nums">{acadData?.scores?.length || 0}</p>
+                    </div>
+                    <div className="p-3 rounded-xl border border-slate-200 bg-slate-50">
+                      <p className="text-[11px] text-slate-500">Attendance Logs</p>
+                      <p className="text-lg font-bold text-slate-900 tabular-nums">{acadData?.attendance?.length || 0}</p>
+                    </div>
+                    <div className="p-3 rounded-xl border border-slate-200 bg-slate-50">
+                      <p className="text-[11px] text-slate-500">Behaviour Notes</p>
+                      <p className="text-lg font-bold text-slate-900 tabular-nums">{acadData?.behaviour?.length || 0}</p>
+                    </div>
+                    <div className="p-3 rounded-xl border border-slate-200 bg-slate-50">
+                      <p className="text-[11px] text-slate-500">Report Cards</p>
+                      <p className="text-lg font-bold text-slate-900 tabular-nums">{acadData?.reportCards?.length || 0}</p>
+                    </div>
+                  </div>
+
+                  <div>
+                    <h4 className="font-bold text-slate-900 mb-2">Recent Subject Scores</h4>
+                    {!acadData?.scores?.length ? (
+                      <p className="text-slate-400 italic">No examination scores recorded yet.</p>
+                    ) : (
+                      <div className="overflow-x-auto border border-slate-200 rounded-xl">
+                        <table className="w-full text-left text-xs">
+                          <thead className="bg-slate-50 text-slate-500 border-b border-slate-200">
+                            <tr>
+                              <th className="py-2 px-3">Subject</th>
+                              <th className="py-2 px-3">Exam</th>
+                              <th className="py-2 px-3 text-right">CA</th>
+                              <th className="py-2 px-3 text-right">Exam</th>
+                              <th className="py-2 px-3 text-right">Total</th>
+                              <th className="py-2 px-3">Grade</th>
+                              <th className="py-2 px-3">Status</th>
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-slate-100">
+                            {acadData.scores.slice(0, 15).map((s: any) => (
+                              <tr key={s.id}>
+                                <td className="py-2 px-3 font-medium text-slate-900">{s.subject_name}</td>
+                                <td className="py-2 px-3 text-slate-600">{s.exam_title}</td>
+                                <td className="py-2 px-3 text-right tabular-nums">{s.ca_score ?? '—'}</td>
+                                <td className="py-2 px-3 text-right tabular-nums">{s.exam_score ?? '—'}</td>
+                                <td className="py-2 px-3 text-right font-bold tabular-nums">{s.total_score ?? '—'}</td>
+                                <td className="py-2 px-3 font-semibold">{s.grade || '—'}</td>
+                                <td className="py-2 px-3 text-slate-500">{s.status}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    )}
+                  </div>
+
+                  <div>
+                    <h4 className="font-bold text-slate-900 mb-2">Behaviour &amp; Teacher Remarks</h4>
+                    {!acadData?.behaviour?.length && !acadData?.remarks?.length ? (
+                      <p className="text-slate-400 italic">No behaviour records or remarks recorded.</p>
+                    ) : (
+                      <div className="space-y-2">
+                        {acadData?.remarks?.map((r: any) => (
+                          <div key={r.id} className="p-3 rounded-xl border border-slate-200 bg-slate-50">
+                            <p className="font-semibold text-slate-900">
+                              Termly Remark ({r.session_name || ''} · {r.term_name || ''})
+                            </p>
+                            <p className="text-slate-600 mt-0.5">{r.remark_text}</p>
+                          </div>
+                        ))}
+                        {acadData?.behaviour?.slice(0, 5).map((b: any) => (
+                          <div key={b.id} className="p-3 rounded-xl border border-slate-200">
+                            <p className="font-semibold text-slate-900">
+                              {b.title} · {b.category} ({b.severity})
+                            </p>
+                            <p className="text-slate-600 mt-0.5">{b.description}</p>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </>
+              )}
+              <div className="pt-3 border-t border-slate-200 flex justify-end">
+                <button onClick={() => setAcadStudent(null)} className="px-4 py-2 bg-slate-900 text-white rounded-xl font-bold">
+                  Close
+                </button>
+              </div>
             </div>
           </div>
         </div>

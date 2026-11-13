@@ -6,10 +6,12 @@ import { db, cacheDb, queryPg, getPgPool, isPgConnected, ensurePgConnected } fro
 import { requireAuth, requireSuperAdmin, type AuthenticatedRequest } from './tenantMiddleware.ts';
 import { logAudit } from './audit.ts';
 import { toKobo, toNaira } from './financeUtils.ts';
-import { createImpersonationSession, destroySession, hashPassword, generateSalt } from './auth.ts';
+import { createImpersonationSessionAsync, destroySession, hashPassword, generateSalt } from './auth.ts';
 import { SCHOOL_STATUSES } from '../src/constants/index.ts';
+import { wrapRouterAsync, safeClientError } from './securityUtils.ts';
 
 export const adminRouter = Router();
+wrapRouterAsync(adminRouter);
 
 // ==============================================================================
 // 1. GLOBAL PLATFORM DASHBOARD METRICS (SUPER ADMIN ONLY)
@@ -336,7 +338,7 @@ adminRouter.post('/schools', requireAuth, requireSuperAdmin, async (req: Authent
       school: created,
     });
   } catch (err: any) {
-    return res.status(500).json({ error: 'CREATE_FAILED', message: err.message || 'Failed to create school' });
+    return res.status(500).json({ error: 'CREATE_FAILED', message: safeClientError(err, 'Failed to create school') });
   }
 });
 
@@ -453,12 +455,12 @@ adminRouter.patch('/schools/:schoolId', requireAuth, requireSuperAdmin, (req: Au
     const updated = db.prepare('SELECT * FROM schools WHERE id = ?').get(schoolId);
     return res.json({ success: true, message: 'School profile updated successfully.', school: updated });
   } catch (err: any) {
-    return res.status(500).json({ error: 'UPDATE_FAILED', message: err.message });
+    return res.status(500).json({ error: 'UPDATE_FAILED', message: safeClientError(err) });
   }
 });
 
 // PATCH /admin/schools/:schoolId/status (Update school status: TRIAL, ACTIVE, SUSPENDED, EXPIRED, CANCELLED)
-adminRouter.patch('/schools/:schoolId/status', requireAuth, requireSuperAdmin, (req: AuthenticatedRequest, res) => {
+adminRouter.patch('/schools/:schoolId/status', requireAuth, requireSuperAdmin, async (req: AuthenticatedRequest, res) => {
   const { schoolId } = req.params;
   const { status, reason } = req.body;
 
@@ -469,18 +471,29 @@ adminRouter.patch('/schools/:schoolId/status', requireAuth, requireSuperAdmin, (
     });
   }
 
-  const school = db.prepare('SELECT * FROM schools WHERE id = ?').get(schoolId) as any;
+  let school = db.prepare('SELECT * FROM schools WHERE id = ?').get(schoolId) as any;
+  if (!school) {
+    const pgS = await queryPg('SELECT * FROM schools WHERE id = $1', [schoolId]);
+    school = pgS.rows[0];
+  }
   if (!school) {
     return res.status(404).json({ error: 'NOT_FOUND', message: 'School not found' });
   }
 
   const previousStatus = school.status;
+  await queryPg(`UPDATE schools SET status = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2`, [status, schoolId]).catch(
+    (err: any) => console.warn('[School Status PG Sync Warning]', err?.message)
+  );
   db.prepare(`
     UPDATE schools SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?
   `).run(status, schoolId);
 
   // If status is SUSPENDED or EXPIRED, also update active subscriptions to reflect state
   if (['SUSPENDED', 'EXPIRED', 'CANCELLED'].includes(status)) {
+    await queryPg(
+      `UPDATE school_subscriptions SET status = $1, updated_at = CURRENT_TIMESTAMP WHERE school_id = $2 AND status = 'ACTIVE'`,
+      [status, schoolId]
+    ).catch(() => {});
     db.prepare(`
       UPDATE school_subscriptions SET status = ?, updated_at = CURRENT_TIMESTAMP
       WHERE school_id = ? AND status = 'ACTIVE'
@@ -571,7 +584,7 @@ adminRouter.delete('/schools/:schoolId', requireAuth, requireSuperAdmin, async (
       });
     } catch (err: any) {
       console.error('[Archive School Error]', err);
-      return res.status(500).json({ error: 'ARCHIVE_FAILED', message: err.message });
+      return res.status(500).json({ error: 'ARCHIVE_FAILED', message: safeClientError(err) });
     }
   }
 
@@ -594,6 +607,17 @@ adminRouter.delete('/schools/:schoolId', requireAuth, requireSuperAdmin, async (
 
         // 3. Child tables to delete safely using indexed numeric savepoints
         const tenantTables = [
+          'school_announcements',
+          'teacher_remarks',
+          'behaviour_records',
+          'attendance_publications',
+          'attendance_records',
+          'report_cards',
+          'score_correction_logs',
+          'student_scores',
+          'examinations',
+          'subjects',
+          'school_academic_settings',
           'receipts',
           'payments',
           'payment_receipts',
@@ -673,6 +697,18 @@ adminRouter.delete('/schools/:schoolId', requireAuth, requireSuperAdmin, async (
       const localUsers = cacheDb.prepare('SELECT user_id FROM user_roles WHERE school_id = ?').all(schoolId) as any[];
 
       const localTables = [
+        'school_announcements',
+        'teacher_remarks',
+        'behaviour_records',
+        'attendance_publications',
+        'attendance_records',
+        'report_cards',
+        'score_correction_logs',
+        'student_scores',
+        'examinations',
+        'subjects',
+        'school_academic_settings',
+        'receipts',
         'payment_receipts',
         'payments',
         'invoice_items',
@@ -828,7 +864,7 @@ adminRouter.delete('/users/:userId', requireAuth, requireSuperAdmin, async (req:
   } catch (err: any) {
     return res.status(500).json({
       error: 'DELETE_FAILED',
-      message: 'Failed to delete user account: ' + err.message,
+      message: safeClientError(err, 'Failed to delete user account.'),
     });
   }
 });
@@ -960,7 +996,7 @@ adminRouter.post('/plans', requireAuth, requireSuperAdmin, (req: AuthenticatedRe
 
     return res.status(201).json({ success: true, message: 'Plan created successfully.', planId: id });
   } catch (err: any) {
-    return res.status(500).json({ error: 'CREATE_PLAN_FAILED', message: err.message });
+    return res.status(500).json({ error: 'CREATE_PLAN_FAILED', message: safeClientError(err) });
   }
 });
 
@@ -1178,7 +1214,7 @@ adminRouter.post('/partners', requireAuth, requireSuperAdmin, (req: Authenticate
 
     return res.status(201).json({ success: true, message: 'Partner added successfully.', partnerId: id });
   } catch (err: any) {
-    return res.status(500).json({ error: 'CREATE_PARTNER_FAILED', message: err.message });
+    return res.status(500).json({ error: 'CREATE_PARTNER_FAILED', message: safeClientError(err) });
   }
 });
 
@@ -1304,7 +1340,7 @@ adminRouter.get('/users', requireAuth, requireSuperAdmin, async (_req: Authentic
 
     return res.json({ success: true, users });
   } catch (err: any) {
-    return res.status(500).json({ error: 'FETCH_FAILED', message: err.message });
+    return res.status(500).json({ error: 'FETCH_FAILED', message: safeClientError(err) });
   }
 });
 
@@ -1341,35 +1377,84 @@ adminRouter.get('/audit-logs', requireAuth, requireSuperAdmin, (req: Authenticat
 // 8. SCHOOL SUPPORT IMPERSONATION (SUPER ADMIN ONLY - EXPLICIT & AUDITED)
 // ==============================================================================
 
-adminRouter.post('/impersonate', requireAuth, requireSuperAdmin, (req: AuthenticatedRequest, res) => {
+adminRouter.post('/impersonate', requireAuth, requireSuperAdmin, async (req: AuthenticatedRequest, res) => {
   const { schoolId, userId } = req.body;
 
   if (!schoolId) {
     return res.status(400).json({ error: 'MISSING_PARAM', message: 'schoolId is required for support impersonation' });
   }
 
-  const school = db.prepare('SELECT id, name, slug, status FROM schools WHERE id = ?').get(schoolId) as any;
+  let school: any = null;
+  const pgSchool = await queryPg('SELECT id, name, slug, status FROM schools WHERE id = $1', [schoolId]).catch(() => null);
+  if (pgSchool && pgSchool.rows.length > 0) {
+    school = pgSchool.rows[0];
+  } else {
+    school = db.prepare('SELECT id, name, slug, status FROM schools WHERE id = ?').get(schoolId) as any;
+  }
   if (!school) {
     return res.status(404).json({ error: 'NOT_FOUND', message: 'Target school not found' });
   }
 
-  // Find target user: specified user or primary owner/bursar of the school
+  // Find target user authoritatively (Neon PG first, fallback SQLite)
   let targetUser: any;
   if (userId) {
-    targetUser = db.prepare('SELECT * FROM users WHERE id = ?').get(userId);
+    const pgU = await queryPg(
+      `SELECT u.* FROM users u
+       JOIN user_roles ur ON ur.user_id = u.id
+       WHERE u.id = $1 AND ur.school_id = $2
+       LIMIT 1`,
+      [userId, schoolId]
+    ).catch(() => null);
+    if (pgU && pgU.rows.length > 0) {
+      targetUser = pgU.rows[0];
+    } else {
+      targetUser = db.prepare(
+        `SELECT u.* FROM users u
+         JOIN user_roles ur ON ur.user_id = u.id
+         WHERE u.id = ? AND ur.school_id = ?
+         LIMIT 1`
+      ).get(userId, schoolId);
+    }
   } else {
-    // Find school owner or administrator
-    targetUser = db.prepare(`
-      SELECT u.* FROM user_roles ur
-      JOIN users u ON ur.user_id = u.id
-      WHERE ur.school_id = ? AND ur.role_id IN ('role_school_owner', 'role_school_admin', 'role_bursar')
-      ORDER BY ur.role_id ASC
-      LIMIT 1
-    `).get(schoolId);
+    const pgU = await queryPg(
+      `SELECT u.* FROM user_roles ur
+       JOIN users u ON ur.user_id = u.id
+       WHERE ur.school_id = $1 AND ur.role_id IN ('role_school_owner', 'role_school_admin', 'role_bursar')
+         AND u.is_active = 1 AND COALESCE(u.is_platform_admin, 0) = 0
+       ORDER BY ur.role_id ASC
+       LIMIT 1`,
+      [schoolId]
+    ).catch(() => null);
+    if (pgU && pgU.rows.length > 0) {
+      targetUser = pgU.rows[0];
+    } else {
+      targetUser = db.prepare(`
+        SELECT u.* FROM user_roles ur
+        JOIN users u ON ur.user_id = u.id
+        WHERE ur.school_id = ? AND ur.role_id IN ('role_school_owner', 'role_school_admin', 'role_bursar')
+          AND u.is_active = 1 AND COALESCE(u.is_platform_admin, 0) = 0
+        ORDER BY ur.role_id ASC
+        LIMIT 1
+      `).get(schoolId);
+    }
   }
 
   if (!targetUser) {
     return res.status(404).json({ error: 'NO_TARGET_USER', message: 'No authorized staff or owner user found in target school to impersonate.' });
+  }
+
+  if (Number(targetUser.is_platform_admin) === 1) {
+    return res.status(403).json({
+      error: 'FORBIDDEN_IMPERSONATION',
+      message: 'Platform super administrator accounts cannot be impersonated.',
+    });
+  }
+
+  if (Number(targetUser.is_active) !== 1) {
+    return res.status(403).json({
+      error: 'USER_INACTIVE',
+      message: 'Cannot impersonate an inactive or suspended user account.',
+    });
   }
 
   const superAdminId = req.user!.id;
@@ -1377,7 +1462,7 @@ adminRouter.post('/impersonate', requireAuth, requireSuperAdmin, (req: Authentic
   const userAgent = (req.headers['user-agent'] as string) || '';
 
   // Create explicit short-lived (2 hour) impersonation session token
-  const impersonationToken = createImpersonationSession(targetUser.id, schoolId, superAdminId, clientIp, userAgent);
+  const impersonationToken = await createImpersonationSessionAsync(targetUser.id, schoolId, superAdminId, clientIp, userAgent);
 
   // Mandatory Audit Log
   logAudit({
@@ -1453,7 +1538,7 @@ adminRouter.post('/plans/:id/duplicate', requireAuth, requireSuperAdmin, (req: A
 
     return res.status(201).json({ success: true, message: `Plan duplicated as "${newDisplayName}".`, planId: newId });
   } catch (err: any) {
-    return res.status(500).json({ error: 'DUPLICATE_FAILED', message: err.message });
+    return res.status(500).json({ error: 'DUPLICATE_FAILED', message: safeClientError(err) });
   }
 });
 
@@ -1648,7 +1733,7 @@ adminRouter.post('/discounts', requireAuth, requireSuperAdmin, (req: Authenticat
 
     return res.status(201).json({ success: true, message: 'Discount promotion created.', discountId: id, code: promoCode });
   } catch (err: any) {
-    return res.status(500).json({ error: 'CREATE_DISCOUNT_FAILED', message: err.message });
+    return res.status(500).json({ error: 'CREATE_DISCOUNT_FAILED', message: safeClientError(err) });
   }
 });
 
@@ -1768,11 +1853,15 @@ adminRouter.get('/platform-payments', requireAuth, requireSuperAdmin, (req: Auth
 });
 
 // POST /admin/platform-payments/:id/approve (Approve manual bank transfer)
-adminRouter.post('/platform-payments/:id/approve', requireAuth, requireSuperAdmin, (req: AuthenticatedRequest, res) => {
+adminRouter.post('/platform-payments/:id/approve', requireAuth, requireSuperAdmin, async (req: AuthenticatedRequest, res) => {
   const { id } = req.params;
   const { notes } = req.body;
 
-  const payment = db.prepare('SELECT * FROM platform_payments WHERE id = ?').get(id) as any;
+  let payment = db.prepare('SELECT * FROM platform_payments WHERE id = ?').get(id) as any;
+  if (!payment) {
+    const pgPay = await queryPg('SELECT * FROM platform_payments WHERE id = $1', [id]).catch(() => null);
+    payment = pgPay?.rows[0];
+  }
   if (!payment) {
     return res.status(404).json({ error: 'NOT_FOUND', message: 'Platform payment record not found' });
   }
@@ -1799,7 +1888,11 @@ adminRouter.post('/platform-payments/:id/approve', requireAuth, requireSuperAdmi
   else endDateObj.setMonth(endDateObj.getMonth() + (4 * count));
   const newEndDateStr = endDateObj.toISOString().slice(0, 10);
 
-  // 1. Mark payment SUCCESS
+  // 1. Mark payment SUCCESS in PG + SQLite
+  await queryPg(
+    `UPDATE platform_payments SET status = 'SUCCESS', paid_at = $1, notes = COALESCE($2, notes), updated_at = CURRENT_TIMESTAMP WHERE id = $3`,
+    [nowIso, notes || 'Approved by Super Admin', id]
+  ).catch((err: any) => console.warn('[Approve Platform Payment PG Warning]', err?.message));
   db.prepare(`
     UPDATE platform_payments SET
       status = 'SUCCESS',
@@ -1811,6 +1904,10 @@ adminRouter.post('/platform-payments/:id/approve', requireAuth, requireSuperAdmi
 
   // 2. Activate school subscription
   if (payment.subscription_id) {
+    await queryPg(
+      `UPDATE school_subscriptions SET status = 'ACTIVE', amount_paid = $1, end_date = $2, expiry_date = $3, renewal_date = $4, updated_at = CURRENT_TIMESTAMP WHERE id = $5`,
+      [payment.amount, newEndDateStr, newEndDateStr, newEndDateStr, payment.subscription_id]
+    ).catch(() => {});
     db.prepare(`
       UPDATE school_subscriptions SET
         status = 'ACTIVE',
@@ -1823,6 +1920,14 @@ adminRouter.post('/platform-payments/:id/approve', requireAuth, requireSuperAdmi
     `).run(payment.amount, newEndDateStr, newEndDateStr, newEndDateStr, payment.subscription_id);
   } else {
     const subId = `sub_${crypto.randomBytes(6).toString('hex')}`;
+    await queryPg(
+      `INSERT INTO school_subscriptions (
+        id, school_id, plan_id, status, start_date, end_date, amount_paid,
+        standard_plan_price, final_amount, currency, expiry_date, renewal_date, provider, notes
+      ) VALUES ($1, $2, $3, 'ACTIVE', $4, $5, $6, $7, $8, 'NGN', $9, $10, 'BANK_TRANSFER', 'Approved by Super Admin')
+      ON CONFLICT (id) DO NOTHING`,
+      [subId, payment.school_id, payment.plan_id, todayStr, newEndDateStr, payment.amount, plan.price, payment.amount, newEndDateStr, newEndDateStr]
+    ).catch(() => {});
     db.prepare(`
       INSERT INTO school_subscriptions (
         id, school_id, plan_id, status, start_date, end_date, amount_paid,
@@ -1835,6 +1940,10 @@ adminRouter.post('/platform-payments/:id/approve', requireAuth, requireSuperAdmi
   }
 
   // 3. Update school status to ACTIVE
+  await queryPg(
+    `UPDATE schools SET status = 'ACTIVE', current_plan_id = $1, subscription_end_date = $2, updated_at = CURRENT_TIMESTAMP WHERE id = $3`,
+    [payment.plan_id, newEndDateStr, payment.school_id]
+  ).catch(() => {});
   db.prepare(`
     UPDATE schools SET
       status = 'ACTIVE',
@@ -1845,6 +1954,10 @@ adminRouter.post('/platform-payments/:id/approve', requireAuth, requireSuperAdmi
   `).run(payment.plan_id, newEndDateStr, payment.school_id);
 
   // 4. Mark associated platform invoice as PAID
+  await queryPg(
+    `UPDATE platform_invoices SET payment_status = 'PAID', paid_at = $1, payment_method = 'BANK_TRANSFER', updated_at = CURRENT_TIMESTAMP WHERE school_id = $2 AND payment_status = 'PENDING'`,
+    [nowIso, payment.school_id]
+  ).catch(() => {});
   db.prepare(`
     UPDATE platform_invoices SET
       payment_status = 'PAID',
@@ -1878,22 +1991,31 @@ adminRouter.post('/platform-payments/:id/approve', requireAuth, requireSuperAdmi
 });
 
 // POST /admin/platform-payments/:id/reject (Reject manual bank transfer)
-adminRouter.post('/platform-payments/:id/reject', requireAuth, requireSuperAdmin, (req: AuthenticatedRequest, res) => {
+adminRouter.post('/platform-payments/:id/reject', requireAuth, requireSuperAdmin, async (req: AuthenticatedRequest, res) => {
   const { id } = req.params;
   const { reason } = req.body;
 
-  const payment = db.prepare('SELECT * FROM platform_payments WHERE id = ?').get(id) as any;
+  let payment = db.prepare('SELECT * FROM platform_payments WHERE id = ?').get(id) as any;
+  if (!payment) {
+    const pgPay = await queryPg('SELECT * FROM platform_payments WHERE id = $1', [id]).catch(() => null);
+    payment = pgPay?.rows[0];
+  }
   if (!payment) {
     return res.status(404).json({ error: 'NOT_FOUND', message: 'Platform payment record not found' });
   }
 
+  const notesVal = reason ? `Rejected by Super Admin: ${reason}` : 'Rejected by Super Admin';
+  await queryPg(
+    `UPDATE platform_payments SET status = 'FAILED', notes = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2`,
+    [notesVal, id]
+  ).catch(() => {});
   db.prepare(`
     UPDATE platform_payments SET
       status = 'FAILED',
       notes = ?,
       updated_at = CURRENT_TIMESTAMP
     WHERE id = ?
-  `).run(reason ? `Rejected by Super Admin: ${reason}` : 'Rejected by Super Admin', id);
+  `).run(notesVal, id);
 
   logAudit({
     actorId: req.user!.id,
@@ -2075,7 +2197,7 @@ adminRouter.get('/usage', requireAuth, requireSuperAdmin, (_req: AuthenticatedRe
     console.error('[Usage Metrics Error]', error);
     return res.status(500).json({
       error: 'USAGE_METRICS_ERROR',
-      message: 'Failed to retrieve platform usage metrics: ' + (error?.message || 'Unknown error'),
+      message: safeClientError(error, 'Failed to retrieve platform usage metrics.'),
     });
   }
 });

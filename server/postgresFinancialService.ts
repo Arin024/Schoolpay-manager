@@ -309,17 +309,18 @@ export async function recordPaymentPg(
       };
     }
 
-    // 3. Idempotency Check on payment_reference within tenant
+    // 3. Idempotency Check on payment_reference / provider_reference within tenant
     const existingRefRes = await client.query(
-      `SELECT id, amount, status FROM payments WHERE school_id = $1 AND payment_reference = $2`,
-      [params.schoolId, params.paymentReference]
+      `SELECT id, amount, status FROM payments
+       WHERE school_id = $1 AND (payment_reference = $2 OR ($3::text IS NOT NULL AND provider_reference = $3))`,
+      [params.schoolId, params.paymentReference, params.providerReference || null]
     );
 
     if (existingRefRes.rows.length > 0) {
       if (shouldManageTx) await client.query('ROLLBACK');
       return {
         success: false,
-        error: `A payment with reference "${params.paymentReference}" has already been processed`,
+        error: `A payment with reference "${params.providerReference || params.paymentReference}" has already been processed`,
         code: 'DUPLICATE_PAYMENT_REFERENCE',
       };
     }

@@ -1,7 +1,7 @@
 import express from 'express';
 import fs from 'node:fs';
 import path from 'node:path';
-import { db } from './db.ts';
+import { db, queryPg } from './db.ts';
 import {
   requireAuth,
   requireTenant,
@@ -22,8 +22,10 @@ import {
 } from './migrationService.ts';
 import { logAudit } from './audit.ts';
 import { isCloudStorageConfigured } from './cloudStorageBackup.ts';
+import { wrapRouterAsync, safeClientError } from './securityUtils.ts';
 
 export const dataProtectionRouter = express.Router();
+wrapRouterAsync(dataProtectionRouter);
 
 // ==============================================================================
 // 1. PLATFORM SUPER_ADMIN DATA PROTECTION & BACKUP MANAGEMENT
@@ -52,7 +54,7 @@ dataProtectionRouter.get(
         },
       });
     } catch (err: any) {
-      return res.status(500).json({ error: 'STATS_ERROR', message: err.message });
+      return res.status(500).json({ error: 'STATS_ERROR', message: safeClientError(err) });
     }
   }
 );
@@ -67,7 +69,7 @@ dataProtectionRouter.get(
       const backups = listAllBackups();
       return res.json({ success: true, backups });
     } catch (err: any) {
-      return res.status(500).json({ error: 'BACKUPS_ERROR', message: err.message });
+      return res.status(500).json({ error: 'BACKUPS_ERROR', message: safeClientError(err) });
     }
   }
 );
@@ -86,7 +88,7 @@ dataProtectionRouter.post(
         message: `Database backup created successfully: ${backup.filename} (${(backup.size_bytes / 1024).toFixed(1)} KB)`,
       });
     } catch (err: any) {
-      return res.status(500).json({ error: 'BACKUP_FAILED', message: err.message });
+      return res.status(500).json({ error: 'BACKUP_FAILED', message: safeClientError(err) });
     }
   }
 );
@@ -102,7 +104,7 @@ dataProtectionRouter.post(
       const result = verifyBackup(id, req.user!.email);
       return res.json({ ...result });
     } catch (err: any) {
-      return res.status(500).json({ error: 'VERIFY_FAILED', message: err.message });
+      return res.status(500).json({ error: 'VERIFY_FAILED', message: safeClientError(err) });
     }
   }
 );
@@ -118,7 +120,7 @@ dataProtectionRouter.post(
       const result = runIsolatedRestorationTest(id, req.user!.email);
       return res.json({ ...result });
     } catch (err: any) {
-      return res.status(500).json({ error: 'TEST_RESTORE_FAILED', message: err.message });
+      return res.status(500).json({ error: 'TEST_RESTORE_FAILED', message: safeClientError(err) });
     }
   }
 );
@@ -183,7 +185,7 @@ dataProtectionRouter.post(
         preSafetyBackupId: preSafetyBackup.id,
       });
     } catch (err: any) {
-      return res.status(500).json({ error: 'RESTORE_FAILED', message: err.message });
+      return res.status(500).json({ error: 'RESTORE_FAILED', message: safeClientError(err) });
     }
   }
 );
@@ -210,8 +212,9 @@ dataProtectionRouter.get(
       metadata: { filename: backup.filename, size: backup.size_bytes },
     });
 
+    const safeFilename = path.basename(String(backup.filename || 'backup.db')).replace(/[^a-zA-Z0-9._-]/g, '_');
     res.setHeader('Content-Type', 'application/octet-stream');
-    res.setHeader('Content-Disposition', `attachment; filename="${backup.filename}"`);
+    res.setHeader('Content-Disposition', `attachment; filename="${safeFilename}"`);
     const stream = fs.createReadStream(backup.filepath);
     return stream.pipe(res);
   }
@@ -227,7 +230,7 @@ dataProtectionRouter.get(
       const inventory = getDatabaseInventory();
       return res.json({ success: true, inventory });
     } catch (err: any) {
-      return res.status(500).json({ error: 'INVENTORY_ERROR', message: err.message });
+      return res.status(500).json({ error: 'INVENTORY_ERROR', message: safeClientError(err) });
     }
   }
 );
@@ -242,7 +245,7 @@ dataProtectionRouter.get(
       const migrations = getAppliedMigrations();
       return res.json({ success: true, migrations });
     } catch (err: any) {
-      return res.status(500).json({ error: 'MIGRATIONS_ERROR', message: err.message });
+      return res.status(500).json({ error: 'MIGRATIONS_ERROR', message: safeClientError(err) });
     }
   }
 );
@@ -258,7 +261,7 @@ dataProtectionRouter.get(
   requireTenant,
   requireRole(['SCHOOL_OWNER', 'SCHOOL_ADMIN', 'BURSAR']),
   (req: AuthenticatedRequest, res) => {
-    const schoolId = req.activeSchoolId!;
+    const schoolId = req.targetSchoolId || req.activeSchoolId!;
 
     try {
       // 1. Soft-deleted students
@@ -310,7 +313,7 @@ dataProtectionRouter.get(
         },
       });
     } catch (err: any) {
-      return res.status(500).json({ error: 'RECYCLE_BIN_ERROR', message: err.message });
+      return res.status(500).json({ error: 'RECYCLE_BIN_ERROR', message: safeClientError(err) });
     }
   }
 );
@@ -321,8 +324,8 @@ dataProtectionRouter.post(
   requireAuth,
   requireTenant,
   requireRole(['SCHOOL_OWNER', 'SCHOOL_ADMIN']),
-  (req: AuthenticatedRequest, res) => {
-    const schoolId = req.activeSchoolId!;
+  async (req: AuthenticatedRequest, res) => {
+    const schoolId = req.targetSchoolId || req.activeSchoolId!;
     const { entityType, entityId } = req.body;
 
     if (!entityType || !entityId) {
@@ -358,16 +361,24 @@ dataProtectionRouter.post(
       `).get(schoolId, record.class_name);
       if (!activeClass) {
         // If class was deleted, reset class assignment to unassigned to avoid foreign key corruption
-        db.prepare(`UPDATE students SET class_name = 'Unassigned', class_arm_name = '' WHERE id = ?`).run(entityId);
+        db.prepare(`UPDATE students SET class_name = 'Unassigned', class_arm_name = '' WHERE id = ? AND school_id = ?`).run(entityId, schoolId);
+        await queryPg(`UPDATE students SET class_name = 'Unassigned', class_arm_name = '' WHERE id = $1 AND school_id = $2`, [entityId, schoolId]).catch(() => {});
       }
     }
 
-    // Perform restoration
+    // Perform restoration in SQLite + Neon PG
     db.prepare(`
       UPDATE "${tableName}"
       SET is_deleted = 0, deleted_at = NULL, deleted_by = NULL, deletion_reason = NULL, updated_at = CURRENT_TIMESTAMP
       WHERE id = ? AND school_id = ?
     `).run(entityId, schoolId);
+
+    await queryPg(
+      `UPDATE ${tableName}
+       SET is_deleted = 0, deleted_at = NULL, deleted_by = NULL, deletion_reason = NULL, updated_at = CURRENT_TIMESTAMP
+       WHERE id = $1 AND school_id = $2`,
+      [entityId, schoolId]
+    ).catch((err: any) => console.warn('[Recycle Restore PG Sync Warning]', err?.message));
 
     logAudit({
       actorId: req.user!.id,
@@ -392,8 +403,8 @@ dataProtectionRouter.post(
   requireAuth,
   requireTenant,
   requireRole(['SCHOOL_OWNER']),
-  (req: AuthenticatedRequest, res) => {
-    const schoolId = req.activeSchoolId!;
+  async (req: AuthenticatedRequest, res) => {
+    const schoolId = req.targetSchoolId || req.activeSchoolId!;
     const { entityType, entityId, confirmation } = req.body;
 
     if (confirmation !== 'CONFIRM_PERMANENT_PURGE') {
@@ -439,8 +450,11 @@ dataProtectionRouter.post(
       }
     }
 
-    // Purge record
+    // Purge record in SQLite + Neon PG
     db.prepare(`DELETE FROM "${tableName}" WHERE id = ? AND school_id = ?`).run(entityId, schoolId);
+    await queryPg(`DELETE FROM ${tableName} WHERE id = $1 AND school_id = $2`, [entityId, schoolId]).catch(
+      (err: any) => console.warn('[Recycle Purge PG Sync Warning]', err?.message)
+    );
 
     logAudit({
       actorId: req.user!.id,

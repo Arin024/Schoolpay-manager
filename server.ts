@@ -43,14 +43,40 @@ async function startServer() {
     process.exit(1);
   }
 
-  // Robust CORS Middleware for multi-domain support (bursariq.com.ng, subdomains, cloud run, localhost)
+  app.disable('x-powered-by');
+
+  // Strict CORS Allowlist Middleware for multi-domain support (bursariq.com.ng, subdomains, cloud run, localhost)
+  const extraAllowedOrigins = (process.env.ALLOWED_ORIGINS || '')
+    .split(',')
+    .map((o) => o.trim().toLowerCase())
+    .filter(Boolean);
+
+  function isOriginAllowed(origin: string): boolean {
+    try {
+      const url = new URL(origin);
+      const hostname = url.hostname.toLowerCase();
+      if (extraAllowedOrigins.includes(origin.toLowerCase())) return true;
+      if (hostname === 'bursariq.com.ng' || hostname.endsWith('.bursariq.com.ng')) return url.protocol === 'https:';
+      if (hostname === 'localhost' || hostname === '127.0.0.1') return true;
+      if (hostname.endsWith('.run.app') || hostname.endsWith('.aistudio.google.com') || hostname === 'aistudio.google.com') {
+        return url.protocol === 'https:';
+      }
+      return false;
+    } catch {
+      return false;
+    }
+  }
+
   app.use((req, res, next) => {
     const origin = req.headers.origin;
     if (origin) {
-      res.setHeader('Access-Control-Allow-Origin', origin);
-      res.setHeader('Access-Control-Allow-Credentials', 'true');
-    } else {
-      res.setHeader('Access-Control-Allow-Origin', '*');
+      if (isOriginAllowed(origin)) {
+        res.setHeader('Access-Control-Allow-Origin', origin);
+        res.setHeader('Access-Control-Allow-Credentials', 'true');
+        res.setHeader('Vary', 'Origin');
+      } else if (req.method === 'OPTIONS') {
+        return res.status(403).json({ error: 'CORS_ORIGIN_FORBIDDEN', message: 'Origin is not permitted.' });
+      }
     }
     res.setHeader(
       'Access-Control-Allow-Methods',
@@ -101,30 +127,64 @@ async function startServer() {
     next();
   });
 
-  // Basic in-memory rate limiting map (IP -> timestamps)
+  // In-memory rate limiting map (IP:bucket -> timestamps) with bounded cleanup
   const rateLimitMap = new Map<string, number[]>();
-  app.use((req, res, next) => {
-    // Custom security headers
-    res.setHeader('X-Content-Type-Options', 'nosniff');
-    res.setHeader('X-XSS-Protection', '1; mode=block');
-    res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+  const rateLimitCleanup = setInterval(() => {
+    const cutoff = Date.now() - 120 * 1000;
+    for (const [key, timestamps] of rateLimitMap.entries()) {
+      const active = timestamps.filter((ts) => ts > cutoff);
+      if (active.length === 0) rateLimitMap.delete(key);
+      else rateLimitMap.set(key, active);
+    }
+  }, 5 * 60 * 1000);
+  if (rateLimitCleanup.unref) rateLimitCleanup.unref();
 
-    // Simple rate-limiting for auth routes (100 reqs / min)
-    if (req.path.startsWith('/api/v1/auth')) {
-      const clientIp = req.ip || (req.headers['x-forwarded-for'] as string) || '127.0.0.1';
+  app.use((req, res, next) => {
+    // Hardened HTTP security headers (iframe-compatible for AI Studio preview)
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+    res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
+    res.setHeader(
+      'Content-Security-Policy',
+      "default-src 'self'; script-src 'self' 'unsafe-inline' https://cdn.tailwindcss.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com data:; img-src 'self' data: blob: https:; connect-src 'self' https:; frame-src 'self' blob:; object-src 'none'; base-uri 'self'"
+    );
+    if (process.env.NODE_ENV === 'production' || req.secure || req.headers['x-forwarded-proto'] === 'https') {
+      res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
+    }
+
+    // Rate-limiting across all auth & recovery mount aliases
+    const lowerPath = req.path.toLowerCase();
+    const isAuthRoute =
+      lowerPath.startsWith('/api/v1/auth') ||
+      lowerPath.startsWith('/api/auth') ||
+      lowerPath.startsWith('/v1/auth') ||
+      lowerPath.startsWith('/auth');
+    const isSensitiveAuthAction =
+      isAuthRoute &&
+      (lowerPath.includes('/login') ||
+        lowerPath.includes('/forgot-password') ||
+        lowerPath.includes('/reset-password') ||
+        lowerPath.includes('/recovery/') ||
+        lowerPath.includes('/register'));
+
+    if (isAuthRoute) {
+      const clientIp = (req.ip || (req.headers['x-forwarded-for'] as string) || '127.0.0.1').split(',')[0].trim();
+      const bucketKey = `${clientIp}:${isSensitiveAuthAction ? 'strict' : 'auth'}`;
+      const limit = isSensitiveAuthAction ? 25 : 100;
       const now = Date.now();
       const windowMs = 60 * 1000;
-      const history = rateLimitMap.get(clientIp) || [];
+      const history = rateLimitMap.get(bucketKey) || [];
       const recent = history.filter((ts) => now - ts < windowMs);
 
-      if (recent.length >= 100) {
+      if (recent.length >= limit) {
         return res.status(429).json({
           error: 'RATE_LIMIT_EXCEEDED',
-          message: 'Too many requests. Please try again after 60 seconds.',
+          message: 'Too many authentication or recovery requests. Please wait 60 seconds and try again.',
         });
       }
       recent.push(now);
-      rateLimitMap.set(clientIp, recent);
+      if (rateLimitMap.size > 5000) rateLimitMap.clear();
+      rateLimitMap.set(bucketKey, recent);
     }
 
     next();
@@ -159,12 +219,20 @@ async function startServer() {
   }, 15 * 60 * 1000);
   if (memMonitorInterval.unref) memMonitorInterval.unref();
 
-  // Health check endpoint with lightweight memory telemetry (zero credentials/secrets exposed)
+  // Health check endpoint with sanitized status telemetry (zero DB usernames/credentials exposed)
   app.get(['/api/health', '/health'], async (_req, res) => {
     if (!isPgConnected()) {
       await ensurePgConnected();
     }
-    const mem = process.memoryUsage();
+    const rawPgStatus = getPgStatus();
+    const safePgStatus = rawPgStatus
+      ? {
+          status: rawPgStatus.status,
+          connectedAt: rawPgStatus.connectedAt,
+          reconnectedAt: rawPgStatus.reconnectedAt,
+          endpoint: rawPgStatus.endpoint,
+        }
+      : null;
     res.json({
       status: 'healthy',
       service: 'BursarIQ API',
@@ -173,13 +241,7 @@ async function startServer() {
       database: isPgConnected() ? 'Neon PostgreSQL (Durable Serverless)' : 'SQLite (Local Engine)',
       neonConnected: isPgConnected(),
       neonEndpoint: getPgEndpointHostPrefix(),
-      neonStatus: getPgStatus(),
-      memory: {
-        rssMb: Math.round(mem.rss / 1024 / 1024),
-        heapUsedMb: Math.round(mem.heapUsed / 1024 / 1024),
-        heapTotalMb: Math.round(mem.heapTotal / 1024 / 1024),
-        externalMb: Math.round(mem.external / 1024 / 1024),
-      },
+      neonStatus: safePgStatus,
       tenantIsolation: 'ENFORCED',
       timestamp: new Date().toISOString(),
     });
@@ -210,7 +272,7 @@ async function startServer() {
     next();
   });
 
-  // Dedicated error handler for API routes: ALWAYS return JSON, NEVER leak HTML error stacks
+  // Dedicated error handler for API routes: ALWAYS return JSON, NEVER leak internal stacks or SQL errors
   app.use((err: any, req: express.Request, res: express.Response, next: express.NextFunction) => {
     if (
       req.path.startsWith('/api') ||
@@ -219,9 +281,13 @@ async function startServer() {
       req.headers.accept?.includes('application/json')
     ) {
       console.error('[API Error]', err);
-      return res.status(err.status || 500).json({
+      const status = typeof err.status === 'number' && err.status >= 400 && err.status < 600 ? err.status : 500;
+      const clientMessage = status >= 500
+        ? 'An unexpected internal server error occurred. Please try again.'
+        : (err.message || 'Invalid request.');
+      return res.status(status).json({
         error: err.code || 'SERVER_ERROR',
-        message: err.message || 'An unexpected internal server error occurred.',
+        message: clientMessage,
       });
     }
     next(err);

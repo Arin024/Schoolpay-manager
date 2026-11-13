@@ -14,8 +14,10 @@ import {
   type AuthenticatedRequest,
 } from './tenantMiddleware.ts';
 import { logAudit } from './audit.ts';
+import { wrapRouterAsync } from './securityUtils.ts';
 
 export const recoveryRouter = express.Router();
+wrapRouterAsync(recoveryRouter);
 
 // Helper: Mask email address for privacy and anti-enumeration
 function maskEmail(email: string): string {
@@ -40,10 +42,22 @@ function normalizeAnswer(ans: string): string {
   return (ans || '').trim().toLowerCase().replace(/\s+/g, ' ');
 }
 
-// Rate limiting map for recovery endpoints: IP -> timestamps
+// Bounded rate limiting map for recovery endpoints: IP -> timestamps
 const recoveryRateLimit = new Map<string, number[]>();
+const MAX_RATE_LIMIT_KEYS = 5000;
+
 function checkRateLimit(ip: string, maxReqs = 15, windowMs = 60 * 1000): boolean {
   const now = Date.now();
+  if (recoveryRateLimit.size > MAX_RATE_LIMIT_KEYS) {
+    for (const [k, ts] of recoveryRateLimit.entries()) {
+      const valid = ts.filter((t) => now - t < windowMs);
+      if (valid.length === 0) recoveryRateLimit.delete(k);
+      else recoveryRateLimit.set(k, valid);
+    }
+    if (recoveryRateLimit.size > MAX_RATE_LIMIT_KEYS) {
+      recoveryRateLimit.clear();
+    }
+  }
   const history = recoveryRateLimit.get(ip) || [];
   const recent = history.filter((t) => now - t < windowMs);
   if (recent.length >= maxReqs) return false;
@@ -52,12 +66,16 @@ function checkRateLimit(ip: string, maxReqs = 15, windowMs = 60 * 1000): boolean
   return true;
 }
 
+function getClientIp(req: express.Request): string {
+  return (req.ip || req.socket?.remoteAddress || '127.0.0.1') as string;
+}
+
 // ==============================================================================
-// 1. PHASE 2 & 5: IDENTIFY ACCOUNT & DISCOVER AVAILABLE RECOVERY METHODS
+// 1. IDENTIFY ACCOUNT & DISCOVER AVAILABLE RECOVERY METHODS
 // ==============================================================================
 recoveryRouter.post('/recovery/identify', async (req, res) => {
-  const clientIp = (req.ip || req.headers['x-forwarded-for'] || '127.0.0.1') as string;
-  if (!checkRateLimit(clientIp, 20)) {
+  const clientIp = getClientIp(req);
+  if (!checkRateLimit(`identify:${clientIp}`, 20)) {
     return res.status(429).json({
       error: 'RATE_LIMIT_EXCEEDED',
       message: 'Too many recovery requests. Please wait a moment and try again.',
@@ -89,7 +107,7 @@ recoveryRouter.post('/recovery/identify', async (req, res) => {
   if (pgUser && pgUser.rows.length > 0) {
     user = pgUser.rows[0];
   } else {
-    // If not found in users.email, check if identifier is an official school email (schools.email)
+    // Check if identifier is an official school email (schools.email)
     const schoolOwnerPg = await queryPg(`
       SELECT u.id, u.email, u.phone, u.full_name, u.is_platform_admin, u.is_active,
              u.security_question_1, u.security_question_2,
@@ -157,11 +175,12 @@ recoveryRouter.post('/recovery/identify', async (req, res) => {
         message: `This account is temporarily locked for security due to repeated failed recovery attempts. Please try again in ${minutesLeft} minute(s) or contact your school administrator.`,
       });
     } else {
-      // Lock has expired, reset attempts
       await queryPg('UPDATE users SET recovery_attempts = 0, recovery_locked_until = NULL WHERE id = $1', [user.id]);
-      cacheDb.prepare(`
-        UPDATE users SET recovery_attempts = 0, recovery_locked_until = NULL WHERE id = ?
-      `).run(user.id);
+      try {
+        cacheDb.prepare(`
+          UPDATE users SET recovery_attempts = 0, recovery_locked_until = NULL WHERE id = ?
+        `).run(user.id);
+      } catch {}
     }
   }
 
@@ -192,7 +211,6 @@ recoveryRouter.post('/recovery/identify', async (req, res) => {
     `).run(challengeId, user.id, user.email, expiresAt);
   } catch {}
 
-  // Security questions cannot be the sole recovery method for platform SUPER_ADMIN
   const hasSecurityQuestions =
     Boolean(user.security_question_1 && user.security_question_2) &&
     user.is_platform_admin !== 1;
@@ -211,7 +229,6 @@ recoveryRouter.post('/recovery/identify', async (req, res) => {
       backupCodes: hasBackupCodes,
       adminAssisted: user.is_platform_admin !== 1,
     },
-    // Only return the question prompts, NEVER the stored answer hashes!
     questions: hasSecurityQuestions
       ? [user.security_question_1, user.security_question_2]
       : null,
@@ -220,9 +237,17 @@ recoveryRouter.post('/recovery/identify', async (req, res) => {
 });
 
 // ==============================================================================
-// 2. PHASE 3 - METHOD 2: SECURITY-QUESTION-ASSISTED VERIFICATION
+// 2. SECURITY-QUESTION-ASSISTED VERIFICATION (Neon PG + cacheDb synced)
 // ==============================================================================
-recoveryRouter.post('/recovery/verify-questions', (req, res) => {
+recoveryRouter.post('/recovery/verify-questions', async (req, res) => {
+  const clientIp = getClientIp(req);
+  if (!checkRateLimit(`questions:${clientIp}`, 15)) {
+    return res.status(429).json({
+      error: 'RATE_LIMIT_EXCEEDED',
+      message: 'Too many verification attempts. Please wait a moment and try again.',
+    });
+  }
+
   const { challengeId, answer1, answer2 } = req.body;
 
   if (!challengeId || !answer1 || !answer2) {
@@ -232,10 +257,19 @@ recoveryRouter.post('/recovery/verify-questions', (req, res) => {
     });
   }
 
-  const challenge = db.prepare(`
+  let challenge: any = null;
+  const pgChallenge = await queryPg(`
     SELECT * FROM recovery_challenges
-    WHERE id = ? AND expires_at > datetime('now') AND verified_at IS NULL
-  `).get(challengeId) as any;
+    WHERE id = $1 AND expires_at > CURRENT_TIMESTAMP AND verified_at IS NULL
+  `, [challengeId]);
+  if (pgChallenge && pgChallenge.rows.length > 0) {
+    challenge = pgChallenge.rows[0];
+  } else {
+    challenge = db.prepare(`
+      SELECT * FROM recovery_challenges
+      WHERE id = ? AND expires_at > datetime('now') AND verified_at IS NULL
+    `).get(challengeId) as any;
+  }
 
   if (!challenge) {
     return res.status(400).json({
@@ -244,19 +278,42 @@ recoveryRouter.post('/recovery/verify-questions', (req, res) => {
     });
   }
 
-  const user = db.prepare(`
+  let user: any = null;
+  const pgUser = await queryPg(`
     SELECT id, email, is_platform_admin,
            security_question_1, security_answer_hash_1, security_answer_salt_1,
            security_question_2, security_answer_hash_2, security_answer_salt_2,
-           recovery_attempts
-    FROM users WHERE id = ?
-  `).get(challenge.user_id) as any;
+           recovery_attempts, recovery_locked_until
+    FROM users WHERE id = $1
+  `, [challenge.user_id]);
+  if (pgUser && pgUser.rows.length > 0) {
+    user = pgUser.rows[0];
+  } else {
+    user = db.prepare(`
+      SELECT id, email, is_platform_admin,
+             security_question_1, security_answer_hash_1, security_answer_salt_1,
+             security_question_2, security_answer_hash_2, security_answer_salt_2,
+             recovery_attempts, recovery_locked_until
+      FROM users WHERE id = ?
+    `).get(challenge.user_id) as any;
+  }
 
   if (!user || user.is_platform_admin === 1) {
     return res.status(403).json({
       error: 'UNAUTHORIZED_METHOD',
       message: 'Security questions are not available for this account type. Please use verified email recovery.',
     });
+  }
+
+  if (user.recovery_locked_until) {
+    const lockExpiry = new Date(user.recovery_locked_until).getTime();
+    if (Date.now() < lockExpiry) {
+      const minutesLeft = Math.ceil((lockExpiry - Date.now()) / (60 * 1000));
+      return res.status(429).json({
+        error: 'ACCOUNT_LOCKED',
+        message: `Account recovery is temporarily locked. Try again in ${minutesLeft} minute(s).`,
+      });
+    }
   }
 
   if (!user.security_answer_hash_1 || !user.security_answer_hash_2) {
@@ -266,7 +323,6 @@ recoveryRouter.post('/recovery/verify-questions', (req, res) => {
     });
   }
 
-  // Verify answers using timing-safe comparison
   const norm1 = normalizeAnswer(answer1);
   const norm2 = normalizeAnswer(answer2);
 
@@ -274,7 +330,6 @@ recoveryRouter.post('/recovery/verify-questions', (req, res) => {
   const match2 = verifyPassword(norm2, user.security_answer_hash_2, user.security_answer_salt_2);
 
   if (!match1 || !match2) {
-    // Record failed attempt
     const newAttempts = (user.recovery_attempts || 0) + 1;
     let lockUntil: string | null = null;
     let remaining = 3 - newAttempts;
@@ -284,19 +339,24 @@ recoveryRouter.post('/recovery/verify-questions', (req, res) => {
       remaining = 0;
     }
 
-    db.prepare(`
-      UPDATE users SET recovery_attempts = ?, recovery_locked_until = ? WHERE id = ?
-    `).run(newAttempts, lockUntil, user.id);
+    await queryPg(`
+      UPDATE users SET recovery_attempts = $1, recovery_locked_until = $2 WHERE id = $3
+    `, [newAttempts, lockUntil, user.id]);
+    try {
+      db.prepare(`
+        UPDATE users SET recovery_attempts = ?, recovery_locked_until = ? WHERE id = ?
+      `).run(newAttempts, lockUntil, user.id);
+    } catch {}
 
     logAudit({
       actorEmail: user.email,
       action: 'SECURITY_QUESTIONS_FAILED',
       entity: 'USER_RECOVERY',
       entityId: user.id,
-      ipAddress: (req.ip || '127.0.0.1') as string,
+      ipAddress: clientIp,
     });
 
-    if (remaining === 0) {
+    if (remaining <= 0) {
       return res.status(429).json({
         error: 'ACCOUNT_LOCKED',
         message: 'Too many incorrect answers. Account recovery has been locked for 15 minutes.',
@@ -310,32 +370,35 @@ recoveryRouter.post('/recovery/verify-questions', (req, res) => {
     });
   }
 
-  // Success: Reset attempt counters
-  db.prepare(`
-    UPDATE users SET recovery_attempts = 0, recovery_locked_until = NULL WHERE id = ?
-  `).run(user.id);
+  // Success: Reset attempt counters and mark challenge verified
+  await queryPg(`UPDATE users SET recovery_attempts = 0, recovery_locked_until = NULL WHERE id = $1`, [user.id]);
+  await queryPg(`UPDATE recovery_challenges SET verified_at = CURRENT_TIMESTAMP WHERE id = $1`, [challengeId]);
+  try {
+    db.prepare(`UPDATE users SET recovery_attempts = 0, recovery_locked_until = NULL WHERE id = ?`).run(user.id);
+    db.prepare(`UPDATE recovery_challenges SET verified_at = CURRENT_TIMESTAMP WHERE id = ?`).run(challengeId);
+  } catch {}
 
-  // Mark challenge verified
-  db.prepare(`
-    UPDATE recovery_challenges SET verified_at = CURRENT_TIMESTAMP WHERE id = ?
-  `).run(challengeId);
-
-  // Generate single-use recovery ticket (15 minutes expiry)
   const recoveryTicket = 'rck_' + crypto.randomBytes(24).toString('hex');
   const ticketId = 'pr_' + crypto.randomUUID();
   const ticketExpiresAt = new Date(Date.now() + 15 * 60 * 1000).toISOString();
 
-  db.prepare(`
+  await queryPg(`
     INSERT INTO password_resets (id, user_id, email, token, recovery_method, expires_at, verified_at, ip_address)
-    VALUES (?, ?, ?, ?, 'SECURITY_QUESTIONS', ?, CURRENT_TIMESTAMP, ?)
-  `).run(ticketId, user.id, user.email, recoveryTicket, ticketExpiresAt, (req.ip || '127.0.0.1') as string);
+    VALUES ($1, $2, $3, $4, 'SECURITY_QUESTIONS', $5, CURRENT_TIMESTAMP, $6)
+  `, [ticketId, user.id, user.email, recoveryTicket, ticketExpiresAt, clientIp]);
+  try {
+    db.prepare(`
+      INSERT INTO password_resets (id, user_id, email, token, recovery_method, expires_at, verified_at, ip_address)
+      VALUES (?, ?, ?, ?, 'SECURITY_QUESTIONS', ?, CURRENT_TIMESTAMP, ?)
+    `).run(ticketId, user.id, user.email, recoveryTicket, ticketExpiresAt, clientIp);
+  } catch {}
 
   logAudit({
     actorEmail: user.email,
     action: 'SECURITY_QUESTIONS_VERIFIED',
     entity: 'USER_RECOVERY',
     entityId: user.id,
-    ipAddress: (req.ip || '127.0.0.1') as string,
+    ipAddress: clientIp,
   });
 
   return res.json({
@@ -346,9 +409,17 @@ recoveryRouter.post('/recovery/verify-questions', (req, res) => {
 });
 
 // ==============================================================================
-// 3. PHASE 3 - METHOD 3: ONE-TIME EMERGENCY BACKUP CODE VERIFICATION
+// 3. ONE-TIME EMERGENCY BACKUP CODE VERIFICATION (Neon PG + cacheDb synced)
 // ==============================================================================
-recoveryRouter.post('/recovery/verify-code', (req, res) => {
+recoveryRouter.post('/recovery/verify-code', async (req, res) => {
+  const clientIp = getClientIp(req);
+  if (!checkRateLimit(`backupcode:${clientIp}`, 15)) {
+    return res.status(429).json({
+      error: 'RATE_LIMIT_EXCEEDED',
+      message: 'Too many verification attempts. Please wait a moment and try again.',
+    });
+  }
+
   const { challengeId, code } = req.body;
 
   if (!challengeId || !code) {
@@ -358,10 +429,19 @@ recoveryRouter.post('/recovery/verify-code', (req, res) => {
     });
   }
 
-  const challenge = db.prepare(`
+  let challenge: any = null;
+  const pgChallenge = await queryPg(`
     SELECT * FROM recovery_challenges
-    WHERE id = ? AND expires_at > datetime('now') AND verified_at IS NULL
-  `).get(challengeId) as any;
+    WHERE id = $1 AND expires_at > CURRENT_TIMESTAMP AND verified_at IS NULL
+  `, [challengeId]);
+  if (pgChallenge && pgChallenge.rows.length > 0) {
+    challenge = pgChallenge.rows[0];
+  } else {
+    challenge = db.prepare(`
+      SELECT * FROM recovery_challenges
+      WHERE id = ? AND expires_at > datetime('now') AND verified_at IS NULL
+    `).get(challengeId) as any;
+  }
 
   if (!challenge) {
     return res.status(400).json({
@@ -370,18 +450,57 @@ recoveryRouter.post('/recovery/verify-code', (req, res) => {
     });
   }
 
-  const user = db.prepare(`SELECT id, email, salt FROM users WHERE id = ?`).get(challenge.user_id) as any;
+  let user: any = null;
+  const pgUser = await queryPg(`
+    SELECT id, email, salt, is_platform_admin, recovery_attempts, recovery_locked_until
+    FROM users WHERE id = $1
+  `, [challenge.user_id]);
+  if (pgUser && pgUser.rows.length > 0) {
+    user = pgUser.rows[0];
+  } else {
+    user = db.prepare(`
+      SELECT id, email, salt, is_platform_admin, recovery_attempts, recovery_locked_until
+      FROM users WHERE id = ?
+    `).get(challenge.user_id) as any;
+  }
+
   if (!user) {
     return res.status(404).json({ error: 'USER_NOT_FOUND', message: 'User account not found' });
   }
 
+  if (user.is_platform_admin === 1) {
+    return res.status(403).json({
+      error: 'UNAUTHORIZED_METHOD',
+      message: 'Backup recovery codes are not permitted for Platform Super Admin accounts.',
+    });
+  }
+
+  if (user.recovery_locked_until) {
+    const lockExpiry = new Date(user.recovery_locked_until).getTime();
+    if (Date.now() < lockExpiry) {
+      const minutesLeft = Math.ceil((lockExpiry - Date.now()) / (60 * 1000));
+      return res.status(429).json({
+        error: 'ACCOUNT_LOCKED',
+        message: `Account recovery is temporarily locked. Try again in ${minutesLeft} minute(s).`,
+      });
+    }
+  }
+
   const cleanCode = (code || '').trim().toUpperCase();
 
-  // Find unused backup codes for user
-  const backupCodes = db.prepare(`
+  let backupCodes: any[] = [];
+  const pgCodes = await queryPg(`
     SELECT id, code_hash FROM user_recovery_codes
-    WHERE user_id = ? AND used_at IS NULL
-  `).all(user.id) as any[];
+    WHERE user_id = $1 AND used_at IS NULL
+  `, [user.id]);
+  if (pgCodes) {
+    backupCodes = pgCodes.rows;
+  } else {
+    backupCodes = db.prepare(`
+      SELECT id, code_hash FROM user_recovery_codes
+      WHERE user_id = ? AND used_at IS NULL
+    `).all(user.id) as any[];
+  }
 
   let matchedCodeId: string | null = null;
   for (const item of backupCodes) {
@@ -401,13 +520,30 @@ recoveryRouter.post('/recovery/verify-code', (req, res) => {
   }
 
   if (!matchedCodeId) {
+    const newAttempts = (user.recovery_attempts || 0) + 1;
+    let lockUntil: string | null = null;
+    if (newAttempts >= 3) {
+      lockUntil = new Date(Date.now() + 15 * 60 * 1000).toISOString();
+    }
+    await queryPg(`UPDATE users SET recovery_attempts = $1, recovery_locked_until = $2 WHERE id = $3`, [newAttempts, lockUntil, user.id]);
+    try {
+      db.prepare(`UPDATE users SET recovery_attempts = ?, recovery_locked_until = ? WHERE id = ?`).run(newAttempts, lockUntil, user.id);
+    } catch {}
+
     logAudit({
       actorEmail: user.email,
       action: 'RECOVERY_CODE_FAILED',
       entity: 'USER_RECOVERY',
       entityId: user.id,
-      ipAddress: (req.ip || '127.0.0.1') as string,
+      ipAddress: clientIp,
     });
+
+    if (newAttempts >= 3) {
+      return res.status(429).json({
+        error: 'ACCOUNT_LOCKED',
+        message: 'Too many invalid recovery code attempts. Account recovery has been locked for 15 minutes.',
+      });
+    }
 
     return res.status(400).json({
       error: 'INVALID_CODE',
@@ -415,32 +551,37 @@ recoveryRouter.post('/recovery/verify-code', (req, res) => {
     });
   }
 
-  // Single-use enforcement: Permanently mark code as used
-  db.prepare(`
-    UPDATE user_recovery_codes SET used_at = CURRENT_TIMESTAMP WHERE id = ?
-  `).run(matchedCodeId);
+  // Single-use enforcement: Permanently mark code as used + reset attempts + verify challenge
+  await queryPg(`UPDATE user_recovery_codes SET used_at = CURRENT_TIMESTAMP WHERE id = $1`, [matchedCodeId]);
+  await queryPg(`UPDATE recovery_challenges SET verified_at = CURRENT_TIMESTAMP WHERE id = $1`, [challengeId]);
+  await queryPg(`UPDATE users SET recovery_attempts = 0, recovery_locked_until = NULL WHERE id = $1`, [user.id]);
+  try {
+    db.prepare(`UPDATE user_recovery_codes SET used_at = CURRENT_TIMESTAMP WHERE id = ?`).run(matchedCodeId);
+    db.prepare(`UPDATE recovery_challenges SET verified_at = CURRENT_TIMESTAMP WHERE id = ?`).run(challengeId);
+    db.prepare(`UPDATE users SET recovery_attempts = 0, recovery_locked_until = NULL WHERE id = ?`).run(user.id);
+  } catch {}
 
-  // Mark challenge verified
-  db.prepare(`
-    UPDATE recovery_challenges SET verified_at = CURRENT_TIMESTAMP WHERE id = ?
-  `).run(challengeId);
-
-  // Issue short-lived recovery ticket
   const recoveryTicket = 'rck_' + crypto.randomBytes(24).toString('hex');
   const ticketId = 'pr_' + crypto.randomUUID();
   const ticketExpiresAt = new Date(Date.now() + 15 * 60 * 1000).toISOString();
 
-  db.prepare(`
+  await queryPg(`
     INSERT INTO password_resets (id, user_id, email, token, recovery_method, expires_at, verified_at, ip_address)
-    VALUES (?, ?, ?, ?, 'BACKUP_CODE', ?, CURRENT_TIMESTAMP, ?)
-  `).run(ticketId, user.id, user.email, recoveryTicket, ticketExpiresAt, (req.ip || '127.0.0.1') as string);
+    VALUES ($1, $2, $3, $4, 'BACKUP_CODE', $5, CURRENT_TIMESTAMP, $6)
+  `, [ticketId, user.id, user.email, recoveryTicket, ticketExpiresAt, clientIp]);
+  try {
+    db.prepare(`
+      INSERT INTO password_resets (id, user_id, email, token, recovery_method, expires_at, verified_at, ip_address)
+      VALUES (?, ?, ?, ?, 'BACKUP_CODE', ?, CURRENT_TIMESTAMP, ?)
+    `).run(ticketId, user.id, user.email, recoveryTicket, ticketExpiresAt, clientIp);
+  } catch {}
 
   logAudit({
     actorEmail: user.email,
     action: 'RECOVERY_CODE_VERIFIED',
     entity: 'USER_RECOVERY',
     entityId: user.id,
-    ipAddress: (req.ip || '127.0.0.1') as string,
+    ipAddress: clientIp,
   });
 
   return res.json({
@@ -451,11 +592,18 @@ recoveryRouter.post('/recovery/verify-code', (req, res) => {
 });
 
 // ==============================================================================
-// 4. PHASE 3 - METHOD 1: VERIFIED EMAIL RECOVERY LINK / TICKET
+// 4. VERIFIED EMAIL RECOVERY LINK REQUEST (NEVER exposes token in API response)
 // ==============================================================================
 recoveryRouter.post('/recovery/request-link', async (req, res) => {
-  const { challengeId } = req.body;
+  const clientIp = getClientIp(req);
+  if (!checkRateLimit(`reqlink:${clientIp}`, 10)) {
+    return res.status(429).json({
+      error: 'RATE_LIMIT_EXCEEDED',
+      message: 'Too many recovery link requests. Please wait a moment and try again.',
+    });
+  }
 
+  const { challengeId } = req.body;
   if (!challengeId) {
     return res.status(400).json({
       error: 'MISSING_CHALLENGE',
@@ -463,58 +611,98 @@ recoveryRouter.post('/recovery/request-link', async (req, res) => {
     });
   }
 
-  const challenge = db.prepare(`
+  let challenge: any = null;
+  const pgChallenge = await queryPg(`
     SELECT * FROM recovery_challenges
-    WHERE id = ? AND expires_at > datetime('now')
-  `).get(challengeId) as any;
+    WHERE id = $1 AND expires_at > CURRENT_TIMESTAMP
+  `, [challengeId]);
+  if (pgChallenge && pgChallenge.rows.length > 0) {
+    challenge = pgChallenge.rows[0];
+  } else {
+    challenge = db.prepare(`
+      SELECT * FROM recovery_challenges
+      WHERE id = ? AND expires_at > datetime('now')
+    `).get(challengeId) as any;
+  }
 
+  const genericMessage =
+    'Outbound email relay is not configured on this server. Please use Security Questions, a Single-Use Backup Code, or request an Administrator-Assisted Recovery Ticket from your school administrator.';
+
+  // Anti-enumeration: even if dummy challengeId is passed, return the exact same safe response
   if (!challenge) {
-    return res.status(400).json({
-      error: 'INVALID_CHALLENGE',
-      message: 'Recovery session has expired or is invalid. Please start over.',
+    return res.json({
+      success: true,
+      emailDelivered: false,
+      message: genericMessage,
     });
   }
 
-  const user = db.prepare('SELECT id, email FROM users WHERE id = ?').get(challenge.user_id) as any;
-  if (!user) {
-    return res.status(404).json({ error: 'USER_NOT_FOUND', message: 'User account not found' });
+  let user: any = null;
+  const pgUser = await queryPg('SELECT id, email FROM users WHERE id = $1', [challenge.user_id]);
+  if (pgUser && pgUser.rows.length > 0) {
+    user = pgUser.rows[0];
+  } else {
+    user = db.prepare('SELECT id, email FROM users WHERE id = ?').get(challenge.user_id) as any;
   }
 
-  const resetToken = 'rst_' + crypto.randomBytes(24).toString('hex');
-  const resetId = 'pr_' + crypto.randomUUID();
-  const expiresAt = new Date(Date.now() + 60 * 60 * 1000).toISOString(); // 1 hour
+  if (!user) {
+    return res.json({
+      success: true,
+      emailDelivered: false,
+      message: genericMessage,
+    });
+  }
 
-  await queryPg(`
-    INSERT INTO password_resets (id, user_id, email, token, recovery_method, expires_at, verified_at, ip_address)
-    VALUES ($1, $2, $3, $4, 'EMAIL_LINK', $5, CURRENT_TIMESTAMP, $6)
-  `, [resetId, user.id, user.email, resetToken, expiresAt, (req.ip || '127.0.0.1') as string]);
+  // Only generate & store an email reset token if an outbound email provider is configured
+  const hasEmailRelay = Boolean(process.env.RESEND_API_KEY || process.env.SMTP_HOST);
+  if (hasEmailRelay) {
+    const resetToken = 'rst_' + crypto.randomBytes(24).toString('hex');
+    const resetId = 'pr_' + crypto.randomUUID();
+    const expiresAt = new Date(Date.now() + 60 * 60 * 1000).toISOString();
 
-  try {
-    cacheDb.prepare(`
+    await queryPg(`
       INSERT INTO password_resets (id, user_id, email, token, recovery_method, expires_at, verified_at, ip_address)
-      VALUES (?, ?, ?, ?, 'EMAIL_LINK', ?, CURRENT_TIMESTAMP, ?)
-    `).run(resetId, user.id, user.email, resetToken, expiresAt, (req.ip || '127.0.0.1') as string);
-  } catch {}
+      VALUES ($1, $2, $3, $4, 'EMAIL_LINK', $5, CURRENT_TIMESTAMP, $6)
+    `, [resetId, user.id, user.email, resetToken, expiresAt, clientIp]);
+
+    try {
+      cacheDb.prepare(`
+        INSERT INTO password_resets (id, user_id, email, token, recovery_method, expires_at, verified_at, ip_address)
+        VALUES (?, ?, ?, ?, 'EMAIL_LINK', ?, CURRENT_TIMESTAMP, ?)
+      `).run(resetId, user.id, user.email, resetToken, expiresAt, clientIp);
+    } catch {}
+  }
 
   logAudit({
     actorEmail: user.email,
     action: 'PASSWORD_RESET_LINK_REQUESTED',
     entity: 'USER_CREDENTIALS',
     entityId: user.id,
-    ipAddress: (req.ip || '127.0.0.1') as string,
+    ipAddress: clientIp,
   });
 
+  // CRITICAL SECURITY: NEVER return resetToken / recoveryTicket in the HTTP response body!
   return res.json({
     success: true,
-    recoveryTicket: resetToken,
-    message: `A secure password recovery verification has been generated for ${maskEmail(user.email)}.`,
+    emailDelivered: hasEmailRelay,
+    message: hasEmailRelay
+      ? `If an account exists for ${maskEmail(user.email)}, a password reset link has been sent to that inbox.`
+      : genericMessage,
   });
 });
 
 // ==============================================================================
-// 5. PHASE 5 & 6: COMPLETE PASSWORD RESET WITH STRICT SERVER VALIDATION
+// 5. COMPLETE PASSWORD RESET WITH STRICT SERVER VALIDATION
 // ==============================================================================
 recoveryRouter.post('/recovery/complete', async (req, res) => {
+  const clientIp = getClientIp(req);
+  if (!checkRateLimit(`complete:${clientIp}`, 15)) {
+    return res.status(429).json({
+      error: 'RATE_LIMIT_EXCEEDED',
+      message: 'Too many password reset attempts. Please wait a moment and try again.',
+    });
+  }
+
   const { recoveryTicket, newPassword, confirmPassword } = req.body;
 
   if (!recoveryTicket || !newPassword) {
@@ -531,14 +719,13 @@ recoveryRouter.post('/recovery/complete', async (req, res) => {
     });
   }
 
-  if (newPassword.length < 8) {
+  if (typeof newPassword !== 'string' || newPassword.length < 8) {
     return res.status(400).json({
       error: 'WEAK_PASSWORD',
       message: 'Password must be at least 8 characters long.',
     });
   }
 
-  // Find unexpired and unused reset record from Neon PG first, fallback to cacheDb
   let resetRecord: any = null;
   const pgReset = await queryPg(`
     SELECT * FROM password_resets
@@ -611,7 +798,7 @@ recoveryRouter.post('/recovery/complete', async (req, res) => {
     action: 'PASSWORD_RESET_COMPLETED',
     entity: 'USER_CREDENTIALS',
     entityId: user.id,
-    ipAddress: (req.ip || '127.0.0.1') as string,
+    ipAddress: clientIp,
   });
 
   return res.json({
@@ -621,11 +808,11 @@ recoveryRouter.post('/recovery/complete', async (req, res) => {
 });
 
 // ==============================================================================
-// 6. PHASE 4: FORGOTTEN EMAIL OR PHONE IDENTIFIER LOOKUP (MASKED DISPLAY)
+// 6. FORGOTTEN EMAIL OR PHONE IDENTIFIER LOOKUP (MASKED DISPLAY)
 // ==============================================================================
-recoveryRouter.post('/recovery/lookup-identifier', (req, res) => {
-  const clientIp = (req.ip || '127.0.0.1') as string;
-  if (!checkRateLimit(clientIp, 10)) {
+recoveryRouter.post('/recovery/lookup-identifier', async (req, res) => {
+  const clientIp = getClientIp(req);
+  if (!checkRateLimit(`lookup:${clientIp}`, 10)) {
     return res.status(429).json({
       error: 'RATE_LIMIT_EXCEEDED',
       message: 'Too many lookup requests. Please wait a moment.',
@@ -642,27 +829,47 @@ recoveryRouter.post('/recovery/lookup-identifier', (req, res) => {
 
   let matchedUser: any = null;
 
-  if (phone) {
+  if (phone && typeof phone === 'string') {
     const cleanPhone = phone.trim();
-    matchedUser = db.prepare(`
+    const pgMatch = await queryPg(`
       SELECT id, email, phone, full_name, is_platform_admin FROM users
-      WHERE (phone = ? OR recovery_phone = ?) AND is_active = 1
-    `).get(cleanPhone, cleanPhone);
-  } else if (fullName && schoolName) {
+      WHERE (phone = $1 OR recovery_phone = $1) AND is_active = 1
+      LIMIT 1
+    `, [cleanPhone]);
+    if (pgMatch && pgMatch.rows.length > 0) {
+      matchedUser = pgMatch.rows[0];
+    } else {
+      matchedUser = db.prepare(`
+        SELECT id, email, phone, full_name, is_platform_admin FROM users
+        WHERE (phone = ? OR recovery_phone = ?) AND is_active = 1
+      `).get(cleanPhone, cleanPhone);
+    }
+  } else if (fullName && schoolName && typeof fullName === 'string' && typeof schoolName === 'string') {
     const cleanName = fullName.trim().toLowerCase();
     const cleanSchool = schoolName.trim().toLowerCase();
 
-    matchedUser = db.prepare(`
+    const pgMatch = await queryPg(`
       SELECT u.id, u.email, u.phone, u.full_name, u.is_platform_admin
       FROM users u
       JOIN user_roles ur ON ur.user_id = u.id
       JOIN schools s ON s.id = ur.school_id
-      WHERE LOWER(u.full_name) LIKE ? AND LOWER(s.name) LIKE ? AND u.is_active = 1
+      WHERE LOWER(u.full_name) LIKE $1 AND LOWER(s.name) LIKE $2 AND u.is_active = 1
       LIMIT 1
-    `).get(`%${cleanName}%`, `%${cleanSchool}%`);
+    `, [`%${cleanName}%`, `%${cleanSchool}%`]);
+    if (pgMatch && pgMatch.rows.length > 0) {
+      matchedUser = pgMatch.rows[0];
+    } else {
+      matchedUser = db.prepare(`
+        SELECT u.id, u.email, u.phone, u.full_name, u.is_platform_admin
+        FROM users u
+        JOIN user_roles ur ON ur.user_id = u.id
+        JOIN schools s ON s.id = ur.school_id
+        WHERE LOWER(u.full_name) LIKE ? AND LOWER(s.name) LIKE ? AND u.is_active = 1
+        LIMIT 1
+      `).get(`%${cleanName}%`, `%${cleanSchool}%`);
+    }
   }
 
-  // Anti-enumeration: if no match, generic response
   if (!matchedUser) {
     return res.json({
       success: true,
@@ -681,18 +888,33 @@ recoveryRouter.post('/recovery/lookup-identifier', (req, res) => {
 });
 
 // ==============================================================================
-// 7. AUTHENTICATED USER SECURITY SETTINGS (CONFIGURE QUESTIONS & BACKUP CODES)
+// 7. AUTHENTICATED USER SECURITY SETTINGS (Neon PG + cacheDb synced)
 // ==============================================================================
-recoveryRouter.get('/security/status', requireAuth, (req: AuthenticatedRequest, res) => {
+recoveryRouter.get('/security/status', requireAuth, async (req: AuthenticatedRequest, res) => {
   const userId = req.user!.id;
-  const user = db.prepare(`
+  let user: any = null;
+  const pgUser = await queryPg(`
     SELECT security_question_1, security_question_2, recovery_email, recovery_phone, is_platform_admin
-    FROM users WHERE id = ?
-  `).get(userId) as any;
+    FROM users WHERE id = $1
+  `, [userId]);
+  if (pgUser && pgUser.rows.length > 0) {
+    user = pgUser.rows[0];
+  } else {
+    user = db.prepare(`
+      SELECT security_question_1, security_question_2, recovery_email, recovery_phone, is_platform_admin
+      FROM users WHERE id = ?
+    `).get(userId) as any;
+  }
 
-  const unusedCodesCount = (
-    db.prepare(`SELECT COUNT(*) as count FROM user_recovery_codes WHERE user_id = ? AND used_at IS NULL`).get(userId) as any
-  )?.count || 0;
+  let unusedCodesCount = 0;
+  const pgCodes = await queryPg(`SELECT COUNT(*) as count FROM user_recovery_codes WHERE user_id = $1 AND used_at IS NULL`, [userId]);
+  if (pgCodes) {
+    unusedCodesCount = parseInt(pgCodes.rows[0]?.count || '0', 10);
+  } else {
+    unusedCodesCount = (
+      db.prepare(`SELECT COUNT(*) as count FROM user_recovery_codes WHERE user_id = ? AND used_at IS NULL`).get(userId) as any
+    )?.count || 0;
+  }
 
   return res.json({
     hasSecurityQuestions: Boolean(user?.security_question_1 && user?.security_question_2),
@@ -705,7 +927,7 @@ recoveryRouter.get('/security/status', requireAuth, (req: AuthenticatedRequest, 
   });
 });
 
-recoveryRouter.post('/security/configure-questions', requireAuth, (req: AuthenticatedRequest, res) => {
+recoveryRouter.post('/security/configure-questions', requireAuth, async (req: AuthenticatedRequest, res) => {
   const userId = req.user!.id;
   const { currentPassword, question1, answer1, question2, answer2, recoveryEmail, recoveryPhone } = req.body;
 
@@ -716,12 +938,18 @@ recoveryRouter.post('/security/configure-questions', requireAuth, (req: Authenti
     });
   }
 
-  const user = db.prepare('SELECT * FROM users WHERE id = ?').get(userId) as unknown as UserRecord;
+  let user: UserRecord | null = null;
+  const pgUser = await queryPg('SELECT * FROM users WHERE id = $1', [userId]);
+  if (pgUser && pgUser.rows.length > 0) {
+    user = pgUser.rows[0] as unknown as UserRecord;
+  } else {
+    user = db.prepare('SELECT * FROM users WHERE id = ?').get(userId) as unknown as UserRecord;
+  }
+
   if (!user) {
     return res.status(404).json({ error: 'USER_NOT_FOUND', message: 'User not found' });
   }
 
-  // Verify current password first
   if (!verifyPassword(currentPassword, user.password_hash, user.salt)) {
     return res.status(401).json({
       error: 'INCORRECT_PASSWORD',
@@ -749,29 +977,40 @@ recoveryRouter.post('/security/configure-questions', requireAuth, (req: Authenti
   const salt2 = generateSalt();
   const hash2 = hashPassword(normalizeAnswer(answer2), salt2);
 
-  db.prepare(`
+  const q1 = question1.trim();
+  const q2 = question2.trim();
+  const rEmail = recoveryEmail?.trim() || null;
+  const rPhone = recoveryPhone?.trim() || null;
+
+  await queryPg(`
     UPDATE users SET
-      security_question_1 = ?,
-      security_answer_hash_1 = ?,
-      security_answer_salt_1 = ?,
-      security_question_2 = ?,
-      security_answer_hash_2 = ?,
-      security_answer_salt_2 = ?,
-      recovery_email = COALESCE(?, recovery_email),
-      recovery_phone = COALESCE(?, recovery_phone),
+      security_question_1 = $1,
+      security_answer_hash_1 = $2,
+      security_answer_salt_1 = $3,
+      security_question_2 = $4,
+      security_answer_hash_2 = $5,
+      security_answer_salt_2 = $6,
+      recovery_email = COALESCE($7, recovery_email),
+      recovery_phone = COALESCE($8, recovery_phone),
       updated_at = CURRENT_TIMESTAMP
-    WHERE id = ?
-  `).run(
-    question1.trim(),
-    hash1,
-    salt1,
-    question2.trim(),
-    hash2,
-    salt2,
-    recoveryEmail?.trim() || null,
-    recoveryPhone?.trim() || null,
-    userId
-  );
+    WHERE id = $9
+  `, [q1, hash1, salt1, q2, hash2, salt2, rEmail, rPhone, userId]);
+
+  try {
+    db.prepare(`
+      UPDATE users SET
+        security_question_1 = ?,
+        security_answer_hash_1 = ?,
+        security_answer_salt_1 = ?,
+        security_question_2 = ?,
+        security_answer_hash_2 = ?,
+        security_answer_salt_2 = ?,
+        recovery_email = COALESCE(?, recovery_email),
+        recovery_phone = COALESCE(?, recovery_phone),
+        updated_at = CURRENT_TIMESTAMP
+      WHERE id = ?
+    `).run(q1, hash1, salt1, q2, hash2, salt2, rEmail, rPhone, userId);
+  } catch {}
 
   logAudit({
     actorId: user.id,
@@ -779,7 +1018,7 @@ recoveryRouter.post('/security/configure-questions', requireAuth, (req: Authenti
     action: 'SECURITY_QUESTIONS_UPDATED',
     entity: 'USER_SECURITY',
     entityId: user.id,
-    ipAddress: (req.ip || '127.0.0.1') as string,
+    ipAddress: getClientIp(req),
   });
 
   return res.json({
@@ -788,7 +1027,7 @@ recoveryRouter.post('/security/configure-questions', requireAuth, (req: Authenti
   });
 });
 
-recoveryRouter.post('/security/generate-backup-codes', requireAuth, (req: AuthenticatedRequest, res) => {
+recoveryRouter.post('/security/generate-backup-codes', requireAuth, async (req: AuthenticatedRequest, res) => {
   const userId = req.user!.id;
   const { currentPassword } = req.body;
 
@@ -799,7 +1038,14 @@ recoveryRouter.post('/security/generate-backup-codes', requireAuth, (req: Authen
     });
   }
 
-  const user = db.prepare('SELECT * FROM users WHERE id = ?').get(userId) as unknown as UserRecord;
+  let user: UserRecord | null = null;
+  const pgUser = await queryPg('SELECT * FROM users WHERE id = $1', [userId]);
+  if (pgUser && pgUser.rows.length > 0) {
+    user = pgUser.rows[0] as unknown as UserRecord;
+  } else {
+    user = db.prepare('SELECT * FROM users WHERE id = ?').get(userId) as unknown as UserRecord;
+  }
+
   if (!user || !verifyPassword(currentPassword, user.password_hash, user.salt)) {
     return res.status(401).json({
       error: 'INCORRECT_PASSWORD',
@@ -807,33 +1053,48 @@ recoveryRouter.post('/security/generate-backup-codes', requireAuth, (req: Authen
     });
   }
 
-  // Invalidate any previously unused codes
-  db.prepare(`DELETE FROM user_recovery_codes WHERE user_id = ? AND used_at IS NULL`).run(userId);
-
-  // Generate 8 new single-use codes (e.g. BK-XXXX-XXXX)
-  const plainCodes: string[] = [];
-  db.exec('BEGIN TRANSACTION;');
+  await queryPg(`DELETE FROM user_recovery_codes WHERE user_id = $1 AND used_at IS NULL`, [userId]);
   try {
-    for (let i = 0; i < 8; i++) {
-      const part1 = crypto.randomBytes(2).toString('hex').toUpperCase();
-      const part2 = crypto.randomBytes(2).toString('hex').toUpperCase();
-      const code = `BK-${part1}-${part2}`;
-      plainCodes.push(code);
+    db.prepare(`DELETE FROM user_recovery_codes WHERE user_id = ? AND used_at IS NULL`).run(userId);
+  } catch {}
 
-      const codeSalt = generateSalt();
-      const codeHash = hashPassword(code, codeSalt);
-      const storedVal = `${codeSalt}:${codeHash}`;
-      const codeId = 'rc_' + crypto.randomUUID();
+  const plainCodes: string[] = [];
+  const generatedEntries: Array<{ id: string; storedVal: string }> = [];
 
+  for (let i = 0; i < 8; i++) {
+    const part1 = crypto.randomBytes(2).toString('hex').toUpperCase();
+    const part2 = crypto.randomBytes(2).toString('hex').toUpperCase();
+    const code = `BK-${part1}-${part2}`;
+    plainCodes.push(code);
+
+    const codeSalt = generateSalt();
+    const codeHash = hashPassword(code, codeSalt);
+    generatedEntries.push({
+      id: 'rc_' + crypto.randomUUID(),
+      storedVal: `${codeSalt}:${codeHash}`,
+    });
+  }
+
+  for (const entry of generatedEntries) {
+    await queryPg(`
+      INSERT INTO user_recovery_codes (id, user_id, code_hash)
+      VALUES ($1, $2, $3)
+    `, [entry.id, userId, entry.storedVal]);
+  }
+
+  try {
+    db.exec('BEGIN TRANSACTION;');
+    for (const entry of generatedEntries) {
       db.prepare(`
         INSERT INTO user_recovery_codes (id, user_id, code_hash)
         VALUES (?, ?, ?)
-      `).run(codeId, userId, storedVal);
+      `).run(entry.id, userId, entry.storedVal);
     }
     db.exec('COMMIT;');
-  } catch (e) {
-    db.exec('ROLLBACK;');
-    return res.status(500).json({ error: 'CODE_GEN_FAILED', message: 'Failed to generate backup codes.' });
+  } catch {
+    try {
+      db.exec('ROLLBACK;');
+    } catch {}
   }
 
   logAudit({
@@ -842,7 +1103,7 @@ recoveryRouter.post('/security/generate-backup-codes', requireAuth, (req: Authen
     action: 'BACKUP_CODES_GENERATED',
     entity: 'USER_SECURITY',
     entityId: user.id,
-    ipAddress: (req.ip || '127.0.0.1') as string,
+    ipAddress: getClientIp(req),
   });
 
   return res.json({
@@ -853,25 +1114,35 @@ recoveryRouter.post('/security/generate-backup-codes', requireAuth, (req: Authen
 });
 
 // ==============================================================================
-// 8. PHASE 3 - METHOD 4: ADMINISTRATOR-ASSISTED RECOVERY FOR SCHOOL USERS
+// 8. ADMINISTRATOR-ASSISTED RECOVERY FOR SCHOOL USERS
 // ==============================================================================
 recoveryRouter.post(
   '/school/users/:targetUserId/recovery-ticket',
   requireAuth,
   requireTenant,
   requireRole(['SCHOOL_ADMIN', 'SCHOOL_OWNER']),
-  (req: AuthenticatedRequest, res) => {
+  async (req: AuthenticatedRequest, res) => {
     const { targetUserId } = req.params;
     const adminUser = req.user!;
-    const schoolId = req.activeSchoolId!;
+    const schoolId = req.targetSchoolId || req.activeSchoolId!;
 
-    // Verify target user belongs to the same school tenant
-    const targetUser = db.prepare(`
+    let targetUser: any = null;
+    const pgTarget = await queryPg(`
       SELECT u.id, u.email, u.full_name, u.is_platform_admin
       FROM users u
       JOIN user_roles ur ON ur.user_id = u.id
-      WHERE u.id = ? AND ur.school_id = ? AND u.is_active = 1
-    `).get(targetUserId, schoolId) as any;
+      WHERE u.id = $1 AND ur.school_id = $2 AND u.is_active = 1
+    `, [targetUserId, schoolId]);
+    if (pgTarget && pgTarget.rows.length > 0) {
+      targetUser = pgTarget.rows[0];
+    } else {
+      targetUser = db.prepare(`
+        SELECT u.id, u.email, u.full_name, u.is_platform_admin
+        FROM users u
+        JOIN user_roles ur ON ur.user_id = u.id
+        WHERE u.id = ? AND ur.school_id = ? AND u.is_active = 1
+      `).get(targetUserId, schoolId) as any;
+    }
 
     if (!targetUser) {
       return res.status(404).json({
@@ -880,7 +1151,6 @@ recoveryRouter.post(
       });
     }
 
-    // Strict Tenant / Role Separation: School Admins CANNOT reset Platform SUPER_ADMIN accounts!
     if (targetUser.is_platform_admin === 1) {
       return res.status(403).json({
         error: 'UNAUTHORIZED_PRIVILEGE',
@@ -888,23 +1158,31 @@ recoveryRouter.post(
       });
     }
 
-    // Issue an admin-assisted 1-hour single-use recovery ticket
     const ticketToken = 'adm_' + crypto.randomBytes(24).toString('hex');
     const ticketId = 'pr_' + crypto.randomUUID();
     const expiresAt = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+    const clientIp = getClientIp(req);
 
-    db.prepare(`
+    await queryPg(`
       INSERT INTO password_resets (id, user_id, email, token, recovery_method, expires_at, verified_at, ip_address)
-      VALUES (?, ?, ?, ?, 'ADMIN_ASSISTED', ?, CURRENT_TIMESTAMP, ?)
-    `).run(ticketId, targetUser.id, targetUser.email, ticketToken, expiresAt, (req.ip || '127.0.0.1') as string);
+      VALUES ($1, $2, $3, $4, 'ADMIN_ASSISTED', $5, CURRENT_TIMESTAMP, $6)
+    `, [ticketId, targetUser.id, targetUser.email, ticketToken, expiresAt, clientIp]);
+
+    try {
+      db.prepare(`
+        INSERT INTO password_resets (id, user_id, email, token, recovery_method, expires_at, verified_at, ip_address)
+        VALUES (?, ?, ?, ?, 'ADMIN_ASSISTED', ?, CURRENT_TIMESTAMP, ?)
+      `).run(ticketId, targetUser.id, targetUser.email, ticketToken, expiresAt, clientIp);
+    } catch {}
 
     logAudit({
       actorId: adminUser.id,
       actorEmail: adminUser.email,
+      schoolId,
       action: 'ADMIN_ASSISTED_RECOVERY_ISSUED',
       entity: 'USER_CREDENTIALS',
       entityId: targetUser.id,
-      ipAddress: (req.ip || '127.0.0.1') as string,
+      ipAddress: clientIp,
     });
 
     return res.json({
@@ -919,204 +1197,18 @@ recoveryRouter.post(
 );
 
 // ==============================================================================
-// 6. SELF-SERVICE CLAIM & RESTORATION FOR DISRUPTED / WIPED SCHOOL ACCOUNTS
+// 9. DISABLED UNAUTHENTICATED ACCOUNT RECLAIM ENDPOINT (Security Hardening)
 // ==============================================================================
-recoveryRouter.post('/recovery/claim-wiped-account', async (req, res) => {
-  const {
-    schoolName,
-    email,
-    phone,
-    newPassword,
-    ownerName,
-    question1,
-    answer1,
-    question2,
-    answer2,
-  } = req.body;
-
-  if (!email || !newPassword || newPassword.length < 8) {
-    return res.status(400).json({
-      error: 'INVALID_INPUT',
-      message: 'Official email and a new password (min 8 characters) are required.',
-    });
-  }
-
-  const cleanEmail = email.trim().toLowerCase();
-  const cleanSchool = (schoolName || '').trim().toLowerCase();
-  const cleanPhone = (phone || '').trim();
-
-  try {
-    const { getPgPool, isPgConnected, db: localDb } = await import('./db.ts');
-    const { createSession } = await import('./auth.ts');
-    const pool = getPgPool();
-    if (!pool || !isPgConnected()) {
-      return res.status(503).json({
-        error: 'DATABASE_UNAVAILABLE',
-        message: 'Persistent database service is currently unavailable. Please try again shortly.',
-      });
-    }
-
-    const client = await pool.connect();
-    try {
-      await client.query('BEGIN');
-
-      // 1. Locate school by email OR name matching
-      let schoolRow: any = null;
-      const schoolByEmail = await client.query('SELECT * FROM schools WHERE LOWER(email) = $1', [cleanEmail]);
-      if (schoolByEmail.rows.length > 0) {
-        schoolRow = schoolByEmail.rows[0];
-      } else if (cleanSchool) {
-        const schoolByName = await client.query('SELECT * FROM schools WHERE LOWER(name) LIKE $1', [`%${cleanSchool}%`]);
-        if (schoolByName.rows.length > 0) {
-          schoolRow = schoolByName.rows[0];
-        }
-      }
-
-      // If school still not found, check if a user with this email exists
-      let userRow: any = null;
-      const userRes = await client.query('SELECT * FROM users WHERE LOWER(email) = $1', [cleanEmail]);
-      if (userRes.rows.length > 0) {
-        userRow = userRes.rows[0];
-      }
-
-      if (!schoolRow && !userRow) {
-        // If neither exists, create/restore the school and user safely in PostgreSQL!
-        const newSchoolId = 'sch_' + crypto.randomUUID().slice(0, 8);
-        const newUserId = 'usr_' + crypto.randomUUID().slice(0, 8);
-        const newSettingsId = 'set_' + crypto.randomUUID().slice(0, 8);
-        const newRoleId = 'ur_' + crypto.randomUUID().slice(0, 8);
-        const newSubId = 'sub_' + crypto.randomUUID().slice(0, 8);
-
-        const salt = generateSalt();
-        const pwdHash = hashPassword(newPassword, salt);
-        const salt1 = generateSalt();
-        const ansHash1 = answer1 ? hashPassword(normalizeAnswer(answer1), salt1) : null;
-        const salt2 = generateSalt();
-        const ansHash2 = answer2 ? hashPassword(normalizeAnswer(answer2), salt2) : null;
-        const sName = schoolName || 'Winner International School';
-        const sSlug = sName.toLowerCase().replace(/[^a-z0-9]/g, '-').slice(0, 32);
-        const subEnd = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
-
-        await client.query(
-          `INSERT INTO schools (id, name, slug, type, status, address, state, lga, phone, email, current_plan_id)
-           VALUES ($1, $2, $3, 'MIXED', 'TRIAL', 'Nigeria', 'Lagos', 'Ikeja', $4, $5, 'plan_trial')
-           ON CONFLICT (id) DO NOTHING`,
-          [newSchoolId, sName, sSlug, cleanPhone || '08000000000', cleanEmail]
-        );
-        await client.query(
-          `INSERT INTO school_settings (id, school_id, currency, currency_symbol, current_academic_session, current_term, portal_subdomain)
-           VALUES ($1, $2, 'NGN', '₦', '2024/2025', '1st Term', $3)
-           ON CONFLICT (id) DO NOTHING`,
-          [newSettingsId, newSchoolId, sSlug]
-        );
-        await client.query(
-          `INSERT INTO users (
-             id, email, password_hash, salt, full_name, phone,
-             security_question_1, security_answer_hash_1, security_answer_salt_1,
-             security_question_2, security_answer_hash_2, security_answer_salt_2,
-             is_platform_admin, is_active
-           )
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, 0, 1)
-           ON CONFLICT (id) DO NOTHING`,
-          [
-            newUserId, cleanEmail, pwdHash, salt, ownerName || `${sName} Proprietor`, cleanPhone || '08000000000',
-            question1 || 'What primary school did you attend?', ansHash1, salt1,
-            question2 || 'In what city or town were you born?', ansHash2, salt2,
-          ]
-        );
-        await client.query(
-          `INSERT INTO user_roles (id, user_id, school_id, role_id, is_primary)
-           VALUES ($1, $2, $3, 'role_school_owner', 1)
-           ON CONFLICT (id) DO NOTHING`,
-          [newRoleId, newUserId, newSchoolId]
-        );
-        await client.query(
-          `INSERT INTO school_subscriptions (id, school_id, plan_id, status, start_date, end_date, trial_end_date, amount_paid, notes)
-           VALUES ($1, $2, 'plan_trial', 'TRIAL', CURRENT_DATE, $3, $4, 0, 'Self-service account restoration')
-           ON CONFLICT (id) DO NOTHING`,
-          [newSubId, newSchoolId, subEnd, subEnd]
-        );
-
-        await client.query('COMMIT');
-
-        const token = createSession(newUserId, newSchoolId, req.ip, req.headers['user-agent']);
-        return res.status(201).json({
-          success: true,
-          message: 'Account successfully registered and restored with your credentials!',
-          token,
-          user: { id: newUserId, email: cleanEmail, full_name: ownerName || `${sName} Proprietor` },
-          school: { id: newSchoolId, name: sName },
-        });
-      }
-
-      // If school and/or user already exists, update credentials and link them!
-      const salt = generateSalt();
-      const pwdHash = hashPassword(newPassword, salt);
-      const effectiveSchoolId = schoolRow ? schoolRow.id : null;
-
-      let targetUserId = userRow ? userRow.id : 'usr_' + crypto.randomUUID().slice(0, 8);
-      if (userRow) {
-        await client.query(
-          `UPDATE users SET password_hash = $1, salt = $2, is_active = 1, full_name = COALESCE($3, full_name) WHERE id = $4`,
-          [pwdHash, salt, ownerName || null, targetUserId]
-        );
-      } else {
-        await client.query(
-          `INSERT INTO users (id, email, password_hash, salt, full_name, phone, is_platform_admin, is_active)
-           VALUES ($1, $2, $3, $4, $5, $6, 0, 1)
-           ON CONFLICT (id) DO UPDATE SET password_hash = EXCLUDED.password_hash, salt = EXCLUDED.salt`,
-          [targetUserId, cleanEmail, pwdHash, salt, ownerName || `${schoolRow?.name || 'School'} Proprietor`, cleanPhone || schoolRow?.phone || '']
-        );
-      }
-
-      if (effectiveSchoolId) {
-        // Ensure user is tied to school with SCHOOL_OWNER role
-        await client.query(
-          `INSERT INTO user_roles (id, user_id, school_id, role_id, is_primary)
-           VALUES ($1, $2, $3, 'role_school_owner', 1)
-           ON CONFLICT (id) DO NOTHING`,
-          ['ur_' + crypto.randomUUID().slice(0, 8), targetUserId, effectiveSchoolId]
-        );
-
-        // Ensure active trial subscription exists
-        await client.query(
-          `INSERT INTO school_subscriptions (id, school_id, plan_id, status, start_date, end_date, trial_end_date, amount_paid, notes)
-           VALUES ($1, $2, 'plan_trial', 'TRIAL', CURRENT_DATE, CURRENT_DATE + INTERVAL '30 days', CURRENT_DATE + INTERVAL '30 days', 0, 'Restoration subscription link')
-           ON CONFLICT (id) DO NOTHING`,
-          ['sub_' + crypto.randomUUID().slice(0, 8), effectiveSchoolId]
-        );
-        await client.query(`UPDATE schools SET current_plan_id = 'plan_trial' WHERE id = $1`, [effectiveSchoolId]);
-      }
-
-      await client.query('COMMIT');
-
-      // Sync into local SQLite
-      try {
-        localDb.prepare(`
-          INSERT OR REPLACE INTO users (id, email, password_hash, salt, full_name, phone, is_platform_admin, is_active)
-          VALUES (?, ?, ?, ?, ?, ?, 0, 1)
-        `).run(targetUserId, cleanEmail, pwdHash, salt, ownerName || `${schoolRow?.name || 'School'} Proprietor`, cleanPhone || '');
-      } catch (e) {}
-
-      const token = createSession(targetUserId, effectiveSchoolId, req.ip, req.headers['user-agent']);
-      return res.json({
-        success: true,
-        message: 'Account successfully reclaimed! You are now logged in with your new credentials.',
-        token,
-        user: { id: targetUserId, email: cleanEmail, full_name: ownerName || `${schoolRow?.name || 'School'} Proprietor` },
-        school: schoolRow,
-      });
-    } catch (txErr: any) {
-      await client.query('ROLLBACK');
-      throw txErr;
-    } finally {
-      client.release();
-    }
-  } catch (err: any) {
-    console.error('[Claim Wiped Account Error]', err);
-    return res.status(500).json({
-      error: 'CLAIM_FAILED',
-      message: 'Failed to reclaim account: ' + err.message,
-    });
-  }
+recoveryRouter.post('/recovery/claim-wiped-account', (req, res) => {
+  logAudit({
+    actorEmail: typeof req.body?.email === 'string' ? req.body.email.trim().toLowerCase() : 'unknown',
+    action: 'BLOCKED_ACCOUNT_RECLAIM_ATTEMPT',
+    entity: 'USER_CREDENTIALS',
+    ipAddress: getClientIp(req),
+  });
+  return res.status(403).json({
+    error: 'ACCOUNT_RECLAIM_DISABLED',
+    message:
+      'Unauthenticated account reclamation is disabled for security. Please use verified Security Questions, an Emergency Backup Code, an Administrator-Assisted Recovery Ticket, or contact Platform Support.',
+  });
 });

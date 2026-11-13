@@ -96,6 +96,7 @@ export const SuperAdminDashboard: React.FC = () => {
 
   // Selected School Detail Drawer
   const [selectedSchool, setSelectedSchool] = useState<any | null>(null);
+  const [previewReceipt, setPreviewReceipt] = useState<{ url: string; filename: string; isPdf: boolean } | null>(null);
   const [detailsLoading, setDetailsLoading] = useState(false);
   const [schoolDetails, setSchoolDetails] = useState<any | null>(null);
 
@@ -1186,19 +1187,32 @@ export const SuperAdminDashboard: React.FC = () => {
                             try {
                               meta = typeof p.metadata === 'string' ? JSON.parse(p.metadata) : p.metadata;
                             } catch (e) {}
-                            if (meta?.receipt_file) {
+                            if (meta?.receipt_file && typeof meta.receipt_file === 'string') {
+                              const rawReceipt = meta.receipt_file.trim();
+                              const match = rawReceipt.match(/^data:(image\/(?:png|jpeg|jpg|webp)|application\/pdf);base64,([A-Za-z0-9+/=\s]+)$/i);
                               return (
                                 <button
                                   type="button"
                                   onClick={() => {
-                                    const win = window.open();
-                                    if (win) {
-                                      win.document.write(`<iframe src="${meta.receipt_file}" frameborder="0" style="border:0; top:0px; left:0px; bottom:0px; right:0px; width:100%; height:100%;" allowfullscreen></iframe>`);
+                                    if (!match) {
+                                      alert('Unsupported or unsafe receipt file format.');
+                                      return;
+                                    }
+                                    const mime = match[1].toLowerCase();
+                                    const b64 = match[2].replace(/\s+/g, '');
+                                    if (mime === 'application/pdf') {
+                                      const binary = atob(b64);
+                                      const bytes = new Uint8Array(binary.length);
+                                      for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+                                      const blobUrl = URL.createObjectURL(new Blob([bytes], { type: 'application/pdf' }));
+                                      setPreviewReceipt({ url: blobUrl, filename: meta.receipt_filename || 'Receipt.pdf', isPdf: true });
+                                    } else {
+                                      setPreviewReceipt({ url: `data:${mime};base64,${b64}`, filename: meta.receipt_filename || 'Receipt Image', isPdf: false });
                                     }
                                   }}
                                   className="mt-1 inline-flex items-center gap-1 px-2 py-0.5 rounded bg-emerald-100 text-emerald-800 text-[10px] font-bold hover:bg-emerald-200 cursor-pointer"
                                 >
-                                  📎 View Uploaded Receipt ({meta.receipt_filename || 'Document'})
+                                  View Uploaded Receipt ({meta.receipt_filename || 'Document'})
                                 </button>
                               );
                             }
@@ -2983,6 +2997,44 @@ export const SuperAdminDashboard: React.FC = () => {
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {/* Safe In-App Receipt Preview Modal */}
+      {previewReceipt && (
+        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl max-w-3xl w-full max-h-[90vh] flex flex-col overflow-hidden shadow-2xl border border-slate-200">
+            <div className="px-5 py-3.5 border-b border-slate-200 flex items-center justify-between bg-slate-50">
+              <span className="font-bold text-sm text-slate-900 truncate">{previewReceipt.filename}</span>
+              <button
+                type="button"
+                onClick={() => {
+                  if (previewReceipt.isPdf && previewReceipt.url.startsWith('blob:')) {
+                    URL.revokeObjectURL(previewReceipt.url);
+                  }
+                  setPreviewReceipt(null);
+                }}
+                className="p-1.5 rounded-lg text-slate-500 hover:text-slate-900 hover:bg-slate-200 transition cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <div className="p-4 flex-1 overflow-auto bg-slate-100 flex items-center justify-center">
+              {previewReceipt.isPdf ? (
+                <iframe
+                  src={previewReceipt.url}
+                  title={previewReceipt.filename}
+                  className="w-full h-[70vh] rounded-lg border border-slate-300 bg-white"
+                />
+              ) : (
+                <img
+                  src={previewReceipt.url}
+                  alt={previewReceipt.filename}
+                  className="max-w-full max-h-[70vh] object-contain rounded-lg shadow"
+                />
+              )}
+            </div>
           </div>
         </div>
       )}

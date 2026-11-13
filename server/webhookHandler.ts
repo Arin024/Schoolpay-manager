@@ -1,11 +1,13 @@
 import type { Request, Response } from 'express';
 import crypto from 'node:crypto';
-import { db } from './db.ts';
+import { db, isPgConnected, queryPg } from './db.ts';
 import { toKobo, toNaira, determineInvoiceStatus } from './financeUtils.ts';
 import { paymentService, generateInternalPaymentReference, type GatewayProvider } from './paymentService.ts';
-import { issueOfficialReceipt } from './paymentRoutes.ts';
+import { issueOfficialReceipt, syncPgFinancialStateToCache } from './paymentRoutes.ts';
 import { notificationService } from './notificationService.ts';
 import { logAudit } from './audit.ts';
+import { recordPaymentPg } from './postgresFinancialService.ts';
+import { escapeHtml, safeClientError } from './securityUtils.ts';
 
 export async function handlePaymentWebhook(req: Request, res: Response) {
   const provider = (req.params.provider || 'BACHS').toUpperCase() as GatewayProvider;
@@ -138,20 +140,30 @@ export async function handlePaymentWebhook(req: Request, res: Response) {
     rawBody
   );
 
-  // 4. Signature validation
+  // 4. Signature validation (FAIL-CLOSED)
   try {
+    if (provider === 'MANUAL') {
+      db.prepare('UPDATE webhook_events SET status = ?, error_message = ? WHERE id = ?').run('FAILED', 'Manual provider does not accept webhooks', eventId);
+      return res.status(401).json({ error: 'INVALID_SIGNATURE', message: 'Webhook endpoint not enabled for manual provider.' });
+    }
     const gateway = paymentService.getProvider(provider);
     const hasGlobalSecret = provider === 'BACHS' ? Boolean(process.env.BACHS_WEBHOOK_SECRET) : false;
-    if (gateway.isConfigured(schoolId || undefined) || hasGlobalSecret) {
-      const isValid = gateway.verifyWebhookSignature(rawBody, signature, schoolId || undefined, timestamp);
-      if (!isValid) {
-        db.prepare('UPDATE webhook_events SET status = ?, error_message = ? WHERE id = ?').run('FAILED', 'Invalid signature', eventId);
-        return res.status(401).json({ error: 'INVALID_SIGNATURE', message: 'Webhook signature verification failed.' });
-      }
+    if (
+      process.env.NODE_ENV === 'production' &&
+      process.env.ALLOW_SANDBOX_PAYMENTS !== 'true' &&
+      (!gateway.isConfigured(schoolId || undefined) && !hasGlobalSecret)
+    ) {
+      db.prepare('UPDATE webhook_events SET status = ?, error_message = ? WHERE id = ?').run('FAILED', 'Gateway webhook secret not configured', eventId);
+      return res.status(401).json({ error: 'WEBHOOK_SECRET_NOT_CONFIGURED', message: 'Webhook verification secret is not configured.' });
+    }
+    const isValid = gateway.verifyWebhookSignature(rawBody, signature, schoolId || undefined, timestamp);
+    if (!isValid) {
+      db.prepare('UPDATE webhook_events SET status = ?, error_message = ? WHERE id = ?').run('FAILED', 'Invalid signature', eventId);
+      return res.status(401).json({ error: 'INVALID_SIGNATURE', message: 'Webhook signature verification failed.' });
     }
   } catch (err: any) {
     db.prepare('UPDATE webhook_events SET status = ?, error_message = ? WHERE id = ?').run('FAILED', err.message, eventId);
-    return res.status(400).json({ error: 'PROVIDER_ERROR', message: err.message });
+    return res.status(400).json({ error: 'PROVIDER_ERROR', message: 'Unsupported or invalid webhook provider.' });
   }
 
   // ============================================================================
@@ -229,62 +241,112 @@ export async function handlePaymentWebhook(req: Request, res: Response) {
     return res.status(400).json({ error: 'OVERPAYMENT', message: 'Webhook amount exceeds invoice balance.' });
   }
 
-  // Atomic payment recording & balance update
   const schoolRow = db.prepare('SELECT slug FROM schools WHERE id = ?').get(schoolId) as { slug: string } | undefined;
   const slug = schoolRow?.slug || 'SCH';
   const countRow = db.prepare('SELECT COUNT(*) as c FROM payments WHERE school_id = ?').get(schoolId) as { c: number };
   if (!internalReference) {
     internalReference = generateInternalPaymentReference(slug, countRow.c + 1);
   }
-  const paymentId = `pay_${crypto.randomBytes(8).toString('hex')}`;
+  let paymentId = `pay_${crypto.randomBytes(8).toString('hex')}`;
+  let newBalance = Math.max(0, invoice.balance - amountKobo);
+  let receiptData: { receiptId: string; receiptNumber: string } | null = null;
   const now = new Date().toISOString();
 
   try {
-    db.prepare(`
-      INSERT INTO payments (
-        id, school_id, invoice_id, student_id, payment_reference, internal_reference,
-        amount, currency, payment_method, provider, provider_reference, status,
-        payment_date, paid_at, verified_at, notes, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, 'NGN', 'ONLINE', ?, ?, 'SUCCESS', ?, ?, ?, 'Automated webhook verified payment', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-    `).run(
-      paymentId,
-      schoolId,
-      invoice.id,
-      invoice.student_id,
-      internalReference,
-      internalReference,
-      amountKobo,
-      provider,
-      providerReference,
-      now.slice(0, 10),
-      now,
-      now
-    );
+    if (isPgConnected()) {
+      const pgResult = await recordPaymentPg({
+        schoolId,
+        invoiceId: invoice.id,
+        amountKobo,
+        paymentMethod: 'ONLINE',
+        paymentReference: internalReference,
+        internalReference,
+        provider,
+        providerReference,
+        notes: `Automated Webhook from ${provider}`,
+        receivedByUserId: 'SYSTEM_WEBHOOK',
+        isPending: false,
+      });
 
-    const newAmountPaid = invoice.amount_paid + amountKobo;
-    const newBalance = Math.max(0, invoice.total - newAmountPaid);
-    const newStatus = determineInvoiceStatus(invoice.total, newAmountPaid, invoice.due_date, invoice.status);
+      if (pgResult.success && pgResult.data) {
+        syncPgFinancialStateToCache(pgResult.data);
+        paymentId = pgResult.data.payment.id;
+        newBalance = Number(pgResult.data.invoice.balance);
+        if (pgResult.data.receipt) {
+          receiptData = {
+            receiptId: pgResult.data.receipt.id,
+            receiptNumber: pgResult.data.receipt.receipt_number,
+          };
+        }
+      } else if (pgResult.code === 'DUPLICATE_PAYMENT_REFERENCE' || pgResult.code === 'ALREADY_PAID') {
+        db.prepare('UPDATE webhook_events SET status = ?, processed_at = CURRENT_TIMESTAMP WHERE id = ?').run('PROCESSED', eventId);
+        return res.status(200).json({ status: 'ignored', message: 'Payment record already exists or invoice already settled.' });
+      } else if (pgResult.code === 'OVERPAYMENT_NOT_ALLOWED') {
+        db.prepare('UPDATE webhook_events SET status = ?, error_message = ? WHERE id = ?').run('FAILED', 'Amount exceeds invoice balance', eventId);
+        return res.status(400).json({ error: 'OVERPAYMENT', message: 'Webhook amount exceeds invoice balance.' });
+      }
+    }
 
-    db.prepare(`
-      UPDATE invoices SET
-        amount_paid = ?,
-        balance = ?,
-        status = ?,
-        updated_at = CURRENT_TIMESTAMP
-      WHERE id = ? AND school_id = ?
-    `).run(newAmountPaid, newBalance, newStatus, invoice.id, schoolId);
+    if (!receiptData) {
+      db.exec('BEGIN IMMEDIATE;');
+      try {
+        const freshInv = db.prepare('SELECT * FROM invoices WHERE id = ? AND school_id = ?').get(invoice.id, schoolId) as any;
+        if (!freshInv || amountKobo > freshInv.balance) {
+          db.exec('ROLLBACK;');
+          db.prepare('UPDATE webhook_events SET status = ?, error_message = ? WHERE id = ?').run('FAILED', 'Amount exceeds invoice balance', eventId);
+          return res.status(400).json({ error: 'OVERPAYMENT', message: 'Webhook amount exceeds invoice balance.' });
+        }
 
-    // Issue Official Receipt
-    const receiptData = issueOfficialReceipt({
-      schoolId,
-      paymentId,
-      invoiceId: invoice.id,
-      studentId: invoice.student_id,
-      amountKobo,
-      previousBalanceKobo: invoice.balance,
-      currentBalanceKobo: newBalance,
-      notes: `Automated Webhook from ${provider}`,
-    });
+        db.prepare(`
+          INSERT INTO payments (
+            id, school_id, invoice_id, student_id, payment_reference, internal_reference,
+            amount, currency, payment_method, provider, provider_reference, status,
+            payment_date, paid_at, verified_at, notes, created_at, updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, 'NGN', 'ONLINE', ?, ?, 'SUCCESS', ?, ?, ?, 'Automated webhook verified payment', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+        `).run(
+          paymentId,
+          schoolId,
+          freshInv.id,
+          freshInv.student_id,
+          internalReference,
+          internalReference,
+          amountKobo,
+          provider,
+          providerReference,
+          now.slice(0, 10),
+          now,
+          now
+        );
+
+        const newAmountPaid = freshInv.amount_paid + amountKobo;
+        newBalance = Math.max(0, freshInv.total - newAmountPaid);
+        const newStatus = determineInvoiceStatus(freshInv.total, newAmountPaid, freshInv.due_date, freshInv.status);
+
+        db.prepare(`
+          UPDATE invoices SET
+            amount_paid = ?,
+            balance = ?,
+            status = ?,
+            updated_at = CURRENT_TIMESTAMP
+          WHERE id = ? AND school_id = ?
+        `).run(newAmountPaid, newBalance, newStatus, freshInv.id, schoolId);
+
+        receiptData = issueOfficialReceipt({
+          schoolId,
+          paymentId,
+          invoiceId: freshInv.id,
+          studentId: freshInv.student_id,
+          amountKobo,
+          previousBalanceKobo: freshInv.balance,
+          currentBalanceKobo: newBalance,
+          notes: `Automated Webhook from ${provider}`,
+        });
+        db.exec('COMMIT;');
+      } catch (txnErr) {
+        try { db.exec('ROLLBACK;'); } catch {}
+        throw txnErr;
+      }
+    }
 
     // Mark webhook event as PROCESSED
     db.prepare('UPDATE webhook_events SET status = ?, processed_at = CURRENT_TIMESTAMP WHERE id = ?').run('PROCESSED', eventId);
@@ -326,7 +388,8 @@ export async function handlePaymentWebhook(req: Request, res: Response) {
     });
   } catch (err: any) {
     db.prepare('UPDATE webhook_events SET status = ?, error_message = ? WHERE id = ?').run('FAILED', err.message, eventId);
-    return res.status(500).json({ error: 'WEBHOOK_PROCESSING_FAILED', message: err.message });
+    console.error('[Webhook Processing Error]', err);
+    return res.status(500).json({ error: 'WEBHOOK_PROCESSING_FAILED', message: safeClientError(err) });
   }
 }
 
@@ -584,7 +647,8 @@ async function processPlatformSubscriptionWebhook(params: {
     });
   } catch (err: any) {
     db.prepare('UPDATE webhook_events SET status = ?, error_message = ? WHERE id = ?').run('FAILED', err.message, eventId);
-    return res.status(500).json({ error: 'SUBSCRIPTION_WEBHOOK_FAILED', message: err.message });
+    console.error('[Subscription Webhook Error]', err);
+    return res.status(500).json({ error: 'SUBSCRIPTION_WEBHOOK_FAILED', message: safeClientError(err) });
   }
 }
 
@@ -593,11 +657,24 @@ async function processPlatformSubscriptionWebhook(params: {
  * Handles GET /api/v1/webhooks/bachs-demo-checkout
  */
 export function handleBachsDemoCheckout(req: Request, res: Response) {
-  const { ref, internal, amount, school: schoolId } = req.query;
+  if (process.env.NODE_ENV === 'production' && process.env.ALLOW_SANDBOX_PAYMENTS !== 'true') {
+    return res.status(403).json({ error: 'SANDBOX_DISABLED', message: 'Demo checkout simulator is disabled in production.' });
+  }
 
-  const school = schoolId ? db.prepare('SELECT name, email, slug FROM schools WHERE id = ?').get(String(schoolId)) as any : null;
-  const amountKobo = Number(amount) || 0;
+  const refStr = typeof req.query.ref === 'string' ? req.query.ref : '';
+  const internalStr = typeof req.query.internal === 'string' ? req.query.internal : '';
+  const schoolIdStr = typeof req.query.school === 'string' ? req.query.school : '';
+  const amountKobo = Math.max(0, Number(req.query.amount) || 0);
+
+  const school = schoolIdStr ? (db.prepare('SELECT name, email, slug FROM schools WHERE id = ?').get(schoolIdStr) as any) : null;
   const amountNaira = toNaira(amountKobo);
+
+  const safeSchoolName = escapeHtml(school ? school.name : 'Nigerian School Tenant');
+  const safeRefDisplay = escapeHtml(internalStr || refStr || 'PLT-SUBSCRIPTION');
+  const safeRefAttr = escapeHtml(refStr);
+  const safeInternalAttr = escapeHtml(internalStr);
+  const safeSchoolAttr = escapeHtml(schoolIdStr);
+  const safeCancelHref = `/?status=cancelled&ref=${encodeURIComponent(refStr)}`;
 
   const html = `<!DOCTYPE html>
 <html lang="en">
@@ -623,8 +700,8 @@ export function handleBachsDemoCheckout(req: Request, res: Response) {
 
     <div>
       <p class="text-xs text-slate-400">Subscribing Organization</p>
-      <h2 class="text-xl font-black text-white">${school ? school.name : 'Nigerian School Tenant'}</h2>
-      <p class="text-xs text-slate-400 mt-1 font-mono">${internal || ref || 'PLT-SUBSCRIPTION'}</p>
+      <h2 class="text-xl font-black text-white">${safeSchoolName}</h2>
+      <p class="text-xs text-slate-400 mt-1 font-mono">${safeRefDisplay}</p>
     </div>
 
     <div class="p-4 rounded-2xl bg-slate-950/70 border border-slate-700/80 flex items-center justify-between">
@@ -661,16 +738,16 @@ export function handleBachsDemoCheckout(req: Request, res: Response) {
     </div>
 
     <form method="POST" action="/api/v1/webhooks/bachs-demo-checkout/complete" class="space-y-3 pt-2">
-      <input type="hidden" name="ref" value="${ref || ''}" />
-      <input type="hidden" name="internal" value="${internal || ''}" />
+      <input type="hidden" name="ref" value="${safeRefAttr}" />
+      <input type="hidden" name="internal" value="${safeInternalAttr}" />
       <input type="hidden" name="amount" value="${amountKobo}" />
-      <input type="hidden" name="school" value="${schoolId || ''}" />
+      <input type="hidden" name="school" value="${safeSchoolAttr}" />
 
       <button type="submit" class="w-full py-3.5 px-4 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-extrabold text-sm transition shadow-lg shadow-emerald-500/20 cursor-pointer">
         Simulate Successful Payment (Instant Webhook)
       </button>
 
-      <a href="/?status=cancelled&ref=${ref || ''}" class="block text-center text-xs text-slate-400 hover:text-white py-2">
+      <a href="${safeCancelHref}" class="block text-center text-xs text-slate-400 hover:text-white py-2">
         Cancel and return to BursarIQ
       </a>
     </form>
@@ -678,37 +755,54 @@ export function handleBachsDemoCheckout(req: Request, res: Response) {
 </body>
 </html>`;
 
-  res.setHeader('Content-Type', 'text/html');
+  res.setHeader('Content-Type', 'text/html; charset=utf-8');
   return res.send(html);
 }
 
 /**
  * Handle completion of Bachs Demo Checkout
- * Dispatches simulated webhook to activate subscription
+ * Strictly binds to an existing PENDING platform_payments record (never trusts client-supplied amount/school).
  */
 export async function handleBachsDemoCheckoutComplete(req: Request, res: Response) {
-  const { ref, internal, amount, school } = req.body;
-  const amountKobo = Number(amount) || 0;
-
-  // Find or update platform payment
-  let platPayment = db.prepare(`
-    SELECT * FROM platform_payments
-    WHERE provider_reference = ? OR internal_reference = ?
-  `).get(ref, internal) as any;
-
-  if (!platPayment && school) {
-    platPayment = db.prepare(`
-      SELECT * FROM platform_payments
-      WHERE school_id = ? AND status = 'PENDING'
-      ORDER BY created_at DESC LIMIT 1
-    `).get(school) as any;
+  if (process.env.NODE_ENV === 'production' && process.env.ALLOW_SANDBOX_PAYMENTS !== 'true') {
+    return res.status(403).json({ error: 'SANDBOX_DISABLED', message: 'Demo checkout simulator is disabled in production.' });
   }
 
-  const schoolId = school || platPayment?.school_id;
+  const ref = typeof req.body?.ref === 'string' ? req.body.ref.trim() : '';
+  const internal = typeof req.body?.internal === 'string' ? req.body.internal.trim() : '';
+
+  if (!ref && !internal) {
+    return res.status(400).json({ error: 'MISSING_REFERENCE', message: 'Checkout payment reference is required.' });
+  }
+
+  let platPayment = db.prepare(`
+    SELECT * FROM platform_payments
+    WHERE (provider_reference = ? OR internal_reference = ?) AND status = 'PENDING'
+    LIMIT 1
+  `).get(ref || '__none__', internal || '__none__') as any;
+
+  if (!platPayment && isPgConnected()) {
+    const pgRow = await queryPg(`
+      SELECT * FROM platform_payments
+      WHERE (provider_reference = $1 OR internal_reference = $2) AND status = 'PENDING'
+      LIMIT 1
+    `, [ref || '__none__', internal || '__none__']);
+    if (pgRow && pgRow.rows.length > 0) platPayment = pgRow.rows[0];
+  }
+
+  if (!platPayment) {
+    return res.status(404).json({
+      error: 'PENDING_CHECKOUT_NOT_FOUND',
+      message: 'No matching pending platform checkout session found for this reference.',
+    });
+  }
+
+  const schoolId = platPayment.school_id;
+  const authoritativeAmount = Number(platPayment.amount) || 0;
   const targetSchool = db.prepare('SELECT * FROM schools WHERE id = ?').get(schoolId) as any;
 
   if (targetSchool) {
-    const planId = platPayment?.plan_id || targetSchool.current_plan_id || 'plan_standard';
+    const planId = platPayment.plan_id || targetSchool.current_plan_id || 'plan_standard';
     const plan = db.prepare('SELECT * FROM subscription_plans WHERE id = ?').get(planId) as any;
 
     const endDateObj = new Date();
@@ -716,17 +810,25 @@ export async function handleBachsDemoCheckoutComplete(req: Request, res: Respons
     const newEndDateStr = endDateObj.toISOString().slice(0, 10);
     const nowIso = new Date().toISOString();
 
-    if (platPayment) {
-      db.prepare(`
-        UPDATE platform_payments SET
-          status = 'SUCCESS',
-          paid_at = ?,
-          provider_reference = COALESCE(?, provider_reference),
-          updated_at = CURRENT_TIMESTAMP
-        WHERE id = ?
-      `).run(nowIso, ref || 'bch_simulated_success', platPayment.id);
-    }
+    db.prepare(`
+      UPDATE platform_payments SET
+        status = 'SUCCESS',
+        paid_at = ?,
+        provider_reference = COALESCE(?, provider_reference),
+        updated_at = CURRENT_TIMESTAMP
+      WHERE id = ?
+    `).run(nowIso, ref || platPayment.provider_reference || 'bch_simulated_success', platPayment.id);
 
+    await queryPg(`
+      UPDATE platform_payments SET
+        status = 'SUCCESS',
+        paid_at = $1,
+        provider_reference = COALESCE($2, provider_reference),
+        updated_at = CURRENT_TIMESTAMP
+      WHERE id = $3
+    `, [nowIso, ref || platPayment.provider_reference || 'bch_simulated_success', platPayment.id]);
+
+    const finalPaid = authoritativeAmount || plan?.price || 0;
     db.prepare(`
       UPDATE school_subscriptions SET
         status = 'ACTIVE',
@@ -736,7 +838,18 @@ export async function handleBachsDemoCheckoutComplete(req: Request, res: Respons
         amount_paid = ?,
         updated_at = CURRENT_TIMESTAMP
       WHERE school_id = ? AND (status = 'ACTIVE' OR status = 'TRIAL' OR status = 'EXPIRED')
-    `).run(newEndDateStr, newEndDateStr, newEndDateStr, amountKobo || plan?.price || 0, schoolId);
+    `).run(newEndDateStr, newEndDateStr, newEndDateStr, finalPaid, schoolId);
+
+    await queryPg(`
+      UPDATE school_subscriptions SET
+        status = 'ACTIVE',
+        end_date = $1,
+        expiry_date = $1,
+        renewal_date = $1,
+        amount_paid = $2,
+        updated_at = CURRENT_TIMESTAMP
+      WHERE school_id = $3 AND (status = 'ACTIVE' OR status = 'TRIAL' OR status = 'EXPIRED')
+    `, [newEndDateStr, finalPaid, schoolId]);
 
     db.prepare(`
       UPDATE schools SET
@@ -746,18 +859,26 @@ export async function handleBachsDemoCheckoutComplete(req: Request, res: Respons
       WHERE id = ?
     `).run(newEndDateStr, schoolId);
 
+    await queryPg(`
+      UPDATE schools SET
+        status = 'ACTIVE',
+        subscription_end_date = $1,
+        updated_at = CURRENT_TIMESTAMP
+      WHERE id = $2
+    `, [newEndDateStr, schoolId]);
+
     logAudit({
       actorId: null,
       actorEmail: 'bachs_demo_checkout@system.local',
       schoolId,
       action: 'SAAS_SUBSCRIPTION_ACTIVATED_WEBHOOK',
       entity: 'PLATFORM_PAYMENT',
-      entityId: platPayment?.id || ref,
+      entityId: platPayment.id,
       metadata: { simulated: true, provider: 'BACHS', newEndDate: newEndDateStr },
     });
   }
 
-  return res.redirect(`/?status=success&ref=${ref || internal || 'demo'}`);
+  return res.redirect(`/?status=success&ref=${encodeURIComponent(ref || internal || 'demo')}`);
 }
 
 /**

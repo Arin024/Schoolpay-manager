@@ -20,6 +20,13 @@ import { SchoolUsersView } from './components/school/SchoolUsersView.js';
 import { SchoolAuditView } from './components/school/SchoolAuditView.js';
 import { SchoolSubscriptionView } from './components/school/SchoolSubscriptionView.js';
 import { SchoolRecycleBinView } from './components/school/SchoolRecycleBinView.js';
+import { SchoolPerformanceView } from './components/performance/SchoolPerformanceView.js';
+import { SchoolAttendanceView } from './components/performance/SchoolAttendanceView.js';
+import { SchoolBehaviourView } from './components/performance/SchoolBehaviourView.js';
+import { SchoolAnnouncementsView } from './components/performance/SchoolAnnouncementsView.js';
+import { ParentPortalView } from './components/portal/ParentPortalView.js';
+import { StudentPortalView } from './components/portal/StudentPortalView.js';
+import { TeacherPortalView } from './components/portal/TeacherPortalView.js';
 import { SuperAdminDashboard } from './components/admin/SuperAdminDashboard.js';
 import { OfflineIndicator } from './components/common/OfflineIndicator.js';
 import { NotFoundPage } from './components/common/NotFoundPage.js';
@@ -53,12 +60,19 @@ import {
   Zap,
   Lock,
   Trash2,
+  CalendarCheck,
+  MessageSquare,
+  Megaphone,
 } from 'lucide-react';
 import { SchoolStatusBadge } from './components/common/StatusBadge.js';
 
 type AppView = 'school' | 'superadmin' | 'login' | 'register' | 'thank-you' | 'privacy' | 'terms' | '404';
 type SchoolTab =
   | 'overview'
+  | 'performance'
+  | 'attendance'
+  | 'behaviour'
+  | 'announcements'
   | 'finance'
   | 'subscription'
   | 'students'
@@ -74,7 +88,7 @@ type SchoolTab =
   | 'security';
 
 const AppContent: React.FC = () => {
-  const { user, isSuperAdmin, isLoading, activeSchool, activeSettings } = useAuth();
+  const { user, isSuperAdmin, isLoading, activeSchool, activeSettings, activeRole } = useAuth();
   const [activeView, setActiveView] = useState<AppView>('school');
   const [schoolTab, setSchoolTab] = useState<SchoolTab>('overview');
   const [registeredSchoolName, setRegisteredSchoolName] = useState<string | undefined>(undefined);
@@ -150,6 +164,10 @@ const AppContent: React.FC = () => {
       default: {
         const tabTitles: Record<string, string> = {
           overview: 'Overview Dashboard',
+          performance: 'Academic Performance & Report Cards',
+          attendance: 'Attendance Monitoring',
+          behaviour: 'Behaviour & Remarks',
+          announcements: 'School Announcements',
           finance: 'Fees & Invoicing',
           subscription: 'SaaS Subscription & Billing',
           students: 'Student Admissions & Directory',
@@ -161,6 +179,7 @@ const AppContent: React.FC = () => {
           settings: 'School Configuration',
           users: 'User Roles & Permissions',
           audit: 'Audit Security Trail',
+          'recycle-bin': 'Recycle Bin',
           security: 'Tenant Guard Verification',
         };
         const prefix = tabTitles[tab] || 'School Management';
@@ -256,6 +275,10 @@ const AppContent: React.FC = () => {
       } else if (
         [
           'overview',
+          'performance',
+          'attendance',
+          'behaviour',
+          'announcements',
           'finance',
           'subscription',
           'students',
@@ -267,6 +290,7 @@ const AppContent: React.FC = () => {
           'settings',
           'users',
           'audit',
+          'recycle-bin',
           'security',
         ].includes(hash)
       ) {
@@ -305,6 +329,10 @@ const AppContent: React.FC = () => {
     } else if (
       [
         'overview',
+        'performance',
+        'attendance',
+        'behaviour',
+        'announcements',
         'finance',
         'subscription',
         'students',
@@ -316,6 +344,7 @@ const AppContent: React.FC = () => {
         'settings',
         'users',
         'audit',
+        'recycle-bin',
         'security',
       ].includes(hash)
     ) {
@@ -684,18 +713,26 @@ const AppContent: React.FC = () => {
                   </div>
 
                   <div className="flex items-center gap-2 text-xs bg-slate-50 px-3.5 py-2 rounded-xl border border-slate-200 self-start sm:self-auto">
-                    <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
                     <span className="text-slate-600 font-semibold">Private Tenant Environment</span>
                   </div>
                 </div>
               </div>
             )}
 
-            {/* School Secondary Navigation Tabs */}
+            {/* Dedicated Role-Scoped Portals (Parent, Student, Read-Only Teacher) */}
+            {activeRole?.role_name === 'PARENT' ? (
+              <ParentPortalView />
+            ) : activeRole?.role_name === 'STUDENT' ? (
+              <StudentPortalView />
+            ) : activeRole?.role_name === 'TEACHER' ? (
+              <TeacherPortalView />
+            ) : (
+            <>
+            {/* School Secondary Navigation Tabs (Owner / Admin / Bursar Workspace) */}
             <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-2 flex flex-wrap gap-1">
               <button
                 onClick={() => navigateTo('school', 'overview')}
-                className={`flex items-center gap-2 px-3.5 py-2.5 rounded-xl text-xs font-bold transition cursor-pointer ${
+                className={`flex items-center gap-2 px-3.5 py-2.5 rounded-xl text-xs font-bold transition cursor-pointer whitespace-nowrap shrink-0 ${
                   schoolTab === 'overview'
                     ? 'bg-slate-900 text-white shadow'
                     : 'text-slate-600 hover:bg-slate-100 hover:text-slate-900'
@@ -703,6 +740,54 @@ const AppContent: React.FC = () => {
               >
                 <LayoutDashboard className="w-4 h-4 text-emerald-400" />
                 <span>Overview</span>
+              </button>
+
+              <button
+                onClick={() => navigateTo('school', 'performance')}
+                className={`flex items-center gap-2 px-3.5 py-2.5 rounded-xl text-xs font-bold transition cursor-pointer whitespace-nowrap shrink-0 ${
+                  schoolTab === 'performance'
+                    ? 'bg-slate-900 text-white shadow'
+                    : 'text-slate-600 hover:bg-slate-100 hover:text-slate-900'
+                }`}
+              >
+                <BarChart3 className="w-4 h-4 text-emerald-400" />
+                <span>Performance &amp; Reports</span>
+              </button>
+
+              <button
+                onClick={() => navigateTo('school', 'attendance')}
+                className={`flex items-center gap-2 px-3.5 py-2.5 rounded-xl text-xs font-bold transition cursor-pointer whitespace-nowrap shrink-0 ${
+                  schoolTab === 'attendance'
+                    ? 'bg-slate-900 text-white shadow'
+                    : 'text-slate-600 hover:bg-slate-100 hover:text-slate-900'
+                }`}
+              >
+                <CalendarCheck className="w-4 h-4 text-emerald-400" />
+                <span>Attendance</span>
+              </button>
+
+              <button
+                onClick={() => navigateTo('school', 'behaviour')}
+                className={`flex items-center gap-2 px-3.5 py-2.5 rounded-xl text-xs font-bold transition cursor-pointer whitespace-nowrap shrink-0 ${
+                  schoolTab === 'behaviour'
+                    ? 'bg-slate-900 text-white shadow'
+                    : 'text-slate-600 hover:bg-slate-100 hover:text-slate-900'
+                }`}
+              >
+                <MessageSquare className="w-4 h-4 text-emerald-400" />
+                <span>Behaviour &amp; Remarks</span>
+              </button>
+
+              <button
+                onClick={() => navigateTo('school', 'announcements')}
+                className={`flex items-center gap-2 px-3.5 py-2.5 rounded-xl text-xs font-bold transition cursor-pointer whitespace-nowrap shrink-0 ${
+                  schoolTab === 'announcements'
+                    ? 'bg-slate-900 text-white shadow'
+                    : 'text-slate-600 hover:bg-slate-100 hover:text-slate-900'
+                }`}
+              >
+                <Megaphone className="w-4 h-4 text-emerald-400" />
+                <span>Announcements</span>
               </button>
 
               <button
@@ -876,6 +961,10 @@ const AppContent: React.FC = () => {
                 }}
               />
             )}
+            {schoolTab === 'performance' && <SchoolPerformanceView />}
+            {schoolTab === 'attendance' && <SchoolAttendanceView />}
+            {schoolTab === 'behaviour' && <SchoolBehaviourView />}
+            {schoolTab === 'announcements' && <SchoolAnnouncementsView />}
             {schoolTab === 'finance' && <SchoolFinanceView />}
             {schoolTab === 'subscription' && <SchoolSubscriptionView />}
             {schoolTab === 'students' && (
@@ -935,6 +1024,8 @@ const AppContent: React.FC = () => {
                   </div>
                 </div>
               </div>
+            )}
+            </>
             )}
           </div>
         )}

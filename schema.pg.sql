@@ -253,6 +253,7 @@ CREATE TABLE IF NOT EXISTS parents (
 CREATE TABLE IF NOT EXISTS students (
     id VARCHAR(64) PRIMARY KEY,
     school_id VARCHAR(64) NOT NULL REFERENCES schools(id) ON DELETE CASCADE,
+    user_id VARCHAR(64) REFERENCES users(id) ON DELETE SET NULL,
     admission_number VARCHAR(64),
     first_name VARCHAR(128) NOT NULL,
     middle_name VARCHAR(128) DEFAULT '',
@@ -288,8 +289,12 @@ CREATE TABLE IF NOT EXISTS parent_students (
     school_id VARCHAR(64) NOT NULL REFERENCES schools(id) ON DELETE CASCADE,
     parent_id VARCHAR(64) NOT NULL REFERENCES parents(id) ON DELETE CASCADE,
     student_id VARCHAR(64) NOT NULL REFERENCES students(id) ON DELETE CASCADE,
-    relationship VARCHAR(64) NOT NULL,
+    relationship VARCHAR(64) DEFAULT 'Parent',
+    relationship_type VARCHAR(64) DEFAULT 'Parent',
+    is_primary_contact INTEGER DEFAULT 1,
     is_emergency_contact INTEGER DEFAULT 1,
+    verified_by VARCHAR(64),
+    verified_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
     is_deleted INTEGER DEFAULT 0,
     deleted_at TIMESTAMPTZ,
@@ -524,14 +529,19 @@ CREATE TABLE IF NOT EXISTS bank_statement_entries (
 CREATE TABLE IF NOT EXISTS notifications (
     id VARCHAR(64) PRIMARY KEY,
     school_id VARCHAR(64) NOT NULL REFERENCES schools(id) ON DELETE CASCADE,
-    recipient_type VARCHAR(32) NOT NULL,
+    user_id VARCHAR(64),
+    type VARCHAR(64) DEFAULT 'SYSTEM',
+    recipient_type VARCHAR(32),
     recipient_id VARCHAR(64),
-    recipient_address VARCHAR(255) NOT NULL,
-    channel VARCHAR(32) NOT NULL CHECK(channel IN ('EMAIL', 'SMS', 'WHATSAPP', 'IN_APP')),
-    template_type VARCHAR(64) NOT NULL,
+    recipient_address VARCHAR(255),
+    channel VARCHAR(32) DEFAULT 'IN_APP',
+    template_type VARCHAR(64),
     title VARCHAR(255) NOT NULL,
-    body TEXT NOT NULL,
-    status VARCHAR(32) DEFAULT 'PENDING' CHECK(status IN ('PENDING', 'SENT', 'FAILED')),
+    message TEXT,
+    body TEXT,
+    data TEXT,
+    read_at TIMESTAMPTZ,
+    status VARCHAR(32) DEFAULT 'PENDING',
     sent_at TIMESTAMPTZ,
     error_message TEXT,
     created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
@@ -744,4 +754,240 @@ CREATE TABLE IF NOT EXISTS database_backups (
     created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
     verified_at TIMESTAMPTZ,
     test_restored_at TIMESTAMPTZ
+);
+
+-- ==============================================================================
+-- PERFORMANCE MANAGEMENT, REPORT CARDS, ATTENDANCE, BEHAVIOUR & PORTALS
+-- ==============================================================================
+
+INSERT INTO roles (id, name, display_name, description, scope)
+VALUES ('role_student', 'STUDENT', 'Student / Learner', 'Student portal read-only access to published results, attendance, and report cards', 'SCHOOL')
+ON CONFLICT (name) DO NOTHING;
+
+CREATE TABLE IF NOT EXISTS school_academic_settings (
+    id VARCHAR(64) PRIMARY KEY,
+    school_id VARCHAR(64) UNIQUE NOT NULL REFERENCES schools(id) ON DELETE CASCADE,
+    ca_max_score DOUBLE PRECISION NOT NULL DEFAULT 40,
+    exam_max_score DOUBLE PRECISION NOT NULL DEFAULT 60,
+    component_structure_json TEXT,
+    grading_scale_json TEXT NOT NULL,
+    missing_score_policy VARCHAR(32) NOT NULL DEFAULT 'EXCLUDE' CHECK(missing_score_policy IN ('EXCLUDE', 'ZERO')),
+    show_class_position INTEGER NOT NULL DEFAULT 1,
+    students_can_view_fees INTEGER NOT NULL DEFAULT 1,
+    teachers_can_view_fees INTEGER NOT NULL DEFAULT 0,
+    require_review_before_approve INTEGER NOT NULL DEFAULT 0,
+    updated_by VARCHAR(64) REFERENCES users(id) ON DELETE SET NULL,
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS subjects (
+    id VARCHAR(64) PRIMARY KEY,
+    school_id VARCHAR(64) NOT NULL REFERENCES schools(id) ON DELETE CASCADE,
+    name VARCHAR(128) NOT NULL,
+    code VARCHAR(32),
+    department VARCHAR(64),
+    class_id VARCHAR(64) REFERENCES classes(id) ON DELETE SET NULL,
+    status VARCHAR(32) NOT NULL DEFAULT 'ACTIVE' CHECK(status IN ('ACTIVE', 'INACTIVE')),
+    is_deleted INTEGER DEFAULT 0,
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (school_id, name)
+);
+
+CREATE TABLE IF NOT EXISTS examinations (
+    id VARCHAR(64) PRIMARY KEY,
+    school_id VARCHAR(64) NOT NULL REFERENCES schools(id) ON DELETE CASCADE,
+    academic_session_id VARCHAR(64) REFERENCES academic_sessions(id) ON DELETE SET NULL,
+    term_id VARCHAR(64) REFERENCES terms(id) ON DELETE SET NULL,
+    class_id VARCHAR(64) REFERENCES classes(id) ON DELETE SET NULL,
+    title VARCHAR(255) NOT NULL,
+    exam_type VARCHAR(64) NOT NULL DEFAULT 'TERMLY',
+    ca_max_score DOUBLE PRECISION NOT NULL DEFAULT 40,
+    exam_max_score DOUBLE PRECISION NOT NULL DEFAULT 60,
+    total_max_score DOUBLE PRECISION NOT NULL DEFAULT 100,
+    component_weights_json TEXT,
+    status VARCHAR(32) NOT NULL DEFAULT 'DRAFT' CHECK(status IN ('DRAFT', 'REVIEW', 'APPROVED', 'PUBLISHED')),
+    created_by VARCHAR(64) REFERENCES users(id) ON DELETE SET NULL,
+    reviewed_by VARCHAR(64) REFERENCES users(id) ON DELETE SET NULL,
+    reviewed_at TIMESTAMPTZ,
+    approved_by VARCHAR(64) REFERENCES users(id) ON DELETE SET NULL,
+    approved_at TIMESTAMPTZ,
+    published_by VARCHAR(64) REFERENCES users(id) ON DELETE SET NULL,
+    published_at TIMESTAMPTZ,
+    is_deleted INTEGER DEFAULT 0,
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS student_scores (
+    id VARCHAR(64) PRIMARY KEY,
+    school_id VARCHAR(64) NOT NULL REFERENCES schools(id) ON DELETE CASCADE,
+    examination_id VARCHAR(64) NOT NULL REFERENCES examinations(id) ON DELETE CASCADE,
+    student_id VARCHAR(64) NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+    class_id VARCHAR(64) REFERENCES classes(id) ON DELETE SET NULL,
+    subject_id VARCHAR(64) NOT NULL REFERENCES subjects(id) ON DELETE CASCADE,
+    academic_session_id VARCHAR(64) REFERENCES academic_sessions(id) ON DELETE SET NULL,
+    term_id VARCHAR(64) REFERENCES terms(id) ON DELETE SET NULL,
+    ca_score DOUBLE PRECISION,
+    exam_score DOUBLE PRECISION,
+    component_scores_json TEXT,
+    total_score DOUBLE PRECISION,
+    grade VARCHAR(16),
+    grade_remark VARCHAR(64),
+    subject_remark TEXT,
+    status VARCHAR(32) NOT NULL DEFAULT 'DRAFT' CHECK(status IN ('DRAFT', 'REVIEW', 'APPROVED', 'PUBLISHED')),
+    entered_by VARCHAR(64) REFERENCES users(id) ON DELETE SET NULL,
+    updated_by VARCHAR(64) REFERENCES users(id) ON DELETE SET NULL,
+    approved_by VARCHAR(64) REFERENCES users(id) ON DELETE SET NULL,
+    approved_at TIMESTAMPTZ,
+    published_by VARCHAR(64) REFERENCES users(id) ON DELETE SET NULL,
+    published_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (examination_id, student_id, subject_id)
+);
+
+CREATE TABLE IF NOT EXISTS score_correction_logs (
+    id VARCHAR(64) PRIMARY KEY,
+    school_id VARCHAR(64) NOT NULL REFERENCES schools(id) ON DELETE CASCADE,
+    score_id VARCHAR(64) NOT NULL REFERENCES student_scores(id) ON DELETE CASCADE,
+    examination_id VARCHAR(64) NOT NULL REFERENCES examinations(id) ON DELETE CASCADE,
+    student_id VARCHAR(64) NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+    subject_id VARCHAR(64) NOT NULL REFERENCES subjects(id) ON DELETE CASCADE,
+    previous_ca_score DOUBLE PRECISION,
+    new_ca_score DOUBLE PRECISION,
+    previous_exam_score DOUBLE PRECISION,
+    new_exam_score DOUBLE PRECISION,
+    previous_total DOUBLE PRECISION,
+    new_total DOUBLE PRECISION,
+    previous_grade VARCHAR(16),
+    new_grade VARCHAR(16),
+    reason TEXT NOT NULL,
+    corrected_by VARCHAR(64) NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    corrected_by_email VARCHAR(255),
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS report_cards (
+    id VARCHAR(64) PRIMARY KEY,
+    school_id VARCHAR(64) NOT NULL REFERENCES schools(id) ON DELETE CASCADE,
+    student_id VARCHAR(64) NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+    class_id VARCHAR(64) REFERENCES classes(id) ON DELETE SET NULL,
+    academic_session_id VARCHAR(64) NOT NULL REFERENCES academic_sessions(id) ON DELETE CASCADE,
+    term_id VARCHAR(64) NOT NULL REFERENCES terms(id) ON DELETE CASCADE,
+    examination_id VARCHAR(64) REFERENCES examinations(id) ON DELETE SET NULL,
+    status VARCHAR(32) NOT NULL DEFAULT 'DRAFT' CHECK(status IN ('DRAFT', 'REVIEW', 'APPROVED', 'PUBLISHED')),
+    total_score DOUBLE PRECISION DEFAULT 0,
+    average_score DOUBLE PRECISION DEFAULT 0,
+    subjects_count INTEGER DEFAULT 0,
+    class_position INTEGER,
+    class_size INTEGER,
+    attendance_summary_json TEXT,
+    behaviour_summary_json TEXT,
+    teacher_remark TEXT,
+    principal_remark TEXT,
+    snapshot_json TEXT,
+    verification_code VARCHAR(64),
+    approved_by VARCHAR(64) REFERENCES users(id) ON DELETE SET NULL,
+    approved_at TIMESTAMPTZ,
+    published_by VARCHAR(64) REFERENCES users(id) ON DELETE SET NULL,
+    published_at TIMESTAMPTZ,
+    created_by VARCHAR(64) REFERENCES users(id) ON DELETE SET NULL,
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (school_id, student_id, academic_session_id, term_id)
+);
+
+CREATE TABLE IF NOT EXISTS attendance_records (
+    id VARCHAR(64) PRIMARY KEY,
+    school_id VARCHAR(64) NOT NULL REFERENCES schools(id) ON DELETE CASCADE,
+    student_id VARCHAR(64) NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+    class_id VARCHAR(64) REFERENCES classes(id) ON DELETE SET NULL,
+    class_arm_id VARCHAR(64) REFERENCES class_arms(id) ON DELETE SET NULL,
+    academic_session_id VARCHAR(64) REFERENCES academic_sessions(id) ON DELETE SET NULL,
+    term_id VARCHAR(64) REFERENCES terms(id) ON DELETE SET NULL,
+    attendance_date TEXT NOT NULL,
+    status VARCHAR(32) NOT NULL CHECK(status IN ('PRESENT', 'ABSENT', 'LATE', 'EXCUSED')),
+    notes TEXT,
+    is_published INTEGER NOT NULL DEFAULT 0,
+    recorded_by VARCHAR(64) REFERENCES users(id) ON DELETE SET NULL,
+    updated_by VARCHAR(64) REFERENCES users(id) ON DELETE SET NULL,
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (school_id, student_id, attendance_date)
+);
+
+CREATE TABLE IF NOT EXISTS attendance_publications (
+    id VARCHAR(64) PRIMARY KEY,
+    school_id VARCHAR(64) NOT NULL REFERENCES schools(id) ON DELETE CASCADE,
+    class_id VARCHAR(64) REFERENCES classes(id) ON DELETE SET NULL,
+    academic_session_id VARCHAR(64) REFERENCES academic_sessions(id) ON DELETE SET NULL,
+    term_id VARCHAR(64) REFERENCES terms(id) ON DELETE SET NULL,
+    status VARCHAR(32) NOT NULL DEFAULT 'DRAFT' CHECK(status IN ('DRAFT', 'PUBLISHED')),
+    published_by VARCHAR(64) REFERENCES users(id) ON DELETE SET NULL,
+    published_at TIMESTAMPTZ,
+    notes TEXT,
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (school_id, class_id, academic_session_id, term_id)
+);
+
+CREATE TABLE IF NOT EXISTS behaviour_records (
+    id VARCHAR(64) PRIMARY KEY,
+    school_id VARCHAR(64) NOT NULL REFERENCES schools(id) ON DELETE CASCADE,
+    student_id VARCHAR(64) NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+    class_id VARCHAR(64) REFERENCES classes(id) ON DELETE SET NULL,
+    academic_session_id VARCHAR(64) REFERENCES academic_sessions(id) ON DELETE SET NULL,
+    term_id VARCHAR(64) REFERENCES terms(id) ON DELETE SET NULL,
+    record_date TEXT NOT NULL,
+    category VARCHAR(32) NOT NULL CHECK(category IN ('POSITIVE', 'COMMENDATION', 'DISCIPLINE', 'INCIDENT', 'PASTORAL')),
+    severity VARCHAR(32) NOT NULL DEFAULT 'LOW' CHECK(severity IN ('LOW', 'MODERATE', 'HIGH')),
+    title VARCHAR(255) NOT NULL,
+    description TEXT NOT NULL,
+    action_taken TEXT,
+    admin_remarks TEXT,
+    visible_to_parent INTEGER NOT NULL DEFAULT 1,
+    visible_to_student INTEGER NOT NULL DEFAULT 1,
+    visible_to_teacher INTEGER NOT NULL DEFAULT 1,
+    recorded_by VARCHAR(64) REFERENCES users(id) ON DELETE SET NULL,
+    updated_by VARCHAR(64) REFERENCES users(id) ON DELETE SET NULL,
+    is_deleted INTEGER NOT NULL DEFAULT 0,
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS teacher_remarks (
+    id VARCHAR(64) PRIMARY KEY,
+    school_id VARCHAR(64) NOT NULL REFERENCES schools(id) ON DELETE CASCADE,
+    student_id VARCHAR(64) NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+    class_id VARCHAR(64) REFERENCES classes(id) ON DELETE SET NULL,
+    academic_session_id VARCHAR(64) NOT NULL REFERENCES academic_sessions(id) ON DELETE CASCADE,
+    term_id VARCHAR(64) NOT NULL REFERENCES terms(id) ON DELETE CASCADE,
+    remark_text TEXT NOT NULL,
+    staff_name VARCHAR(255),
+    visible_to_parent INTEGER NOT NULL DEFAULT 1,
+    visible_to_student INTEGER NOT NULL DEFAULT 1,
+    author_admin_id VARCHAR(64) REFERENCES users(id) ON DELETE SET NULL,
+    updated_by VARCHAR(64) REFERENCES users(id) ON DELETE SET NULL,
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (school_id, student_id, academic_session_id, term_id)
+);
+
+CREATE TABLE IF NOT EXISTS school_announcements (
+    id VARCHAR(64) PRIMARY KEY,
+    school_id VARCHAR(64) NOT NULL REFERENCES schools(id) ON DELETE CASCADE,
+    title VARCHAR(255) NOT NULL,
+    content TEXT NOT NULL,
+    audience VARCHAR(32) NOT NULL DEFAULT 'ALL' CHECK(audience IN ('ALL', 'PARENTS', 'STUDENTS', 'TEACHERS', 'CLASS')),
+    target_class_id VARCHAR(64) REFERENCES classes(id) ON DELETE SET NULL,
+    priority VARCHAR(32) NOT NULL DEFAULT 'NORMAL' CHECK(priority IN ('NORMAL', 'IMPORTANT', 'URGENT')),
+    is_published INTEGER NOT NULL DEFAULT 1,
+    published_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    created_by VARCHAR(64) REFERENCES users(id) ON DELETE SET NULL,
+    created_by_name VARCHAR(255),
+    is_deleted INTEGER NOT NULL DEFAULT 0,
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
 );

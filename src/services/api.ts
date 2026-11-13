@@ -30,6 +30,20 @@ import {
   SubscriptionDiscount,
   Partner,
   Commission,
+  AcademicSettings,
+  SubjectItem,
+  ExaminationItem,
+  StudentScoreItem,
+  ScoreCorrectionLogItem,
+  ReportCardItem,
+  AttendanceRecordItem,
+  AttendancePublicationItem,
+  BehaviourRecordItem,
+  TeacherRemarkItem,
+  SchoolAnnouncementItem,
+  PerformanceOverviewData,
+  ParentDashboardData,
+  StudentDashboardData,
 } from '../types/index.js';
 
 const API_BASE = '/api/v1';
@@ -1574,4 +1588,548 @@ export const api = {
       headers: getAuthHeaders(),
     });
   },
+
+  // ============================================================================
+  // PERFORMANCE, ATTENDANCE, BEHAVIOUR, REPORT CARDS, ANNOUNCEMENTS & PORTALS
+  // ============================================================================
+
+  async switchActiveSchool(schoolId: string): Promise<{
+    success: boolean;
+    activeSchoolId: string;
+    activeRole: UserRole | null;
+    activeSchool: School | null;
+    activeSettings: SchoolSettings | null;
+  }> {
+    return safeFetch(`${API_BASE}/auth/switch-school`, {
+      method: 'POST',
+      headers: getAuthHeaders(schoolId),
+      body: JSON.stringify({ school_id: schoolId }),
+    });
+  },
+
+  // Academic & Portal Policy Settings
+  async getAcademicSettings(): Promise<{ success: boolean; settings: AcademicSettings }> {
+    return safeFetch(`${API_BASE}/school/performance/settings`, {
+      headers: getAuthHeaders(),
+    });
+  },
+
+  async updateAcademicSettings(data: Partial<AcademicSettings>): Promise<{ success: boolean; message: string; settings: AcademicSettings }> {
+    return safeFetch(`${API_BASE}/school/performance/settings`, {
+      method: 'PUT',
+      headers: getAuthHeaders(),
+      body: JSON.stringify(data),
+    });
+  },
+
+  // Performance Analytics & Overview
+  async getPerformanceOverview(params?: {
+    academic_session_id?: string;
+    term_id?: string;
+    class_id?: string;
+    subject_id?: string;
+    examination_id?: string;
+    behaviour_category?: string;
+    date_from?: string;
+    date_to?: string;
+  }): Promise<{ success: boolean } & PerformanceOverviewData> {
+    const query = new URLSearchParams();
+    if (params) {
+      Object.entries(params).forEach(([k, v]) => {
+        if (v) query.set(k, v);
+      });
+    }
+    return safeFetch(`${API_BASE}/school/performance/overview?${query.toString()}`, {
+      headers: getAuthHeaders(),
+    });
+  },
+
+  // Subjects
+  async getSubjects(): Promise<{ success: boolean; count: number; subjects: SubjectItem[] }> {
+    return safeFetch(`${API_BASE}/school/subjects`, {
+      headers: getAuthHeaders(),
+    });
+  },
+
+  async createSubject(data: { name: string; code?: string; department?: string; class_id?: string; status?: string }): Promise<{ success: boolean; subject: SubjectItem }> {
+    return safeFetch(`${API_BASE}/school/subjects`, {
+      method: 'POST',
+      headers: getAuthHeaders(),
+      body: JSON.stringify(data),
+    });
+  },
+
+  async updateSubject(id: string, data: Partial<SubjectItem>): Promise<{ success: boolean; subject: SubjectItem }> {
+    return safeFetch(`${API_BASE}/school/subjects/${id}`, {
+      method: 'PUT',
+      headers: getAuthHeaders(),
+      body: JSON.stringify(data),
+    });
+  },
+
+  async deleteSubject(id: string): Promise<{ success: boolean; message: string }> {
+    return safeFetch(`${API_BASE}/school/subjects/${id}`, {
+      method: 'DELETE',
+      headers: getAuthHeaders(),
+    });
+  },
+
+  // Examinations & Workflow
+  async getExaminations(params?: {
+    academic_session_id?: string;
+    term_id?: string;
+    class_id?: string;
+    status?: string;
+  }): Promise<{ success: boolean; count: number; examinations: ExaminationItem[] }> {
+    const query = new URLSearchParams();
+    if (params) {
+      Object.entries(params).forEach(([k, v]) => {
+        if (v) query.set(k, v);
+      });
+    }
+    return safeFetch(`${API_BASE}/school/examinations?${query.toString()}`, {
+      headers: getAuthHeaders(),
+    });
+  },
+
+  async createExamination(data: {
+    title: string;
+    exam_type?: string;
+    academic_session_id?: string;
+    term_id?: string;
+    class_id?: string;
+    ca_max_score?: number;
+    exam_max_score?: number;
+  }): Promise<{ success: boolean; examination: ExaminationItem }> {
+    return safeFetch(`${API_BASE}/school/examinations`, {
+      method: 'POST',
+      headers: getAuthHeaders(),
+      body: JSON.stringify(data),
+    });
+  },
+
+  async deleteExamination(id: string): Promise<{ success: boolean; message: string }> {
+    return safeFetch(`${API_BASE}/school/examinations/${id}`, {
+      method: 'DELETE',
+      headers: getAuthHeaders(),
+    });
+  },
+
+  async updateExaminationStatus(examId: string, status: 'DRAFT' | 'REVIEW' | 'APPROVED' | 'PUBLISHED'): Promise<{
+    success: boolean;
+    message: string;
+    examination: ExaminationItem;
+  }> {
+    return safeFetch(`${API_BASE}/school/examinations/${examId}/status`, {
+      method: 'POST',
+      headers: getAuthHeaders(),
+      body: JSON.stringify({ status }),
+    });
+  },
+
+  // Exam Scores & Audited Corrections
+  async getExaminationScores(examId: string, params?: { subject_id?: string; class_id?: string }): Promise<{
+    success: boolean;
+    examination: ExaminationItem;
+    roster: Array<{ id: string; admission_number: string; full_name: string; class_id?: string | null; class_name?: string | null }>;
+    scores: StudentScoreItem[];
+    corrections: ScoreCorrectionLogItem[];
+  }> {
+    const query = new URLSearchParams();
+    if (params?.subject_id) query.set('subject_id', params.subject_id);
+    if (params?.class_id) query.set('class_id', params.class_id);
+    return safeFetch(`${API_BASE}/school/examinations/${examId}/scores?${query.toString()}`, {
+      headers: getAuthHeaders(),
+    });
+  },
+
+  async saveExaminationScores(
+    examId: string,
+    entries: Array<{
+      student_id: string;
+      subject_id: string;
+      ca_score: number | null;
+      exam_score: number | null;
+      subject_remark?: string | null;
+    }>
+  ): Promise<{ success: boolean; savedCount: number; scores: StudentScoreItem[] }> {
+    return safeFetch(`${API_BASE}/school/examinations/${examId}/scores`, {
+      method: 'PUT',
+      headers: getAuthHeaders(),
+      body: JSON.stringify({ entries }),
+    });
+  },
+
+  async correctPublishedScore(
+    scoreId: string,
+    data: { ca_score?: number | null; exam_score?: number | null; subject_remark?: string; reason: string }
+  ): Promise<{ success: boolean; message: string; score: StudentScoreItem; correctionLog: ScoreCorrectionLogItem }> {
+    return safeFetch(`${API_BASE}/school/scores/${scoreId}/correct`, {
+      method: 'POST',
+      headers: getAuthHeaders(),
+      body: JSON.stringify(data),
+    });
+  },
+
+  async getScoreCorrections(): Promise<{ success: boolean; corrections: ScoreCorrectionLogItem[] }> {
+    return safeFetch(`${API_BASE}/school/scores/corrections`, {
+      headers: getAuthHeaders(),
+    });
+  },
+
+  async getStudentPerformance(studentId: string): Promise<{
+    success: boolean;
+    student: Student;
+    scores: StudentScoreItem[];
+    attendance: AttendanceRecordItem[];
+    behaviour: BehaviourRecordItem[];
+    remarks: TeacherRemarkItem[];
+    reportCards: ReportCardItem[];
+  }> {
+    return safeFetch(`${API_BASE}/school/students/${studentId}/performance`, {
+      headers: getAuthHeaders(),
+    });
+  },
+
+  // Digital Report Cards
+  async getReportCards(params?: {
+    academic_session_id?: string;
+    term_id?: string;
+    class_id?: string;
+    status?: string;
+    student_id?: string;
+  }): Promise<{ success: boolean; count: number; reportCards: ReportCardItem[] }> {
+    const query = new URLSearchParams();
+    if (params) {
+      Object.entries(params).forEach(([k, v]) => {
+        if (v) query.set(k, v);
+      });
+    }
+    return safeFetch(`${API_BASE}/school/report-cards?${query.toString()}`, {
+      headers: getAuthHeaders(),
+    });
+  },
+
+  async getReportCardDetail(id: string): Promise<{ success: boolean; reportCard: ReportCardItem }> {
+    return safeFetch(`${API_BASE}/school/report-cards/${id}`, {
+      headers: getAuthHeaders(),
+    });
+  },
+
+  async generateReportCards(data: {
+    academic_session_id: string;
+    term_id: string;
+    class_id?: string;
+    examination_id?: string;
+    student_id?: string;
+  }): Promise<{ success: boolean; count: number; reportCards: ReportCardItem[] }> {
+    return safeFetch(`${API_BASE}/school/report-cards/generate`, {
+      method: 'POST',
+      headers: getAuthHeaders(),
+      body: JSON.stringify(data),
+    });
+  },
+
+  async updateReportCardRemarks(
+    id: string,
+    data: { teacher_remark?: string; principal_remark?: string; status?: 'DRAFT' | 'REVIEW' | 'APPROVED' }
+  ): Promise<{ success: boolean; reportCard: ReportCardItem }> {
+    return safeFetch(`${API_BASE}/school/report-cards/${id}/remarks`, {
+      method: 'PUT',
+      headers: getAuthHeaders(),
+      body: JSON.stringify(data),
+    });
+  },
+
+  async publishReportCard(id: string): Promise<{ success: boolean; message: string; reportCard: ReportCardItem }> {
+    return safeFetch(`${API_BASE}/school/report-cards/${id}/publish`, {
+      method: 'POST',
+      headers: getAuthHeaders(),
+    });
+  },
+
+  async publishClassReportCards(data: {
+    class_id?: string;
+    academic_session_id: string;
+    term_id: string;
+  }): Promise<{ success: boolean; publishedCount: number }> {
+    return safeFetch(`${API_BASE}/school/report-cards/publish-class`, {
+      method: 'POST',
+      headers: getAuthHeaders(),
+      body: JSON.stringify(data),
+    });
+  },
+
+  // Attendance
+  async getAttendance(params?: {
+    class_id?: string;
+    attendance_date?: string;
+    academic_session_id?: string;
+    term_id?: string;
+    student_id?: string;
+  }): Promise<{ success: boolean; count: number; records: AttendanceRecordItem[]; publications: AttendancePublicationItem[] }> {
+    const query = new URLSearchParams();
+    if (params) {
+      Object.entries(params).forEach(([k, v]) => {
+        if (v) query.set(k, v);
+      });
+    }
+    return safeFetch(`${API_BASE}/school/attendance?${query.toString()}`, {
+      headers: getAuthHeaders(),
+    });
+  },
+
+  async bulkMarkAttendance(data: {
+    attendance_date: string;
+    class_id?: string;
+    academic_session_id?: string;
+    term_id?: string;
+    is_published?: boolean | number;
+    records: Array<{ student_id: string; status: 'PRESENT' | 'ABSENT' | 'LATE' | 'EXCUSED'; notes?: string }>;
+  }): Promise<{ success: boolean; savedCount: number }> {
+    return safeFetch(`${API_BASE}/school/attendance/bulk`, {
+      method: 'POST',
+      headers: getAuthHeaders(),
+      body: JSON.stringify(data),
+    });
+  },
+
+  async publishAttendance(data: {
+    class_id?: string;
+    academic_session_id?: string;
+    term_id?: string;
+    notes?: string;
+  }): Promise<{ success: boolean; message: string }> {
+    return safeFetch(`${API_BASE}/school/attendance/publish`, {
+      method: 'POST',
+      headers: getAuthHeaders(),
+      body: JSON.stringify(data),
+    });
+  },
+
+  // Behaviour & Teacher Remarks
+  async getBehaviourRecords(params?: {
+    student_id?: string;
+    class_id?: string;
+    category?: string;
+    severity?: string;
+    academic_session_id?: string;
+    term_id?: string;
+  }): Promise<{ success: boolean; count: number; records: BehaviourRecordItem[] }> {
+    const query = new URLSearchParams();
+    if (params) {
+      Object.entries(params).forEach(([k, v]) => {
+        if (v) query.set(k, v);
+      });
+    }
+    return safeFetch(`${API_BASE}/school/behaviour?${query.toString()}`, {
+      headers: getAuthHeaders(),
+    });
+  },
+
+  async createBehaviourRecord(data: {
+    student_id: string;
+    class_id?: string;
+    academic_session_id?: string;
+    term_id?: string;
+    record_date?: string;
+    category: string;
+    severity?: string;
+    title: string;
+    description: string;
+    action_taken?: string;
+    admin_remarks?: string;
+    visible_to_parent?: boolean;
+    visible_to_student?: boolean;
+    visible_to_teacher?: boolean;
+  }): Promise<{ success: boolean; record: BehaviourRecordItem }> {
+    return safeFetch(`${API_BASE}/school/behaviour`, {
+      method: 'POST',
+      headers: getAuthHeaders(),
+      body: JSON.stringify(data),
+    });
+  },
+
+  async updateBehaviourRecord(id: string, data: Omit<Partial<BehaviourRecordItem>, 'visible_to_parent' | 'visible_to_student' | 'visible_to_teacher'> & {
+    visible_to_parent?: boolean | number;
+    visible_to_student?: boolean | number;
+    visible_to_teacher?: boolean | number;
+  }): Promise<{ success: boolean; record: BehaviourRecordItem }> {
+    return safeFetch(`${API_BASE}/school/behaviour/${id}`, {
+      method: 'PUT',
+      headers: getAuthHeaders(),
+      body: JSON.stringify(data),
+    });
+  },
+
+  async deleteBehaviourRecord(id: string): Promise<{ success: boolean; message: string }> {
+    return safeFetch(`${API_BASE}/school/behaviour/${id}`, {
+      method: 'DELETE',
+      headers: getAuthHeaders(),
+    });
+  },
+
+  async getTeacherRemarks(params?: {
+    student_id?: string;
+    academic_session_id?: string;
+    term_id?: string;
+    class_id?: string;
+  }): Promise<{ success: boolean; remarks: TeacherRemarkItem[] }> {
+    const query = new URLSearchParams();
+    if (params) {
+      Object.entries(params).forEach(([k, v]) => {
+        if (v) query.set(k, v);
+      });
+    }
+    return safeFetch(`${API_BASE}/school/teacher-remarks?${query.toString()}`, {
+      headers: getAuthHeaders(),
+    });
+  },
+
+  async upsertTeacherRemark(data: {
+    student_id: string;
+    class_id?: string;
+    academic_session_id: string;
+    term_id: string;
+    remark_text: string;
+    staff_name?: string;
+    visible_to_parent?: boolean;
+    visible_to_student?: boolean;
+  }): Promise<{ success: boolean; remark: TeacherRemarkItem }> {
+    return safeFetch(`${API_BASE}/school/teacher-remarks`, {
+      method: 'PUT',
+      headers: getAuthHeaders(),
+      body: JSON.stringify(data),
+    });
+  },
+
+  // Announcements
+  async getAnnouncements(): Promise<{ success: boolean; count: number; announcements: SchoolAnnouncementItem[] }> {
+    return safeFetch(`${API_BASE}/school/announcements`, {
+      headers: getAuthHeaders(),
+    });
+  },
+
+  async createAnnouncement(data: {
+    title: string;
+    content: string;
+    audience: string;
+    target_class_id?: string | null;
+    priority?: string;
+    is_published?: boolean;
+  }): Promise<{ success: boolean; announcement: SchoolAnnouncementItem }> {
+    return safeFetch(`${API_BASE}/school/announcements`, {
+      method: 'POST',
+      headers: getAuthHeaders(),
+      body: JSON.stringify(data),
+    });
+  },
+
+  async updateAnnouncement(id: string, data: Omit<Partial<SchoolAnnouncementItem>, 'is_published'> & { is_published?: boolean | number }): Promise<{
+    success: boolean;
+    announcement: SchoolAnnouncementItem;
+  }> {
+    return safeFetch(`${API_BASE}/school/announcements/${id}`, {
+      method: 'PUT',
+      headers: getAuthHeaders(),
+      body: JSON.stringify(data),
+    });
+  },
+
+  async deleteAnnouncement(id: string): Promise<{ success: boolean; message: string }> {
+    return safeFetch(`${API_BASE}/school/announcements/${id}`, {
+      method: 'DELETE',
+      headers: getAuthHeaders(),
+    });
+  },
+
+  // Admin Portal User Provisioning & Explicit Verification Linkage
+  async provisionPortalUser(data: {
+    email: string;
+    full_name: string;
+    phone?: string;
+    password?: string;
+    role_name: 'SCHOOL_ADMIN' | 'BURSAR' | 'TEACHER' | 'PARENT' | 'STUDENT';
+    parent_id?: string | null;
+    create_parent_profile?: boolean;
+    student_ids?: string[];
+    student_id?: string | null;
+  }): Promise<{ success: boolean; message: string; user: any }> {
+    return safeFetch(`${API_BASE}/school/users/provision`, {
+      method: 'POST',
+      headers: getAuthHeaders(),
+      body: JSON.stringify(data),
+    });
+  },
+
+  async updateParentChildren(
+    parentId: string,
+    data: { student_ids: string[]; user_id?: string | null }
+  ): Promise<{ success: boolean; message: string; student_ids: string[] }> {
+    return safeFetch(`${API_BASE}/school/parents/${parentId}/students`, {
+      method: 'PUT',
+      headers: getAuthHeaders(),
+      body: JSON.stringify(data),
+    });
+  },
+
+  async provisionStudentAccount(
+    studentId: string,
+    data: { email: string; password: string }
+  ): Promise<{ success: boolean; message: string; userId: string; studentId: string }> {
+    return safeFetch(`${API_BASE}/school/students/${studentId}/provision-account`, {
+      method: 'POST',
+      headers: getAuthHeaders(),
+      body: JSON.stringify(data),
+    });
+  },
+
+  async revokeSchoolUser(userId: string): Promise<{ success: boolean; message: string }> {
+    return safeFetch(`${API_BASE}/school/users/${userId}`, {
+      method: 'DELETE',
+      headers: getAuthHeaders(),
+    });
+  },
+
+  // Parent & Student Read-Only Portals
+  async getParentDashboard(params?: {
+    student_id?: string;
+    academic_session_id?: string;
+    term_id?: string;
+  }): Promise<{ success: boolean } & ParentDashboardData> {
+    const query = new URLSearchParams();
+    if (params?.student_id) query.set('student_id', params.student_id);
+    if (params?.academic_session_id) query.set('academic_session_id', params.academic_session_id);
+    if (params?.term_id) query.set('term_id', params.term_id);
+    return safeFetch(`${API_BASE}/portal/parent/dashboard?${query.toString()}`, {
+      headers: getAuthHeaders(),
+    });
+  },
+
+  async getParentReportCard(id: string): Promise<{ success: boolean; reportCard: ReportCardItem }> {
+    return safeFetch(`${API_BASE}/portal/parent/report-cards/${id}`, {
+      headers: getAuthHeaders(),
+    });
+  },
+
+  async getStudentDashboard(params?: {
+    student_id?: string;
+    academic_session_id?: string;
+    term_id?: string;
+  }): Promise<{ success: boolean } & StudentDashboardData> {
+    const query = new URLSearchParams();
+    if (params?.student_id) query.set('student_id', params.student_id);
+    if (params?.academic_session_id) query.set('academic_session_id', params.academic_session_id);
+    if (params?.term_id) query.set('term_id', params.term_id);
+    return safeFetch(`${API_BASE}/portal/student/dashboard?${query.toString()}`, {
+      headers: getAuthHeaders(),
+    });
+  },
+
+  async getStudentReportCard(id: string): Promise<{ success: boolean; reportCard: ReportCardItem }> {
+    return safeFetch(`${API_BASE}/portal/student/report-cards/${id}`, {
+      headers: getAuthHeaders(),
+    });
+  },
 };
+
