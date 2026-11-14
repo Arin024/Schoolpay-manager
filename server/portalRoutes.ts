@@ -33,6 +33,7 @@ for (const method of ['get', 'post', 'put', 'patch', 'delete'] as const) {
 
 const PARENT_PORTAL_ROLES = ['SUPER_ADMIN', 'SCHOOL_OWNER', 'SCHOOL_ADMIN', 'PARENT'];
 const STUDENT_PORTAL_ROLES = ['SUPER_ADMIN', 'SCHOOL_OWNER', 'SCHOOL_ADMIN', 'STUDENT'];
+const TEACHER_PORTAL_ROLES = ['SUPER_ADMIN', 'SCHOOL_OWNER', 'SCHOOL_ADMIN', 'TEACHER'];
 
 function sanitizeBreakdownForPortal(
   rawSnapshot: string | null,
@@ -355,6 +356,23 @@ async function fetchPersonalNotifications(schoolId: string, userId: string) {
   });
 }
 
+async function fetchSchoolSessionsWithTerms(schoolId: string) {
+  const sessions = await dbAll(
+    `SELECT * FROM academic_sessions WHERE school_id = $1 ORDER BY name DESC`,
+    `SELECT * FROM academic_sessions WHERE school_id = ? ORDER BY name DESC`,
+    [schoolId]
+  );
+  const terms = await dbAll(
+    `SELECT * FROM terms WHERE school_id = $1 ORDER BY name ASC`,
+    `SELECT * FROM terms WHERE school_id = ? ORDER BY name ASC`,
+    [schoolId]
+  );
+  return sessions.map((s) => ({
+    ...s,
+    terms: terms.filter((t) => t.academic_session_id === s.id),
+  }));
+}
+
 // ==============================================================================
 // 1. PARENT PORTAL ENDPOINTS (STRICTLY READ-ONLY ACADEMIC + CHILD-SCOPED FEES)
 // ==============================================================================
@@ -378,6 +396,18 @@ portalRouter.get(
     );
     const userSchools = await fetchUserSchools(userId);
     const notifications = await fetchPersonalNotifications(schoolId, userId);
+    const sessions = await fetchSchoolSessionsWithTerms(schoolId);
+    const parentProfile = await dbGet(
+      `SELECT id, first_name, last_name, phone, email, address, occupation, relationship
+       FROM parents
+       WHERE user_id = $1 AND school_id = $2 AND (is_deleted = 0 OR is_deleted IS NULL)
+       LIMIT 1`,
+      `SELECT id, first_name, last_name, phone, email, address, occupation, relationship
+       FROM parents
+       WHERE user_id = ? AND school_id = ? AND (is_deleted = 0 OR is_deleted IS NULL)
+       LIMIT 1`,
+      [userId, schoolId]
+    );
 
     // Strictly resolve ONLY explicitly verified linked children
     let children: any[] = [];
@@ -464,6 +494,8 @@ portalRouter.get(
         school,
         settings,
         schools: userSchools,
+        sessions,
+        parentProfile: parentProfile || null,
         children: [],
         selectedChild: null,
         results: [],
@@ -543,6 +575,8 @@ portalRouter.get(
       school,
       settings,
       schools: userSchools,
+      sessions,
+      parentProfile: parentProfile || null,
       children,
       selectedChild,
       results,
@@ -642,6 +676,7 @@ portalRouter.get(
       [schoolId]
     );
     const notifications = await fetchPersonalNotifications(schoolId, userId);
+    const sessions = await fetchSchoolSessionsWithTerms(schoolId);
 
     let student: any = null;
     if (roleName === 'STUDENT') {
@@ -685,6 +720,7 @@ portalRouter.get(
         success: true,
         school,
         settings,
+        sessions,
         student: null,
         results: [],
         termTrend: [],
@@ -763,6 +799,7 @@ portalRouter.get(
       success: true,
       school,
       settings,
+      sessions,
       student: {
         ...student,
         class_name: student.class_display_name || student.class_name,
@@ -837,6 +874,181 @@ portalRouter.get(
         class_position: settings.show_class_position ? rc.class_position : null,
         class_size: settings.show_class_position ? rc.class_size : null,
         breakdown,
+      },
+    });
+  }
+);
+
+// ==============================================================================
+// 3. TEACHER PORTAL ENDPOINTS (STRICTLY READ-ONLY EDUCATOR WORKSPACE)
+// ==============================================================================
+
+portalRouter.get(
+  '/teacher/dashboard',
+  requireAuth,
+  requireTenant,
+  requireRole(TEACHER_PORTAL_ROLES),
+  async (req: AuthenticatedRequest, res) => {
+    const schoolId = req.targetSchoolId!;
+    const userId = req.user!.id;
+    const userEmail = String(req.user!.email || '').toLowerCase();
+
+    const [settings, school, userSchools, sessions, notifications] = await Promise.all([
+      getSchoolAcademicSettings(schoolId),
+      dbGet(
+        `SELECT id, name, slug, address, state, lga, phone, email, website, logo_url FROM schools WHERE id = $1`,
+        `SELECT id, name, slug, address, state, lga, phone, email, website, logo_url FROM schools WHERE id = ?`,
+        [schoolId]
+      ),
+      fetchUserSchools(userId),
+      fetchSchoolSessionsWithTerms(schoolId),
+      fetchPersonalNotifications(schoolId, userId),
+    ]);
+
+    const staff = await dbGet(
+      `SELECT id, staff_number, first_name, middle_name, last_name, email, phone, gender, job_title, department, employment_status, date_joined
+       FROM staff
+       WHERE school_id = $1 AND LOWER(COALESCE(email, '')) = $2 AND (is_deleted = 0 OR is_deleted IS NULL)
+       LIMIT 1`,
+      `SELECT id, staff_number, first_name, middle_name, last_name, email, phone, gender, job_title, department, employment_status, date_joined
+       FROM staff
+       WHERE school_id = ? AND LOWER(COALESCE(email, '')) = ? AND (is_deleted = 0 OR is_deleted IS NULL)
+       LIMIT 1`,
+      [schoolId, userEmail]
+    );
+
+    let assignedArms: any[] = [];
+    if (staff?.id) {
+      assignedArms = await dbAll(
+        `SELECT ca.id as arm_id, ca.name as arm_name, ca.capacity,
+                c.id as class_id, c.name as class_name, c.level as class_level,
+                (SELECT COUNT(*) FROM students s WHERE s.school_id = $1 AND s.class_id = c.id AND (s.class_arm_id = ca.id OR s.class_arm_id IS NULL) AND (s.is_deleted = 0 OR s.is_deleted IS NULL)) as students_count
+         FROM class_arms ca
+         JOIN classes c ON ca.class_id = c.id
+         WHERE ca.school_id = $1 AND ca.class_teacher_id = $2
+           AND (c.is_deleted = 0 OR c.is_deleted IS NULL)
+         ORDER BY c.name ASC, ca.name ASC`,
+        `SELECT ca.id as arm_id, ca.name as arm_name, ca.capacity,
+                c.id as class_id, c.name as class_name, c.level as class_level,
+                (SELECT COUNT(*) FROM students s WHERE s.school_id = ca.school_id AND s.class_id = c.id AND (s.class_arm_id = ca.id OR s.class_arm_id IS NULL) AND (s.is_deleted = 0 OR s.is_deleted IS NULL)) as students_count
+         FROM class_arms ca
+         JOIN classes c ON ca.class_id = c.id
+         WHERE ca.school_id = ? AND ca.class_teacher_id = ?
+           AND (c.is_deleted = 0 OR c.is_deleted IS NULL)
+         ORDER BY c.name ASC, ca.name ASC`,
+        [schoolId, staff.id]
+      );
+    }
+
+    const assignedClassIds = Array.from(new Set(assignedArms.map((a) => String(a.class_id))));
+    const assignedArmIds = Array.from(new Set(assignedArms.map((a) => String(a.arm_id))));
+
+    let students: any[] = [];
+    if (assignedClassIds.length > 0) {
+      const classStudents = await dbAll(
+        `SELECT s.id, s.admission_number, s.full_name, s.first_name, s.last_name, s.gender,
+                s.class_id, s.class_arm_id, COALESCE(c.name, s.class_name) as class_name,
+                s.class_arm_name, s.student_status
+         FROM students s
+         LEFT JOIN classes c ON s.class_id = c.id
+         WHERE s.school_id = $1 AND (s.is_deleted = 0 OR s.is_deleted IS NULL)
+         ORDER BY s.full_name ASC`,
+        `SELECT s.id, s.admission_number, s.full_name, s.first_name, s.last_name, s.gender,
+                s.class_id, s.class_arm_id, COALESCE(c.name, s.class_name) as class_name,
+                s.class_arm_name, s.student_status
+         FROM students s
+         LEFT JOIN classes c ON s.class_id = c.id
+         WHERE s.school_id = ? AND (s.is_deleted = 0 OR s.is_deleted IS NULL)
+         ORDER BY s.full_name ASC`,
+        [schoolId]
+      );
+      students = classStudents.filter(
+        (st) =>
+          (st.class_arm_id && assignedArmIds.includes(String(st.class_arm_id))) ||
+          (!st.class_arm_id && st.class_id && assignedClassIds.includes(String(st.class_id)))
+      );
+    }
+
+    const [allClasses, subjects, announcements, examCountRow, reportCountRow, attCountRow] = await Promise.all([
+      dbAll(
+        `SELECT c.id, c.name, c.level,
+                (SELECT COUNT(*) FROM students s WHERE s.class_id = c.id AND s.school_id = $1 AND (s.is_deleted = 0 OR s.is_deleted IS NULL)) as total_students
+         FROM classes c
+         WHERE c.school_id = $1 AND (c.is_deleted = 0 OR c.is_deleted IS NULL)
+         ORDER BY c.name ASC`,
+        `SELECT c.id, c.name, c.level,
+                (SELECT COUNT(*) FROM students s WHERE s.class_id = c.id AND s.school_id = c.school_id AND (s.is_deleted = 0 OR s.is_deleted IS NULL)) as total_students
+         FROM classes c
+         WHERE c.school_id = ? AND (c.is_deleted = 0 OR c.is_deleted IS NULL)
+         ORDER BY c.name ASC`,
+        [schoolId]
+      ),
+      dbAll(
+        `SELECT id, name, code, department, class_id, status FROM subjects WHERE school_id = $1 AND status = 'ACTIVE' ORDER BY name ASC`,
+        `SELECT id, name, code, department, class_id, status FROM subjects WHERE school_id = ? AND status = 'ACTIVE' ORDER BY name ASC`,
+        [schoolId]
+      ),
+      dbAll(
+        `SELECT sa.*, c.name as target_class_name
+         FROM school_announcements sa
+         LEFT JOIN classes c ON sa.target_class_id = c.id
+         WHERE sa.school_id = $1 AND sa.is_published = 1 AND (sa.is_deleted = 0 OR sa.is_deleted IS NULL)
+           AND sa.audience IN ('ALL', 'TEACHERS', 'CLASS')
+         ORDER BY sa.published_at DESC LIMIT 20`,
+        `SELECT sa.*, c.name as target_class_name
+         FROM school_announcements sa
+         LEFT JOIN classes c ON sa.target_class_id = c.id
+         WHERE sa.school_id = ? AND sa.is_published = 1 AND (sa.is_deleted = 0 OR sa.is_deleted IS NULL)
+           AND sa.audience IN ('ALL', 'TEACHERS', 'CLASS')
+         ORDER BY sa.published_at DESC LIMIT 20`,
+        [schoolId]
+      ),
+      dbGet(
+        `SELECT COUNT(*) as c FROM examinations WHERE school_id = $1 AND status = 'PUBLISHED' AND (is_deleted = 0 OR is_deleted IS NULL)`,
+        `SELECT COUNT(*) as c FROM examinations WHERE school_id = ? AND status = 'PUBLISHED' AND (is_deleted = 0 OR is_deleted IS NULL)`,
+        [schoolId]
+      ),
+      dbGet(
+        `SELECT COUNT(*) as c FROM report_cards WHERE school_id = $1 AND status = 'PUBLISHED'`,
+        `SELECT COUNT(*) as c FROM report_cards WHERE school_id = ? AND status = 'PUBLISHED'`,
+        [schoolId]
+      ),
+      dbGet(
+        `SELECT COUNT(*) as c FROM attendance_records WHERE school_id = $1`,
+        `SELECT COUNT(*) as c FROM attendance_records WHERE school_id = ?`,
+        [schoolId]
+      ),
+    ]);
+
+    return res.json({
+      success: true,
+      school,
+      settings,
+      schools: userSchools,
+      sessions,
+      teacherProfile: {
+        user: {
+          id: req.user!.id,
+          email: req.user!.email,
+          full_name: req.user!.full_name,
+          phone: req.user!.phone,
+        },
+        staff: staff || null,
+      },
+      assignedClasses: assignedArms,
+      hasAssignedClasses: assignedArms.length > 0,
+      allClasses,
+      subjects,
+      students,
+      announcements,
+      notifications,
+      stats: {
+        assignedClassesCount: assignedArms.length,
+        authorizedStudentsCount: students.length,
+        publishedExamsCount: Number(examCountRow?.c || 0),
+        reportCardsPublishedCount: Number(reportCountRow?.c || 0),
+        attendanceLogsCount: Number(attCountRow?.c || 0),
+        unreadNotificationsCount: notifications.filter((n) => !n.read_at).length,
       },
     });
   }

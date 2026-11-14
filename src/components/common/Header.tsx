@@ -64,16 +64,16 @@ export const Header: React.FC<HeaderProps> = ({
       )}
 
       <header className="sticky top-0 z-40 bg-slate-900 border-b border-slate-800 text-white shadow-md">
-      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-        <div className="flex items-center justify-between h-16">
+      <div className="max-w-7xl mx-auto px-3 sm:px-6 lg:px-8">
+        <div className="flex flex-wrap items-center justify-between gap-2 min-h-16 py-2 sm:py-0 sm:h-16">
           {/* Logo & Platform Title */}
           <button
             type="button"
             onClick={() => setActiveView(user ? (isSuperAdmin && !activeSchool ? 'superadmin' : 'school') : 'login')}
-            className="flex items-center gap-3 text-left cursor-pointer group focus:outline-hidden whitespace-nowrap shrink-0"
+            className="flex items-center gap-2 sm:gap-3 text-left cursor-pointer group focus:outline-hidden whitespace-nowrap shrink-0"
           >
-            <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-emerald-500 to-teal-700 flex items-center justify-center shadow-lg shadow-emerald-950/40 border border-emerald-400/30 group-hover:scale-105 transition">
-              <span className="font-extrabold text-white text-lg tracking-tight">₦</span>
+            <div className="w-9 h-9 sm:w-10 sm:h-10 rounded-xl bg-gradient-to-br from-emerald-500 to-teal-700 flex items-center justify-center shadow-lg shadow-emerald-950/40 border border-emerald-400/30 group-hover:scale-105 transition">
+              <span className="font-extrabold text-white text-base sm:text-lg tracking-tight">₦</span>
             </div>
             <div>
               <div className="flex items-center gap-2">
@@ -88,7 +88,7 @@ export const Header: React.FC<HeaderProps> = ({
           </button>
 
           {/* Right Navigation Controls */}
-          <div className="flex items-center gap-2 sm:gap-3">
+          <div className="flex flex-wrap items-center justify-end gap-1.5 sm:gap-3 min-w-0 max-w-full">
             {/* PWA Install Button */}
             <PWAInstallButton />
 
@@ -96,7 +96,7 @@ export const Header: React.FC<HeaderProps> = ({
               <>
                 {/* Multi-School Switcher */}
                 {schoolRoles.length > 1 && (
-                  <div className="flex items-center gap-1.5 bg-slate-800 border border-slate-700 rounded-lg px-2 py-1">
+                  <div className="flex items-center gap-1 sm:gap-1.5 bg-slate-800 border border-slate-700 rounded-lg px-2 py-1 min-w-0 max-w-[140px] sm:max-w-[200px]">
                     <Building2 className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
                     <select
                       aria-label="Switch active school"
@@ -107,7 +107,7 @@ export const Header: React.FC<HeaderProps> = ({
                           setActiveView('school');
                         }
                       }}
-                      className="bg-transparent text-xs font-medium text-slate-100 focus:outline-hidden max-w-[160px] truncate cursor-pointer"
+                      className="bg-transparent text-xs font-medium text-slate-100 focus:outline-hidden w-full truncate cursor-pointer"
                     >
                       {schoolRoles.map((sr) => (
                         <option key={sr.school_id} value={sr.school_id || ''} className="bg-slate-900 text-white">
@@ -153,7 +153,7 @@ export const Header: React.FC<HeaderProps> = ({
                       {user.full_name}
                     </p>
                     <div className="mt-0.5">
-                      <RoleBadge role={activeRole?.role_name || (isSuperAdmin ? 'SUPER_ADMIN' : 'STAFF')} />
+                      <RoleBadge role={activeRole?.role_name || (isSuperAdmin ? 'SUPER_ADMIN' : 'RESTRICTED')} />
                     </div>
                   </div>
                 </div>

@@ -53,6 +53,7 @@ export const PrintableReceiptModal: React.FC<PrintableReceiptModalProps> = ({
             <button
               onClick={onClose}
               className="p-1.5 text-slate-400 hover:text-white rounded-lg hover:bg-slate-800 transition-colors cursor-pointer"
+              aria-label="Close receipt"
             >
               <X className="w-5 h-5" />
             </button>

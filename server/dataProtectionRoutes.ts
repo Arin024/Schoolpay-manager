@@ -259,7 +259,7 @@ dataProtectionRouter.get(
   '/school/recycle-bin',
   requireAuth,
   requireTenant,
-  requireRole(['SCHOOL_OWNER', 'SCHOOL_ADMIN', 'BURSAR']),
+  requireRole(['SCHOOL_OWNER', 'SCHOOL_ADMIN']),
   (req: AuthenticatedRequest, res) => {
     const schoolId = req.targetSchoolId || req.activeSchoolId!;
 

@@ -12,7 +12,11 @@ interface AuthContextType {
   isLoading: boolean;
   isSuperAdmin: boolean;
   isSchoolOwner: boolean;
+  isSchoolAdmin: boolean;
   isBursar: boolean;
+  isTeacher: boolean;
+  isParent: boolean;
+  isStudent: boolean;
   impersonatedBy: string | null;
   login: (credentials: { email: string; password: string; schoolId?: string }) => Promise<void>;
   registerSchoolSuccess: (data: any) => void;
@@ -52,19 +56,26 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       
       // Authoritative school tenant priority: server activeSchoolId > server first role > stored
       const schoolIdToUse = data.activeSchoolId || (data.roles && data.roles[0]?.school_id) || localStorage.getItem('bursariq_active_school') || null;
-      
+
       setActiveSchoolId(schoolIdToUse);
       if (schoolIdToUse) {
         localStorage.setItem('bursariq_active_school', schoolIdToUse);
         localStorage.setItem('schoolpay_active_school', schoolIdToUse);
+      } else {
+        localStorage.removeItem('bursariq_active_school');
+        localStorage.removeItem('schoolpay_active_school');
       }
-      
+
       setActiveSchool(data.activeSchool || null);
       setActiveSettings(data.activeSettings || null);
 
-      if (data.roles && data.roles.length > 0) {
+      if (data.activeRole !== undefined) {
+        setActiveRole(data.activeRole);
+      } else if (data.roles && data.roles.length > 0) {
         const matched = data.roles.find((r: UserRole) => r.school_id === schoolIdToUse) || data.roles[0];
         setActiveRole(matched);
+      } else {
+        setActiveRole(null);
       }
 
       // If activeSchool was not returned from getMe but schoolIdToUse exists, hydrate it
@@ -262,7 +273,11 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   const isSuperAdmin = Boolean(user && user.is_platform_admin === 1);
   const isSchoolOwner = activeRole?.role_name === 'SCHOOL_OWNER';
+  const isSchoolAdmin = activeRole?.role_name === 'SCHOOL_ADMIN' || isSchoolOwner;
   const isBursar = activeRole?.role_name === 'BURSAR';
+  const isTeacher = activeRole?.role_name === 'TEACHER';
+  const isParent = activeRole?.role_name === 'PARENT';
+  const isStudent = activeRole?.role_name === 'STUDENT';
 
   return (
     <AuthContext.Provider
@@ -276,7 +291,11 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         isLoading,
         isSuperAdmin,
         isSchoolOwner,
+        isSchoolAdmin,
         isBursar,
+        isTeacher,
+        isParent,
+        isStudent,
         impersonatedBy,
         login,
         registerSchoolSuccess,

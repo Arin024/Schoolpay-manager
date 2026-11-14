@@ -1101,6 +1101,17 @@ export interface ParentDashboardData {
     role_name: string;
     role_display_name: string;
   }>;
+  parentProfile?: {
+    id: string;
+    first_name: string;
+    last_name: string;
+    phone?: string | null;
+    email?: string | null;
+    address?: string | null;
+    occupation?: string | null;
+    relationship?: string | null;
+  } | null;
+  sessions?: AcademicSessionItem[];
   children: PortalChildSummary[];
   selectedChild: PortalChildSummary | null;
   results: StudentScoreItem[];
@@ -1140,6 +1151,7 @@ export interface ParentDashboardData {
 export interface StudentDashboardData {
   school: School | null;
   settings: AcademicSettings;
+  sessions?: AcademicSessionItem[];
   student: Student | null;
   results: StudentScoreItem[];
   termTrend: Array<{ key: string; label: string; averagePct: number; subjectsCount: number }>;
@@ -1165,6 +1177,52 @@ export interface StudentDashboardData {
   announcements: SchoolAnnouncementItem[];
   notifications: NotificationItem[];
 }
+
+export interface TeacherDashboardData {
+  school: School | null;
+  settings: AcademicSettings;
+  schools: Array<{
+    school_id: string;
+    school_name: string;
+    school_status: string;
+    role_name: string;
+    role_display_name: string;
+  }>;
+  sessions?: AcademicSessionItem[];
+  teacherProfile: {
+    user: User | null;
+    staff: StaffItem | null;
+  };
+  assignedClasses: Array<{
+    id: string;
+    class_id: string;
+    class_name: string;
+    level: string;
+    arm_name: string;
+    capacity: number;
+    total_students: number;
+  }>;
+  hasAssignedClasses: boolean;
+  allClasses: Array<{
+    id: string;
+    name: string;
+    level: string;
+    total_students: number;
+  }>;
+  subjects: SubjectItem[];
+  students: Student[];
+  announcements: SchoolAnnouncementItem[];
+  notifications: NotificationItem[];
+  stats: {
+    studentsCount: number;
+    classesCount: number;
+    subjectsCount: number;
+    announcementsCount: number;
+    publishedExamsCount: number;
+    teachersCanViewFees: boolean;
+  };
+}
+
 
 
 

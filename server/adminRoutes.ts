@@ -472,9 +472,9 @@ adminRouter.patch('/schools/:schoolId/status', requireAuth, requireSuperAdmin, a
   }
 
   let school = db.prepare('SELECT * FROM schools WHERE id = ?').get(schoolId) as any;
-  if (!school) {
-    const pgS = await queryPg('SELECT * FROM schools WHERE id = $1', [schoolId]);
-    school = pgS.rows[0];
+  if (!school && isPgConnected()) {
+    const pgS = await queryPg('SELECT * FROM schools WHERE id = $1', [schoolId]).catch(() => null);
+    school = pgS?.rows[0];
   }
   if (!school) {
     return res.status(404).json({ error: 'NOT_FOUND', message: 'School not found' });
@@ -529,7 +529,9 @@ adminRouter.delete('/schools/:schoolId', requireAuth, requireSuperAdmin, async (
 
   // Find school authoritatively from Neon PG first, fallback to SQLite
   let school: any = null;
-  const pgSchool = await queryPg('SELECT * FROM schools WHERE id = $1', [schoolId]);
+  const pgSchool = isPgConnected()
+    ? await queryPg('SELECT * FROM schools WHERE id = $1', [schoolId]).catch(() => null)
+    : null;
   if (pgSchool && pgSchool.rows.length > 0) {
     school = pgSchool.rows[0];
   } else {
@@ -553,14 +555,18 @@ adminRouter.delete('/schools/:schoolId', requireAuth, requireSuperAdmin, async (
   // ============================================================================
   if (mode === 'ARCHIVE') {
     try {
-      await queryPg("UPDATE schools SET status = 'CANCELLED', updated_at = CURRENT_TIMESTAMP WHERE id = $1", [schoolId]);
-      await queryPg("UPDATE school_subscriptions SET status = 'CANCELLED', updated_at = CURRENT_TIMESTAMP WHERE school_id = $1 AND status = 'ACTIVE'", [schoolId]);
+      if (isPgConnected()) {
+        await queryPg("UPDATE schools SET status = 'CANCELLED', updated_at = CURRENT_TIMESTAMP WHERE id = $1", [schoolId]);
+        await queryPg("UPDATE school_subscriptions SET status = 'CANCELLED', updated_at = CURRENT_TIMESTAMP WHERE school_id = $1 AND status = 'ACTIVE'", [schoolId]);
+      }
 
       cacheDb.prepare("UPDATE schools SET status = 'CANCELLED', updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(schoolId);
       cacheDb.prepare("UPDATE school_subscriptions SET status = 'CANCELLED', updated_at = CURRENT_TIMESTAMP WHERE school_id = ? AND status = 'ACTIVE'").run(schoolId);
 
       // Invalidate active sessions for users belonging to this school
-      await queryPg("DELETE FROM sessions WHERE user_id IN (SELECT user_id FROM user_roles WHERE school_id = $1)", [schoolId]);
+      if (isPgConnected()) {
+        await queryPg("DELETE FROM sessions WHERE user_id IN (SELECT user_id FROM user_roles WHERE school_id = $1)", [schoolId]);
+      }
       try {
         cacheDb.prepare("DELETE FROM sessions WHERE user_id IN (SELECT user_id FROM user_roles WHERE school_id = ?)").run(schoolId);
       } catch {}
@@ -798,7 +804,9 @@ adminRouter.delete('/users/:userId', requireAuth, requireSuperAdmin, async (req:
   }
 
   let user: any = null;
-  const pgUser = await queryPg('SELECT * FROM users WHERE id = $1', [userId]);
+  const pgUser = isPgConnected()
+    ? await queryPg('SELECT * FROM users WHERE id = $1', [userId]).catch(() => null)
+    : null;
   if (pgUser && pgUser.rows.length > 0) {
     user = pgUser.rows[0];
   } else {
@@ -1296,14 +1304,16 @@ adminRouter.patch('/commissions/:id/status', requireAuth, requireSuperAdmin, (re
 adminRouter.get('/users', requireAuth, requireSuperAdmin, async (_req: AuthenticatedRequest, res) => {
   try {
     let users: any[] = [];
-    const pgUsers = await queryPg(`
-      SELECT u.id, u.email, u.full_name, u.phone, u.is_platform_admin, u.is_active, u.created_at,
-             COUNT(ur.school_id) as assigned_schools
-      FROM users u
-      LEFT JOIN user_roles ur ON u.id = ur.user_id
-      GROUP BY u.id, u.email, u.full_name, u.phone, u.is_platform_admin, u.is_active, u.created_at
-      ORDER BY u.is_platform_admin DESC, u.created_at DESC
-    `);
+    const pgUsers = isPgConnected()
+      ? await queryPg(`
+          SELECT u.id, u.email, u.full_name, u.phone, u.is_platform_admin, u.is_active, u.created_at,
+                 COUNT(ur.school_id) as assigned_schools
+          FROM users u
+          LEFT JOIN user_roles ur ON u.id = ur.user_id
+          GROUP BY u.id, u.email, u.full_name, u.phone, u.is_platform_admin, u.is_active, u.created_at
+          ORDER BY u.is_platform_admin DESC, u.created_at DESC
+        `).catch(() => null)
+      : null;
 
     if (pgUsers) {
       users = pgUsers.rows;

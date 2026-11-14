@@ -20,12 +20,7 @@ export interface TableInventoryItem {
   protectionTier: 'CRITICAL_FINANCIAL' | 'CORE_TENANT' | 'SYSTEM_SECURITY';
 }
 
-/**
- * Migration 1: Soft-Deletion Columns & Multi-Tenant Data Protection
- */
-function applyMigration001SoftDeletion(): boolean {
-  console.log('[Migration] Applying Migration 001: Soft Deletion & Data Protection columns...');
-
+function ensureSoftDeleteColumnsIdempotent() {
   const tablesToProtect = [
     'students',
     'staff',
@@ -63,7 +58,6 @@ function applyMigration001SoftDeletion(): boolean {
     }
   }
 
-  // Create performance indexes for filtered queries
   try {
     db.exec(`
       CREATE INDEX IF NOT EXISTS idx_students_active ON students(school_id, is_deleted);
@@ -72,7 +66,14 @@ function applyMigration001SoftDeletion(): boolean {
       CREATE INDEX IF NOT EXISTS idx_invoices_active ON invoices(school_id, is_deleted);
     `);
   } catch (e) {}
+}
 
+/**
+ * Migration 1: Soft-Deletion Columns & Multi-Tenant Data Protection
+ */
+function applyMigration001SoftDeletion(): boolean {
+  console.log('[Migration] Applying Migration 001: Soft Deletion & Data Protection columns...');
+  ensureSoftDeleteColumnsIdempotent();
   return true;
 }
 
@@ -200,6 +201,9 @@ function applyMigration003PerformanceAndPortals(): boolean {
  * Runs safe, version-controlled incremental schema migrations
  */
 export async function runSafeMigrations() {
+  // Always idempotently verify soft-delete columns on SQLite tables in case schema.sql recreated a clean table
+  ensureSoftDeleteColumnsIdempotent();
+
   // Ensure schema_migrations table exists
   db.exec(`
     CREATE TABLE IF NOT EXISTS schema_migrations (

@@ -68,7 +68,7 @@ export async function getAuthorizedStudentIds(
   roleName: string | null
 ): Promise<string[] | null> {
   if (!roleName) return [];
-  if (['SUPER_ADMIN', 'SCHOOL_OWNER', 'SCHOOL_ADMIN', 'BURSAR', 'TEACHER', 'STAFF', 'PARTNER'].includes(roleName)) {
+  if (['SUPER_ADMIN', 'SCHOOL_OWNER', 'SCHOOL_ADMIN', 'BURSAR', 'TEACHER'].includes(roleName)) {
     return null;
   }
 

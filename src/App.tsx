@@ -87,8 +87,48 @@ type SchoolTab =
   | 'recycle-bin'
   | 'security';
 
+const ADMIN_ROLE_NAMES = new Set(['SCHOOL_OWNER', 'SCHOOL_ADMIN']);
+const BURSAR_ALLOWED_TABS: SchoolTab[] = [
+  'overview',
+  'finance',
+  'students',
+  'parents',
+  'subscription',
+  'profile',
+];
+const ALL_SCHOOL_TABS: SchoolTab[] = [
+  'overview',
+  'performance',
+  'attendance',
+  'behaviour',
+  'announcements',
+  'finance',
+  'subscription',
+  'students',
+  'classes',
+  'parents',
+  'staff',
+  'sessions',
+  'profile',
+  'settings',
+  'users',
+  'audit',
+  'recycle-bin',
+  'security',
+];
+
+function isTabAllowedForRole(tab: SchoolTab, roleName: string | undefined, isSuperAdmin: boolean): boolean {
+  if (isSuperAdmin || (roleName && ADMIN_ROLE_NAMES.has(roleName))) {
+    return true;
+  }
+  if (roleName === 'BURSAR') {
+    return BURSAR_ALLOWED_TABS.includes(tab);
+  }
+  return tab === 'overview';
+}
+
 const AppContent: React.FC = () => {
-  const { user, isSuperAdmin, isLoading, activeSchool, activeSettings, activeRole } = useAuth();
+  const { user, isSuperAdmin, isLoading, activeSchool, activeSettings, activeRole, logout } = useAuth();
   const [activeView, setActiveView] = useState<AppView>('school');
   const [schoolTab, setSchoolTab] = useState<SchoolTab>('overview');
   const [registeredSchoolName, setRegisteredSchoolName] = useState<string | undefined>(undefined);
@@ -196,33 +236,44 @@ const AppContent: React.FC = () => {
   // History-aware navigation that pushes state so phone Back button returns to previous page without closing app!
   const navigateTo = useCallback(
     (view: AppView, tab?: SchoolTab, replace = false) => {
-      const nextTab = tab || schoolTab;
-      setActiveView(view);
-      if (tab) {
-        setSchoolTab(tab);
+      const safeView: AppView = view === 'superadmin' && !isSuperAdmin ? (user ? 'school' : 'login') : view;
+      const requestedTab = tab || schoolTab;
+      const nextTab: SchoolTab = isTabAllowedForRole(requestedTab, activeRole?.role_name, isSuperAdmin)
+        ? requestedTab
+        : 'overview';
+      setActiveView(safeView);
+      if (tab || nextTab !== schoolTab) {
+        setSchoolTab(nextTab);
       }
 
       let hash = '';
-      if (view === 'school') {
+      if (safeView === 'school') {
         hash = `#${nextTab}`;
-      } else if (view === 'superadmin') {
+      } else if (safeView === 'superadmin') {
         hash = '#superadmin';
       } else {
-        hash = `#${view}`;
+        hash = `#${safeView}`;
       }
 
-      const stateObj = { view, schoolTab: nextTab };
+      const stateObj = { view: safeView, schoolTab: nextTab };
       if (replace) {
         window.history.replaceState(stateObj, '', hash);
       } else {
         window.history.pushState(stateObj, '', hash);
       }
 
-      updatePageSeo(view, nextTab, activeSchool?.name);
-      analytics.trackPageView(view, hash);
+      updatePageSeo(safeView, nextTab, activeSchool?.name);
+      analytics.trackPageView(safeView, hash);
     },
-    [schoolTab, activeSchool, updatePageSeo]
+    [schoolTab, activeSchool, activeRole?.role_name, isSuperAdmin, user, updatePageSeo]
   );
+
+  // Enforce allowed tab whenever user, role, or school switches
+  useEffect(() => {
+    if (!isTabAllowedForRole(schoolTab, activeRole?.role_name, isSuperAdmin)) {
+      setSchoolTab('overview');
+    }
+  }, [user?.id, activeRole?.role_name, activeSchool?.id, isSuperAdmin, schoolTab]);
 
   // Handle phone / browser hardware or software BACK button (popstate event)
   useEffect(() => {
@@ -243,16 +294,21 @@ const AppContent: React.FC = () => {
 
       // 2. If state exists in history event
       if (event.state && event.state.view) {
-        setActiveView(event.state.view);
-        if (event.state.schoolTab) {
-          setSchoolTab(event.state.schoolTab);
-        }
-        updatePageSeo(event.state.view, event.state.schoolTab, activeSchool?.name);
+        const nextView: AppView =
+          event.state.view === 'superadmin' && !isSuperAdmin ? (user ? 'school' : 'login') : event.state.view;
+        const candidateTab: SchoolTab = event.state.schoolTab || 'overview';
+        const safeTab: SchoolTab = isTabAllowedForRole(candidateTab, activeRole?.role_name, isSuperAdmin)
+          ? candidateTab
+          : 'overview';
+        setActiveView(nextView);
+        setSchoolTab(safeTab);
+        updatePageSeo(nextView, safeTab, activeSchool?.name);
         return;
       }
 
       // 3. Fallback: Parse URL hash if state was empty
-      const hash = window.location.hash.replace(/^#\/?/, '').toLowerCase();
+      const rawHash = window.location.hash.replace(/^#\/?/, '').toLowerCase();
+      const hash = rawHash.startsWith('school/') ? rawHash.slice('school/'.length) : rawHash;
       if (!hash || hash === 'login' || hash === 'home') {
         const fallbackView = user ? (isSuperAdmin && !activeSchool ? 'superadmin' : 'school') : 'login';
         setActiveView(fallbackView);
@@ -270,33 +326,17 @@ const AppContent: React.FC = () => {
         setActiveView('terms');
         updatePageSeo('terms', 'overview');
       } else if (hash === 'superadmin') {
-        setActiveView('superadmin');
-        updatePageSeo('superadmin', 'overview');
-      } else if (
-        [
-          'overview',
-          'performance',
-          'attendance',
-          'behaviour',
-          'announcements',
-          'finance',
-          'subscription',
-          'students',
-          'classes',
-          'parents',
-          'staff',
-          'sessions',
-          'profile',
-          'settings',
-          'users',
-          'audit',
-          'recycle-bin',
-          'security',
-        ].includes(hash)
-      ) {
+        const nextView: AppView = user ? (isSuperAdmin ? 'superadmin' : 'school') : 'login';
+        setActiveView(nextView);
+        setSchoolTab('overview');
+        updatePageSeo(nextView, 'overview', activeSchool?.name);
+      } else if (ALL_SCHOOL_TABS.includes(hash as SchoolTab)) {
+        const safeTab: SchoolTab = isTabAllowedForRole(hash as SchoolTab, activeRole?.role_name, isSuperAdmin)
+          ? (hash as SchoolTab)
+          : 'overview';
         setActiveView(user ? 'school' : 'login');
-        setSchoolTab(hash as SchoolTab);
-        updatePageSeo(user ? 'school' : 'login', hash as SchoolTab, activeSchool?.name);
+        setSchoolTab(safeTab);
+        updatePageSeo(user ? 'school' : 'login', safeTab, activeSchool?.name);
       } else {
         setActiveView('404');
         updatePageSeo('404', 'overview');
@@ -305,11 +345,12 @@ const AppContent: React.FC = () => {
 
     window.addEventListener('popstate', handlePopState);
     return () => window.removeEventListener('popstate', handlePopState);
-  }, [user, isSuperAdmin, activeSchool, isForgotModalOpen, isIdorModalOpen, updatePageSeo]);
+  }, [user, isSuperAdmin, activeSchool, activeRole?.role_name, isForgotModalOpen, isSecurityModalOpen, isIdorModalOpen, updatePageSeo]);
 
   // Initial load and auth state synchronization
   useEffect(() => {
-    const hash = window.location.hash.replace(/^#\/?/, '').toLowerCase();
+    const rawHash = window.location.hash.replace(/^#\/?/, '').toLowerCase();
+    const hash = rawHash.startsWith('school/') ? rawHash.slice('school/'.length) : rawHash;
     const defaultAuthView: AppView = isSuperAdmin && !activeSchool ? 'superadmin' : 'school';
     let initialView: AppView = user ? defaultAuthView : 'login';
     let initialTab: SchoolTab = 'overview';
@@ -325,31 +366,12 @@ const AppContent: React.FC = () => {
     } else if (hash === 'terms') {
       initialView = 'terms';
     } else if (hash === 'superadmin') {
-      initialView = user ? 'superadmin' : 'login';
-    } else if (
-      [
-        'overview',
-        'performance',
-        'attendance',
-        'behaviour',
-        'announcements',
-        'finance',
-        'subscription',
-        'students',
-        'classes',
-        'parents',
-        'staff',
-        'sessions',
-        'profile',
-        'settings',
-        'users',
-        'audit',
-        'recycle-bin',
-        'security',
-      ].includes(hash)
-    ) {
+      initialView = user ? (isSuperAdmin ? 'superadmin' : 'school') : 'login';
+    } else if (ALL_SCHOOL_TABS.includes(hash as SchoolTab)) {
       initialView = user ? 'school' : 'login';
-      initialTab = hash as SchoolTab;
+      initialTab = isTabAllowedForRole(hash as SchoolTab, activeRole?.role_name, isSuperAdmin)
+        ? (hash as SchoolTab)
+        : 'overview';
     } else if (hash && hash !== '' && hash !== '/') {
       initialView = '404';
     }
@@ -357,8 +379,15 @@ const AppContent: React.FC = () => {
     setActiveView(initialView);
     setSchoolTab(initialTab);
 
-    // If user is authenticated and on login/register or blank hash, update URL to dashboard
-    if (user && (hash === 'login' || hash === 'register' || hash === '')) {
+    // If user is authenticated and on login/register, blank hash, or a disallowed role hash, sanitize URL to dashboard
+    if (
+      user &&
+      (hash === 'login' ||
+        hash === 'register' ||
+        hash === '' ||
+        (initialView === 'school' && rawHash !== initialTab) ||
+        (initialView !== 'superadmin' && rawHash === 'superadmin'))
+    ) {
       const targetHash = initialView === 'superadmin' ? '#superadmin' : `#${initialTab}`;
       window.history.replaceState({ view: initialView, schoolTab: initialTab }, '', targetHash);
     } else {
@@ -372,7 +401,7 @@ const AppContent: React.FC = () => {
 
     updatePageSeo(initialView, initialTab, activeSchool?.name);
     analytics.trackPageView(initialView, window.location.hash);
-  }, [user, isSuperAdmin, activeSchool, updatePageSeo]);
+  }, [user, isSuperAdmin, activeSchool, activeRole?.role_name, updatePageSeo]);
 
   // Handle successful school registration
   const handleRegistrationSuccess = (schoolData: any) => {
@@ -719,16 +748,112 @@ const AppContent: React.FC = () => {
               </div>
             )}
 
-            {/* Dedicated Role-Scoped Portals (Parent, Student, Read-Only Teacher) */}
+            {/* Dedicated Role-Scoped Portals (Parent, Student, Teacher, Bursar, School Admin, Fail-Closed Fallback) */}
             {activeRole?.role_name === 'PARENT' ? (
               <ParentPortalView />
             ) : activeRole?.role_name === 'STUDENT' ? (
               <StudentPortalView />
             ) : activeRole?.role_name === 'TEACHER' ? (
               <TeacherPortalView />
-            ) : (
+            ) : activeRole?.role_name === 'BURSAR' ? (
+              /* Dedicated Bursar Financial Workspace */
+              <>
+                <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-2 flex flex-wrap gap-1">
+                  <button
+                    onClick={() => navigateTo('school', 'overview')}
+                    className={`flex items-center gap-2 px-3.5 py-2.5 rounded-xl text-xs font-bold transition cursor-pointer whitespace-nowrap shrink-0 ${
+                      schoolTab === 'overview'
+                        ? 'bg-slate-900 text-white shadow'
+                        : 'text-slate-600 hover:bg-slate-100 hover:text-slate-900'
+                    }`}
+                  >
+                    <LayoutDashboard className="w-4 h-4 text-emerald-400" />
+                    <span>Overview</span>
+                  </button>
+
+                  <button
+                    onClick={() => navigateTo('school', 'finance')}
+                    className={`flex items-center gap-2 px-3.5 py-2.5 rounded-xl text-xs font-bold transition cursor-pointer whitespace-nowrap shrink-0 ${
+                      schoolTab === 'finance'
+                        ? 'bg-slate-900 text-white shadow'
+                        : 'text-slate-600 hover:bg-slate-100 hover:text-slate-900'
+                    }`}
+                  >
+                    <CreditCard className="w-4 h-4 text-emerald-400" />
+                    <span>Fees &amp; Billing</span>
+                  </button>
+
+                  <button
+                    onClick={() => navigateTo('school', 'students')}
+                    className={`flex items-center gap-2 px-3.5 py-2.5 rounded-xl text-xs font-bold transition cursor-pointer whitespace-nowrap shrink-0 ${
+                      schoolTab === 'students'
+                        ? 'bg-slate-900 text-white shadow'
+                        : 'text-slate-600 hover:bg-slate-100 hover:text-slate-900'
+                    }`}
+                  >
+                    <GraduationCap className="w-4 h-4 text-emerald-400" />
+                    <span>Students</span>
+                  </button>
+
+                  <button
+                    onClick={() => navigateTo('school', 'parents')}
+                    className={`flex items-center gap-2 px-3.5 py-2.5 rounded-xl text-xs font-bold transition cursor-pointer whitespace-nowrap shrink-0 ${
+                      schoolTab === 'parents'
+                        ? 'bg-slate-900 text-white shadow'
+                        : 'text-slate-600 hover:bg-slate-100 hover:text-slate-900'
+                    }`}
+                  >
+                    <Users className="w-4 h-4 text-emerald-400" />
+                    <span>Parents</span>
+                  </button>
+
+                  <button
+                    onClick={() => navigateTo('school', 'subscription')}
+                    className={`flex items-center gap-2 px-3.5 py-2.5 rounded-xl text-xs font-bold transition cursor-pointer whitespace-nowrap shrink-0 ${
+                      schoolTab === 'subscription'
+                        ? 'bg-slate-900 text-white shadow'
+                        : 'text-slate-600 hover:bg-slate-100 hover:text-slate-900'
+                    }`}
+                  >
+                    <ShieldCheck className="w-4 h-4 text-emerald-400" />
+                    <span>SaaS Subscription</span>
+                  </button>
+
+                  <button
+                    onClick={() => navigateTo('school', 'profile')}
+                    className={`flex items-center gap-2 px-3.5 py-2.5 rounded-xl text-xs font-bold transition cursor-pointer whitespace-nowrap shrink-0 ${
+                      schoolTab === 'profile'
+                        ? 'bg-slate-900 text-white shadow'
+                        : 'text-slate-600 hover:bg-slate-100 hover:text-slate-900'
+                    }`}
+                  >
+                    <Sparkles className="w-4 h-4 text-emerald-400" />
+                    <span>Profile</span>
+                  </button>
+                </div>
+
+                {schoolTab === 'finance' ? (
+                  <SchoolFinanceView />
+                ) : schoolTab === 'students' ? (
+                  <SchoolStudentsView readOnly />
+                ) : schoolTab === 'parents' ? (
+                  <SchoolParentsView readOnly />
+                ) : schoolTab === 'subscription' ? (
+                  <SchoolSubscriptionView />
+                ) : schoolTab === 'profile' ? (
+                  <SchoolProfileView />
+                ) : (
+                  <SchoolDashboardOverview
+                    readOnly
+                    onNavigateTab={(tab) => navigateTo('school', tab)}
+                    onOpenEnrollModal={() => {}}
+                    onOpenImportModal={() => {}}
+                  />
+                )}
+              </>
+            ) : isSuperAdmin || activeRole?.role_name === 'SCHOOL_OWNER' || activeRole?.role_name === 'SCHOOL_ADMIN' ? (
             <>
-            {/* School Secondary Navigation Tabs (Owner / Admin / Bursar Workspace) */}
+            {/* School Secondary Navigation Tabs (Authorized School Owner / School Admin / Super Admin Only) */}
             <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-2 flex flex-wrap gap-1">
               <button
                 onClick={() => navigateTo('school', 'overview')}
@@ -792,7 +917,7 @@ const AppContent: React.FC = () => {
 
               <button
                 onClick={() => navigateTo('school', 'finance')}
-                className={`flex items-center gap-2 px-3.5 py-2.5 rounded-xl text-xs font-bold transition cursor-pointer ${
+                className={`flex items-center gap-2 px-3.5 py-2.5 rounded-xl text-xs font-bold transition cursor-pointer whitespace-nowrap shrink-0 ${
                   schoolTab === 'finance'
                     ? 'bg-slate-900 text-white shadow'
                     : 'text-slate-600 hover:bg-slate-100 hover:text-slate-900'
@@ -804,7 +929,7 @@ const AppContent: React.FC = () => {
 
               <button
                 onClick={() => navigateTo('school', 'subscription')}
-                className={`flex items-center gap-2 px-3.5 py-2.5 rounded-xl text-xs font-bold transition cursor-pointer ${
+                className={`flex items-center gap-2 px-3.5 py-2.5 rounded-xl text-xs font-bold transition cursor-pointer whitespace-nowrap shrink-0 ${
                   schoolTab === 'subscription'
                     ? 'bg-slate-900 text-white shadow'
                     : 'text-slate-600 hover:bg-slate-100 hover:text-slate-900'
@@ -816,7 +941,7 @@ const AppContent: React.FC = () => {
 
               <button
                 onClick={() => navigateTo('school', 'students')}
-                className={`flex items-center gap-2 px-3.5 py-2.5 rounded-xl text-xs font-bold transition cursor-pointer ${
+                className={`flex items-center gap-2 px-3.5 py-2.5 rounded-xl text-xs font-bold transition cursor-pointer whitespace-nowrap shrink-0 ${
                   schoolTab === 'students'
                     ? 'bg-slate-900 text-white shadow'
                     : 'text-slate-600 hover:bg-slate-100 hover:text-slate-900'
@@ -828,7 +953,7 @@ const AppContent: React.FC = () => {
 
               <button
                 onClick={() => navigateTo('school', 'classes')}
-                className={`flex items-center gap-2 px-3.5 py-2.5 rounded-xl text-xs font-bold transition cursor-pointer ${
+                className={`flex items-center gap-2 px-3.5 py-2.5 rounded-xl text-xs font-bold transition cursor-pointer whitespace-nowrap shrink-0 ${
                   schoolTab === 'classes'
                     ? 'bg-slate-900 text-white shadow'
                     : 'text-slate-600 hover:bg-slate-100 hover:text-slate-900'
@@ -840,7 +965,7 @@ const AppContent: React.FC = () => {
 
               <button
                 onClick={() => navigateTo('school', 'parents')}
-                className={`flex items-center gap-2 px-3.5 py-2.5 rounded-xl text-xs font-bold transition cursor-pointer ${
+                className={`flex items-center gap-2 px-3.5 py-2.5 rounded-xl text-xs font-bold transition cursor-pointer whitespace-nowrap shrink-0 ${
                   schoolTab === 'parents'
                     ? 'bg-slate-900 text-white shadow'
                     : 'text-slate-600 hover:bg-slate-100 hover:text-slate-900'
@@ -852,7 +977,7 @@ const AppContent: React.FC = () => {
 
               <button
                 onClick={() => navigateTo('school', 'staff')}
-                className={`flex items-center gap-2 px-3.5 py-2.5 rounded-xl text-xs font-bold transition cursor-pointer ${
+                className={`flex items-center gap-2 px-3.5 py-2.5 rounded-xl text-xs font-bold transition cursor-pointer whitespace-nowrap shrink-0 ${
                   schoolTab === 'staff'
                     ? 'bg-slate-900 text-white shadow'
                     : 'text-slate-600 hover:bg-slate-100 hover:text-slate-900'
@@ -864,7 +989,7 @@ const AppContent: React.FC = () => {
 
               <button
                 onClick={() => navigateTo('school', 'sessions')}
-                className={`flex items-center gap-2 px-3.5 py-2.5 rounded-xl text-xs font-bold transition cursor-pointer ${
+                className={`flex items-center gap-2 px-3.5 py-2.5 rounded-xl text-xs font-bold transition cursor-pointer whitespace-nowrap shrink-0 ${
                   schoolTab === 'sessions'
                     ? 'bg-slate-900 text-white shadow'
                     : 'text-slate-600 hover:bg-slate-100 hover:text-slate-900'
@@ -876,7 +1001,7 @@ const AppContent: React.FC = () => {
 
               <button
                 onClick={() => navigateTo('school', 'profile')}
-                className={`flex items-center gap-2 px-3.5 py-2.5 rounded-xl text-xs font-bold transition cursor-pointer ${
+                className={`flex items-center gap-2 px-3.5 py-2.5 rounded-xl text-xs font-bold transition cursor-pointer whitespace-nowrap shrink-0 ${
                   schoolTab === 'profile'
                     ? 'bg-slate-900 text-white shadow'
                     : 'text-slate-600 hover:bg-slate-100 hover:text-slate-900'
@@ -888,7 +1013,7 @@ const AppContent: React.FC = () => {
 
               <button
                 onClick={() => navigateTo('school', 'settings')}
-                className={`flex items-center gap-2 px-3.5 py-2.5 rounded-xl text-xs font-bold transition cursor-pointer ${
+                className={`flex items-center gap-2 px-3.5 py-2.5 rounded-xl text-xs font-bold transition cursor-pointer whitespace-nowrap shrink-0 ${
                   schoolTab === 'settings'
                     ? 'bg-slate-900 text-white shadow'
                     : 'text-slate-600 hover:bg-slate-100 hover:text-slate-900'
@@ -900,7 +1025,7 @@ const AppContent: React.FC = () => {
 
               <button
                 onClick={() => navigateTo('school', 'users')}
-                className={`flex items-center gap-2 px-3.5 py-2.5 rounded-xl text-xs font-bold transition cursor-pointer ${
+                className={`flex items-center gap-2 px-3.5 py-2.5 rounded-xl text-xs font-bold transition cursor-pointer whitespace-nowrap shrink-0 ${
                   schoolTab === 'users'
                     ? 'bg-slate-900 text-white shadow'
                     : 'text-slate-600 hover:bg-slate-100 hover:text-slate-900'
@@ -912,7 +1037,7 @@ const AppContent: React.FC = () => {
 
               <button
                 onClick={() => navigateTo('school', 'audit')}
-                className={`flex items-center gap-2 px-3.5 py-2.5 rounded-xl text-xs font-bold transition cursor-pointer ${
+                className={`flex items-center gap-2 px-3.5 py-2.5 rounded-xl text-xs font-bold transition cursor-pointer whitespace-nowrap shrink-0 ${
                   schoolTab === 'audit'
                     ? 'bg-slate-900 text-white shadow'
                     : 'text-slate-600 hover:bg-slate-100 hover:text-slate-900'
@@ -924,7 +1049,7 @@ const AppContent: React.FC = () => {
 
               <button
                 onClick={() => navigateTo('school', 'recycle-bin')}
-                className={`flex items-center gap-2 px-3.5 py-2.5 rounded-xl text-xs font-bold transition cursor-pointer ${
+                className={`flex items-center gap-2 px-3.5 py-2.5 rounded-xl text-xs font-bold transition cursor-pointer whitespace-nowrap shrink-0 ${
                   schoolTab === 'recycle-bin'
                     ? 'bg-slate-900 text-white shadow'
                     : 'text-slate-600 hover:bg-slate-100 hover:text-slate-900'
@@ -936,7 +1061,7 @@ const AppContent: React.FC = () => {
 
               <button
                 onClick={() => navigateTo('school', 'security')}
-                className={`flex items-center gap-2 px-3.5 py-2.5 rounded-xl text-xs font-bold transition ml-auto cursor-pointer ${
+                className={`flex items-center gap-2 px-3.5 py-2.5 rounded-xl text-xs font-bold transition ml-auto cursor-pointer whitespace-nowrap shrink-0 ${
                   schoolTab === 'security'
                     ? 'bg-emerald-700 text-white shadow'
                     : 'text-emerald-700 bg-emerald-50 hover:bg-emerald-100'
@@ -1026,6 +1151,26 @@ const AppContent: React.FC = () => {
               </div>
             )}
             </>
+            ) : (
+              /* Fail-Closed Fallback for Unrecognized / Unassigned Roles */
+              <div className="bg-white rounded-2xl border border-rose-200 p-10 text-center space-y-4">
+                <div className="w-12 h-12 rounded-full bg-rose-50 text-rose-600 flex items-center justify-center mx-auto">
+                  <Lock className="w-6 h-6" />
+                </div>
+                <div className="space-y-1">
+                  <h2 className="text-base font-bold text-slate-900">Role Not Assigned — Access Restricted</h2>
+                  <p className="text-xs text-slate-600 max-w-md mx-auto leading-relaxed">
+                    Your account does not currently hold an authorized portal role for this institution. Please contact your School Administrator to assign your role before signing in again.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={logout}
+                  className="px-4 py-2 bg-slate-900 hover:bg-slate-800 text-white rounded-xl text-xs font-bold cursor-pointer"
+                >
+                  Sign Out
+                </button>
+              </div>
             )}
           </div>
         )}

@@ -23,12 +23,14 @@ interface SchoolDashboardOverviewProps {
   onNavigateTab: (tab: any) => void;
   onOpenEnrollModal: () => void;
   onOpenImportModal: () => void;
+  readOnly?: boolean;
 }
 
 export const SchoolDashboardOverview: React.FC<SchoolDashboardOverviewProps> = ({
   onNavigateTab,
   onOpenEnrollModal,
   onOpenImportModal,
+  readOnly = false,
 }) => {
   const { activeSchool } = useAuth();
   const [stats, setStats] = useState<SchoolDashboardStats | null>(null);
@@ -92,8 +94,10 @@ export const SchoolDashboardOverview: React.FC<SchoolDashboardOverviewProps> = (
 
         {/* Classes & Arms */}
         <div
-          onClick={() => onNavigateTab('classes')}
-          className="bg-white p-5 rounded-2xl border border-slate-200/90 shadow-sm hover:border-emerald-300 hover:shadow-md transition cursor-pointer group"
+          onClick={() => (!readOnly ? onNavigateTab('classes') : undefined)}
+          className={`bg-white p-5 rounded-2xl border border-slate-200/90 shadow-sm transition group ${
+            !readOnly ? 'hover:border-emerald-300 hover:shadow-md cursor-pointer' : ''
+          }`}
         >
           <div className="flex items-center justify-between text-slate-500 mb-2">
             <span className="text-[11px] font-bold uppercase tracking-wider text-slate-400">Academic Classes</span>
@@ -109,8 +113,10 @@ export const SchoolDashboardOverview: React.FC<SchoolDashboardOverviewProps> = (
 
         {/* Staff Members */}
         <div
-          onClick={() => onNavigateTab('staff')}
-          className="bg-white p-5 rounded-2xl border border-slate-200/90 shadow-sm hover:border-emerald-300 hover:shadow-md transition cursor-pointer group"
+          onClick={() => (!readOnly ? onNavigateTab('staff') : undefined)}
+          className={`bg-white p-5 rounded-2xl border border-slate-200/90 shadow-sm transition group ${
+            !readOnly ? 'hover:border-emerald-300 hover:shadow-md cursor-pointer' : ''
+          }`}
         >
           <div className="flex items-center justify-between text-slate-500 mb-2">
             <span className="text-[11px] font-bold uppercase tracking-wider text-slate-400">School Staff</span>
@@ -143,8 +149,10 @@ export const SchoolDashboardOverview: React.FC<SchoolDashboardOverviewProps> = (
 
         {/* Active Session & Term */}
         <div
-          onClick={() => onNavigateTab('sessions')}
-          className="bg-white p-5 rounded-2xl border border-slate-200/90 shadow-sm hover:border-emerald-300 hover:shadow-md transition cursor-pointer col-span-2 lg:col-span-1 group"
+          onClick={() => (!readOnly ? onNavigateTab('sessions') : undefined)}
+          className={`bg-white p-5 rounded-2xl border border-slate-200/90 shadow-sm transition col-span-2 lg:col-span-1 group ${
+            !readOnly ? 'hover:border-emerald-300 hover:shadow-md cursor-pointer' : ''
+          }`}
         >
           <div className="flex items-center justify-between text-slate-500 mb-2">
             <span className="text-[11px] font-bold uppercase tracking-wider text-slate-400">Current Session</span>
@@ -174,27 +182,31 @@ export const SchoolDashboardOverview: React.FC<SchoolDashboardOverviewProps> = (
           </div>
 
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-1 gap-2.5">
-            <button
-              onClick={onOpenEnrollModal}
-              className="w-full py-2.5 px-4 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold transition flex items-center justify-between shadow-sm cursor-pointer"
-            >
-              <span className="flex items-center gap-2">
-                <PlusCircle className="w-4 h-4" />
-                <span>Enroll New Student</span>
-              </span>
-              <ArrowUpRight className="w-4 h-4 text-emerald-200" />
-            </button>
+            {!readOnly && (
+              <>
+                <button
+                  onClick={onOpenEnrollModal}
+                  className="w-full py-2.5 px-4 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold transition flex items-center justify-between shadow-sm cursor-pointer"
+                >
+                  <span className="flex items-center gap-2">
+                    <PlusCircle className="w-4 h-4" />
+                    <span>Enroll New Student</span>
+                  </span>
+                  <ArrowUpRight className="w-4 h-4 text-emerald-200" />
+                </button>
 
-            <button
-              onClick={onOpenImportModal}
-              className="w-full py-2.5 px-4 bg-slate-100 hover:bg-slate-200 text-slate-800 rounded-xl text-xs font-bold transition flex items-center justify-between cursor-pointer"
-            >
-              <span className="flex items-center gap-2">
-                <FileSpreadsheet className="w-4 h-4 text-emerald-600" />
-                <span>Bulk Import via CSV</span>
-              </span>
-              <span className="text-[10px] bg-slate-200 px-1.5 py-0.5 rounded text-slate-600 font-mono">.csv</span>
-            </button>
+                <button
+                  onClick={onOpenImportModal}
+                  className="w-full py-2.5 px-4 bg-slate-100 hover:bg-slate-200 text-slate-800 rounded-xl text-xs font-bold transition flex items-center justify-between cursor-pointer"
+                >
+                  <span className="flex items-center gap-2">
+                    <FileSpreadsheet className="w-4 h-4 text-emerald-600" />
+                    <span>Bulk Import via CSV</span>
+                  </span>
+                  <span className="text-[10px] bg-slate-200 px-1.5 py-0.5 rounded text-slate-600 font-mono">.csv</span>
+                </button>
+              </>
+            )}
 
             <button
               onClick={handleExport}
@@ -207,16 +219,18 @@ export const SchoolDashboardOverview: React.FC<SchoolDashboardOverviewProps> = (
               <span className="text-[10px] bg-slate-200 px-1.5 py-0.5 rounded text-slate-600 font-mono">CSV</span>
             </button>
 
-            <button
-              onClick={() => onNavigateTab('classes')}
-              className="w-full py-2.5 px-4 bg-slate-100 hover:bg-slate-200 text-slate-800 rounded-xl text-xs font-bold transition flex items-center justify-between cursor-pointer"
-            >
-              <span className="flex items-center gap-2">
-                <Building2 className="w-4 h-4 text-purple-600" />
-                <span>Configure Classes &amp; Arms</span>
-              </span>
-              <ArrowUpRight className="w-4 h-4 text-slate-400" />
-            </button>
+            {!readOnly && (
+              <button
+                onClick={() => onNavigateTab('classes')}
+                className="w-full py-2.5 px-4 bg-slate-100 hover:bg-slate-200 text-slate-800 rounded-xl text-xs font-bold transition flex items-center justify-between cursor-pointer"
+              >
+                <span className="flex items-center gap-2">
+                  <Building2 className="w-4 h-4 text-purple-600" />
+                  <span>Configure Classes &amp; Arms</span>
+                </span>
+                <ArrowUpRight className="w-4 h-4 text-slate-400" />
+              </button>
+            )}
 
             <button
               onClick={() => onNavigateTab('finance')}
@@ -229,16 +243,18 @@ export const SchoolDashboardOverview: React.FC<SchoolDashboardOverviewProps> = (
               <ArrowUpRight className="w-4 h-4 text-blue-500" />
             </button>
 
-            <button
-              onClick={() => onNavigateTab('staff')}
-              className="w-full py-2.5 px-4 bg-slate-100 hover:bg-slate-200 text-slate-800 rounded-xl text-xs font-bold transition flex items-center justify-between cursor-pointer"
-            >
-              <span className="flex items-center gap-2">
-                <Users className="w-4 h-4 text-amber-600" />
-                <span>Manage Staff Directory</span>
-              </span>
-              <ArrowUpRight className="w-4 h-4 text-slate-400" />
-            </button>
+            {!readOnly && (
+              <button
+                onClick={() => onNavigateTab('staff')}
+                className="w-full py-2.5 px-4 bg-slate-100 hover:bg-slate-200 text-slate-800 rounded-xl text-xs font-bold transition flex items-center justify-between cursor-pointer"
+              >
+                <span className="flex items-center gap-2">
+                  <Users className="w-4 h-4 text-amber-600" />
+                  <span>Manage Staff Directory</span>
+                </span>
+                <ArrowUpRight className="w-4 h-4 text-slate-400" />
+              </button>
+            )}
           </div>
         </div>
 

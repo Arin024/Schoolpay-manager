@@ -37,11 +37,13 @@ import { NIGERIAN_STATES } from '../../constants/index.js';
 interface SchoolStudentsViewProps {
   initialOpenEnroll?: boolean;
   initialOpenImport?: boolean;
+  readOnly?: boolean;
 }
 
 export const SchoolStudentsView: React.FC<SchoolStudentsViewProps> = ({
   initialOpenEnroll = false,
   initialOpenImport = false,
+  readOnly = false,
 }) => {
   const { activeSchool } = useAuth();
   const [students, setStudents] = useState<Student[]>([]);
@@ -460,30 +462,34 @@ export const SchoolStudentsView: React.FC<SchoolStudentsViewProps> = ({
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
-          <button
-            onClick={() => {
-              setFormData(initialFormState);
-              setFormError(null);
-              setIsEnrollModalOpen(true);
-            }}
-            className="px-4 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold transition flex items-center gap-1.5 shadow-sm cursor-pointer"
-          >
-            <Plus className="w-4 h-4" />
-            <span>Enroll Student</span>
-          </button>
+          {!readOnly && (
+            <>
+              <button
+                onClick={() => {
+                  setFormData(initialFormState);
+                  setFormError(null);
+                  setIsEnrollModalOpen(true);
+                }}
+                className="px-4 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold transition flex items-center gap-1.5 shadow-sm cursor-pointer"
+              >
+                <Plus className="w-4 h-4" />
+                <span>Enroll Student</span>
+              </button>
 
-          <button
-            onClick={() => {
-              setCsvText('');
-              setParsedRows([]);
-              setImportSummary(null);
-              setIsImportModalOpen(true);
-            }}
-            className="px-3.5 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-800 rounded-xl text-xs font-semibold transition flex items-center gap-1.5 cursor-pointer"
-          >
-            <Upload className="w-4 h-4 text-emerald-600" />
-            <span>Import CSV</span>
-          </button>
+              <button
+                onClick={() => {
+                  setCsvText('');
+                  setParsedRows([]);
+                  setImportSummary(null);
+                  setIsImportModalOpen(true);
+                }}
+                className="px-3.5 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-800 rounded-xl text-xs font-semibold transition flex items-center gap-1.5 cursor-pointer"
+              >
+                <Upload className="w-4 h-4 text-emerald-600" />
+                <span>Import CSV</span>
+              </button>
+            </>
+          )}
 
           <button
             onClick={handleExportStudentsPdf}
@@ -500,8 +506,6 @@ export const SchoolStudentsView: React.FC<SchoolStudentsViewProps> = ({
             <Download className="w-4 h-4 text-blue-600" />
             <span>Export CSV</span>
           </button>
-
-
         </div>
       </div>
 
@@ -659,15 +663,17 @@ export const SchoolStudentsView: React.FC<SchoolStudentsViewProps> = ({
               <GraduationCap className="w-6 h-6" />
             </div>
             <p className="text-xs font-semibold text-slate-700">No students match your filter criteria.</p>
-            <button
-              onClick={() => {
-                setFormData(initialFormState);
-                setIsEnrollModalOpen(true);
-              }}
-              className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold transition"
-            >
-              Enroll Student Now
-            </button>
+            {!readOnly && (
+              <button
+                onClick={() => {
+                  setFormData(initialFormState);
+                  setIsEnrollModalOpen(true);
+                }}
+                className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold transition"
+              >
+                Enroll Student Now
+              </button>
+            )}
           </div>
         ) : (
           <div className="overflow-x-auto">
@@ -749,7 +755,7 @@ export const SchoolStudentsView: React.FC<SchoolStudentsViewProps> = ({
                         >
                           <BarChart3 className="w-4 h-4" />
                         </button>
-                        {!st.user_id && (
+                        {!readOnly && !st.user_id && (
                           <button
                             onClick={() => {
                               setLoginStudent(st);
@@ -769,23 +775,27 @@ export const SchoolStudentsView: React.FC<SchoolStudentsViewProps> = ({
                         >
                           <Eye className="w-4 h-4" />
                         </button>
-                        <button
-                          onClick={() => openEditModal(st)}
-                          className="p-1.5 rounded-lg text-slate-500 hover:text-blue-700 hover:bg-blue-50 transition"
-                          title="Edit Student"
-                        >
-                          <Edit2 className="w-4 h-4" />
-                        </button>
-                        <button
-                          onClick={() => {
-                            setStudentToDelete(st);
-                            setIsDeleteModalOpen(true);
-                          }}
-                          className="p-1.5 rounded-lg text-slate-500 hover:text-red-700 hover:bg-red-50 transition"
-                          title="Archive / Delete"
-                        >
-                          <Trash2 className="w-4 h-4" />
-                        </button>
+                        {!readOnly && (
+                          <>
+                            <button
+                              onClick={() => openEditModal(st)}
+                              className="p-1.5 rounded-lg text-slate-500 hover:text-blue-700 hover:bg-blue-50 transition"
+                              title="Edit Student"
+                            >
+                              <Edit2 className="w-4 h-4" />
+                            </button>
+                            <button
+                              onClick={() => {
+                                setStudentToDelete(st);
+                                setIsDeleteModalOpen(true);
+                              }}
+                              className="p-1.5 rounded-lg text-slate-500 hover:text-red-700 hover:bg-red-50 transition"
+                              title="Archive / Delete"
+                            >
+                              <Trash2 className="w-4 h-4" />
+                            </button>
+                          </>
+                        )}
                       </div>
                     </td>
                   </tr>

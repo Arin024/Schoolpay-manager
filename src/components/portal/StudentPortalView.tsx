@@ -10,6 +10,11 @@ import {
   Printer,
   Receipt,
   Check,
+  User,
+  Megaphone,
+  Lock,
+  Mail,
+  Phone,
 } from 'lucide-react';
 import { api } from '../../services/api.js';
 import { useAuth } from '../../context/AuthContext.js';
@@ -18,10 +23,19 @@ import { AttendanceBadge, SeverityBadge, WorkflowStatusBadge } from '../common/S
 import { PrintableReportCardModal } from '../performance/PrintableReportCardModal.js';
 import { PrintableReceiptModal } from '../school/PrintableReceiptModal.js';
 
-type StudentTab = 'overview' | 'results' | 'reports' | 'attendance' | 'behaviour' | 'notices' | 'fees';
+type StudentTab =
+  | 'overview'
+  | 'profile'
+  | 'results'
+  | 'reports'
+  | 'attendance'
+  | 'behaviour'
+  | 'fees'
+  | 'announcements'
+  | 'notifications';
 
 export const StudentPortalView: React.FC = () => {
-  const { activeSchoolId } = useAuth();
+  const { activeSchoolId, user } = useAuth();
   const [tab, setTab] = useState<StudentTab>('overview');
   const [data, setData] = useState<StudentDashboardData | null>(null);
   const [sessions, setSessions] = useState<AcademicSessionItem[]>([]);
@@ -42,6 +56,9 @@ export const StudentPortalView: React.FC = () => {
         term_id: termId || undefined,
       });
       setData(res);
+      if (res.sessions) {
+        setSessions(res.sessions);
+      }
     } catch (err: any) {
       setError(err?.message || 'Failed to load student portal');
     } finally {
@@ -50,7 +67,6 @@ export const StudentPortalView: React.FC = () => {
   };
 
   useEffect(() => {
-    api.getSchoolAcademicSessions().then((r) => setSessions(r.sessions || [])).catch(() => {});
     loadDashboard('', '');
   }, [activeSchoolId]);
 
@@ -115,14 +131,18 @@ export const StudentPortalView: React.FC = () => {
       : null;
   const selectedSessionObj = sessions.find((s) => s.id === selectedSessionId);
 
-  const navItems: Array<{ key: StudentTab; label: string; icon: any }> = [
+  const unreadNotificationsCount = data.notifications.filter((n) => !n.read_at).length;
+
+  const navItems: Array<{ key: StudentTab; label: string; icon: any; badge?: number }> = [
     { key: 'overview', label: 'Overview', icon: GraduationCap },
-    { key: 'results', label: 'Exam Results', icon: BarChart3 },
-    { key: 'reports', label: 'Report Cards', icon: FileText },
-    { key: 'attendance', label: 'Attendance', icon: CalendarCheck },
-    { key: 'behaviour', label: 'Conduct & Remarks', icon: MessageSquare },
-    { key: 'notices', label: 'Announcements', icon: Bell },
-    ...(data.feesVisible ? [{ key: 'fees' as const, label: 'Fees & Receipts', icon: CreditCard }] : []),
+    { key: 'profile', label: 'My Profile', icon: User },
+    { key: 'results', label: 'My Results', icon: BarChart3 },
+    { key: 'reports', label: 'My Report Cards', icon: FileText },
+    { key: 'attendance', label: 'My Attendance', icon: CalendarCheck },
+    { key: 'behaviour', label: 'Behaviour & Remarks', icon: MessageSquare },
+    ...(data.feesVisible ? [{ key: 'fees' as const, label: 'My Fee Status', icon: CreditCard }] : []),
+    { key: 'announcements', label: 'Announcements', icon: Megaphone },
+    { key: 'notifications', label: 'Notifications', icon: Bell, badge: unreadNotificationsCount },
   ];
 
   return (
@@ -187,11 +207,62 @@ export const StudentPortalView: React.FC = () => {
               >
                 <Icon className="w-3.5 h-3.5" />
                 <span>{item.label}</span>
+                {item.badge ? (
+                  <span className="px-1.5 py-0.5 rounded bg-rose-500 text-white text-[10px] font-bold tabular-nums">
+                    {item.badge}
+                  </span>
+                ) : null}
               </button>
             );
           })}
         </div>
       </div>
+
+      {/* MY PROFILE (READ-ONLY) */}
+      {tab === 'profile' && (
+        <div className="bg-white rounded-2xl border border-slate-200 p-6 space-y-5 text-xs">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pb-4 border-b border-slate-200">
+            <div>
+              <h3 className="text-sm font-bold text-slate-900">Student Academic Profile</h3>
+              <p className="text-slate-500 mt-0.5">
+                Official student biodata and enrollment records are managed by School Administration.
+              </p>
+            </div>
+            <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-slate-100 text-slate-700 font-semibold self-start">
+              <Lock className="w-3 h-3" />
+              <span>Read-Only</span>
+            </span>
+          </div>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div className="p-4 rounded-xl bg-slate-50 border border-slate-200 space-y-2">
+              <p className="text-[11px] uppercase tracking-wider font-bold text-slate-400">Student Record</p>
+              <p className="text-sm font-bold text-slate-900">{data.student.full_name}</p>
+              <p className="text-slate-600">
+                Admission Number: <span className="font-mono font-semibold text-slate-800">{data.student.admission_number}</span>
+              </p>
+              <p className="text-slate-600">
+                Class &amp; Arm: <strong>{data.student.class_name || 'Unassigned'}</strong>
+                {data.student.class_arm_name ? ` · ${data.student.class_arm_name}` : ''}
+              </p>
+              <p className="text-slate-600">Gender: {data.student.gender || '—'}</p>
+              <p className="text-slate-600">Status: {data.student.student_status || 'ACTIVE'}</p>
+            </div>
+            <div className="p-4 rounded-xl bg-slate-50 border border-slate-200 space-y-2">
+              <p className="text-[11px] uppercase tracking-wider font-bold text-slate-400">Account &amp; School</p>
+              <p className="flex items-center gap-1.5 text-slate-600">
+                <Mail className="w-3.5 h-3.5 text-slate-400" />
+                <span>{user?.email || data.student.email || '—'}</span>
+              </p>
+              <p className="flex items-center gap-1.5 text-slate-600">
+                <Phone className="w-3.5 h-3.5 text-slate-400" />
+                <span>{data.student.phone || data.student.guardian_phone || 'Not recorded'}</span>
+              </p>
+              <p className="text-slate-600">School: {data.school?.name || '—'}</p>
+              <p className="text-slate-600">State: {data.student.state || '—'}</p>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* OVERVIEW */}
       {tab === 'overview' && (
@@ -422,50 +493,61 @@ export const StudentPortalView: React.FC = () => {
         </div>
       )}
 
-      {/* ANNOUNCEMENTS & NOTICES */}
-      {tab === 'notices' && (
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 text-xs">
-          <div className="bg-white rounded-2xl border border-slate-200 p-6 space-y-3">
-            <h3 className="text-sm font-bold text-slate-900">School Announcements</h3>
-            {data.announcements.length === 0 ? (
-              <p className="py-8 text-center text-slate-400">No announcements published.</p>
-            ) : (
-              <div className="divide-y divide-slate-100">
-                {data.announcements.map((a) => (
-                  <div key={a.id} className="py-3 first:pt-0 last:pb-0 space-y-1">
+      {/* SCHOOL ANNOUNCEMENTS */}
+      {tab === 'announcements' && (
+        <div className="bg-white rounded-2xl border border-slate-200 p-6 space-y-4 text-xs">
+          <h3 className="text-sm font-bold text-slate-900">School Announcements ({data.announcements.length})</h3>
+          {data.announcements.length === 0 ? (
+            <p className="py-10 text-center text-slate-400">No announcements published for students yet.</p>
+          ) : (
+            <div className="divide-y divide-slate-100">
+              {data.announcements.map((a) => (
+                <div key={a.id} className="py-3.5 first:pt-0 last:pb-0 space-y-1">
+                  <div className="flex items-center justify-between gap-2">
                     <p className="font-bold text-slate-900 text-sm">{a.title}</p>
-                    <p className="text-slate-700 whitespace-pre-line">{a.content}</p>
+                    <span className="text-[10px] font-mono text-slate-400 tabular-nums">
+                      {a.published_at ? new Date(a.published_at).toLocaleDateString() : ''}
+                    </span>
                   </div>
-                ))}
-              </div>
-            )}
-          </div>
-          <div className="bg-white rounded-2xl border border-slate-200 p-6 space-y-3">
-            <h3 className="text-sm font-bold text-slate-900">Personal Alerts</h3>
-            {data.notifications.length === 0 ? (
-              <p className="py-8 text-center text-slate-400">No alerts yet.</p>
-            ) : (
-              <div className="divide-y divide-slate-100">
-                {data.notifications.map((n) => (
-                  <div key={n.id} className="py-3 first:pt-0 last:pb-0 flex items-start justify-between gap-2">
-                    <div>
-                      <p className="font-semibold text-slate-900">{n.title}</p>
-                      <p className="text-slate-600">{n.message}</p>
-                    </div>
-                    {!n.read_at && (
-                      <button
-                        type="button"
-                        onClick={() => handleMarkNoticeRead(n.id)}
-                        className="p-1.5 rounded-lg bg-emerald-50 text-emerald-700"
-                      >
-                        <Check className="w-3.5 h-3.5" />
-                      </button>
-                    )}
+                  <p className="text-slate-700 whitespace-pre-line leading-relaxed">{a.content}</p>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* NOTIFICATIONS */}
+      {tab === 'notifications' && (
+        <div className="bg-white rounded-2xl border border-slate-200 p-6 space-y-4 text-xs">
+          <h3 className="text-sm font-bold text-slate-900">Notifications ({data.notifications.length})</h3>
+          {data.notifications.length === 0 ? (
+            <p className="py-10 text-center text-slate-400">No notifications yet.</p>
+          ) : (
+            <div className="divide-y divide-slate-100">
+              {data.notifications.map((n) => (
+                <div key={n.id} className="py-3 first:pt-0 last:pb-0 flex items-start justify-between gap-3">
+                  <div className="space-y-0.5">
+                    <p className="font-semibold text-slate-900">{n.title}</p>
+                    <p className="text-slate-600">{n.message}</p>
+                    <p className="text-[10px] font-mono text-slate-400 tabular-nums">
+                      {new Date(n.created_at).toLocaleString()}
+                    </p>
                   </div>
-                ))}
-              </div>
-            )}
-          </div>
+                  {!n.read_at && (
+                    <button
+                      type="button"
+                      onClick={() => handleMarkNoticeRead(n.id)}
+                      className="p-1.5 rounded-lg bg-emerald-50 text-emerald-700 hover:bg-emerald-100 shrink-0 cursor-pointer"
+                      title="Mark read"
+                    >
+                      <Check className="w-3.5 h-3.5" />
+                    </button>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
         </div>
       )}
 

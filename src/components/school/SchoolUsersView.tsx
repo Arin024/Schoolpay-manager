@@ -12,6 +12,7 @@ import {
   X,
   Trash2,
   GraduationCap,
+  Power,
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext.js';
 import { api } from '../../services/api.js';
@@ -50,10 +51,12 @@ export const SchoolUsersView: React.FC = () => {
     student_id: '',
   });
 
-  // Revoke Modal State
+  // Revoke & Status Toggle Modal State
   const [userToRevoke, setUserToRevoke] = useState<any | null>(null);
   const [revokeLoading, setRevokeLoading] = useState(false);
   const [revokeError, setRevokeError] = useState<string | null>(null);
+  const [togglingUserId, setTogglingUserId] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
 
   const canManage = ['SCHOOL_OWNER', 'SCHOOL_ADMIN', 'SUPER_ADMIN'].includes(activeRole?.role_name || '');
 
@@ -190,6 +193,22 @@ export const SchoolUsersView: React.FC = () => {
     }
   };
 
+  const handleToggleUserStatus = async (targetUser: any) => {
+    const currentlyActive = targetUser.is_active !== 0 && targetUser.is_active !== false;
+    setTogglingUserId(targetUser.id);
+    setActionError(null);
+    setProvisionSuccess(null);
+    try {
+      const res = await api.toggleSchoolUserStatus(targetUser.id, !currentlyActive);
+      setProvisionSuccess(res.message || `Account status updated for ${targetUser.full_name}.`);
+      await loadData();
+    } catch (err: any) {
+      setActionError(err?.message || 'Failed to update user account status');
+    } finally {
+      setTogglingUserId(null);
+    }
+  };
+
   return (
     <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-6 sm:p-8 space-y-6">
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-4 border-b border-slate-200">
@@ -236,6 +255,18 @@ export const SchoolUsersView: React.FC = () => {
         </div>
       )}
 
+      {actionError && (
+        <div className="p-3 rounded-xl bg-rose-50 border border-rose-200 text-rose-800 text-xs flex items-center justify-between">
+          <span className="flex items-center gap-2">
+            <AlertCircle className="w-4 h-4 text-rose-600 shrink-0" />
+            <span>{actionError}</span>
+          </span>
+          <button type="button" onClick={() => setActionError(null)} className="text-rose-700 hover:text-rose-900">
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+      )}
+
       {loading ? (
         <div className="py-12 text-center text-xs text-slate-400">Loading authorized users...</div>
       ) : users.length === 0 ? (
@@ -256,6 +287,7 @@ export const SchoolUsersView: React.FC = () => {
               {users.map((u) => {
                 const isSelf = currentUser?.id === u.id;
                 const isProtected = u.is_platform_admin === 1 || u.role_name === 'SCHOOL_OWNER' || isSelf;
+                const isAccountActive = u.is_active !== 0 && u.is_active !== false;
                 return (
                   <tr key={`${u.id}-${u.role_name}`} className="hover:bg-slate-50/50 transition">
                     <td className="py-3.5 px-4 font-semibold text-slate-900">
@@ -264,7 +296,18 @@ export const SchoolUsersView: React.FC = () => {
                           {u.full_name?.charAt(0) || 'U'}
                         </div>
                         <div>
-                          <p className="text-slate-900 font-bold">{u.full_name}</p>
+                          <div className="flex items-center gap-1.5">
+                            <p className="text-slate-900 font-bold">{u.full_name}</p>
+                            <span
+                              className={`px-1.5 py-0.5 rounded text-[10px] font-semibold ${
+                                isAccountActive
+                                  ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
+                                  : 'bg-rose-50 text-rose-700 border border-rose-200'
+                              }`}
+                            >
+                              {isAccountActive ? 'Active' : 'Deactivated'}
+                            </span>
+                          </div>
                           <p className="text-[11px] text-slate-400 font-mono">ID: {u.id}</p>
                         </div>
                       </div>
@@ -317,17 +360,33 @@ export const SchoolUsersView: React.FC = () => {
                                 <span>Issue Ticket</span>
                               </button>
                               {!isProtected && (
-                                <button
-                                  type="button"
-                                  onClick={() => {
-                                    setRevokeError(null);
-                                    setUserToRevoke(u);
-                                  }}
-                                  className="p-1.5 rounded-lg text-slate-400 hover:text-rose-700 hover:bg-rose-50 transition cursor-pointer"
-                                  title="Revoke school portal access"
-                                >
-                                  <Trash2 className="w-4 h-4" />
-                                </button>
+                                <>
+                                  <button
+                                    type="button"
+                                    disabled={togglingUserId === u.id}
+                                    onClick={() => handleToggleUserStatus(u)}
+                                    className={`px-2 py-1.5 rounded-lg text-[11px] font-semibold inline-flex items-center gap-1 border transition cursor-pointer whitespace-nowrap disabled:opacity-50 ${
+                                      isAccountActive
+                                        ? 'bg-amber-50 hover:bg-amber-100 text-amber-800 border-amber-200'
+                                        : 'bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border-emerald-200'
+                                    }`}
+                                    title={isAccountActive ? 'Deactivate user login' : 'Activate user login'}
+                                  >
+                                    <Power className="w-3 h-3" />
+                                    <span>{togglingUserId === u.id ? '...' : isAccountActive ? 'Deactivate' : 'Activate'}</span>
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      setRevokeError(null);
+                                      setUserToRevoke(u);
+                                    }}
+                                    className="p-1.5 rounded-lg text-slate-400 hover:text-rose-700 hover:bg-rose-50 transition cursor-pointer"
+                                    title="Revoke school portal access"
+                                  >
+                                    <Trash2 className="w-4 h-4" />
+                                  </button>
+                                </>
                               )}
                             </>
                           )}

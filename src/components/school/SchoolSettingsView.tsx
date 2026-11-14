@@ -18,7 +18,7 @@ export const SchoolSettingsView: React.FC = () => {
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
-  const canEdit = ['SCHOOL_OWNER', 'SCHOOL_ADMIN', 'BURSAR', 'SUPER_ADMIN'].includes(activeRole?.role_name || '');
+  const canEdit = ['SCHOOL_OWNER', 'SCHOOL_ADMIN', 'SUPER_ADMIN'].includes(activeRole?.role_name || '');
 
   // Synchronize formData whenever activeSettings loads or changes
   useEffect(() => {

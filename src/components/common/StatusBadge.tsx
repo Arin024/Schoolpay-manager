@@ -111,6 +111,12 @@ export const RoleBadge: React.FC<{ role: RoleName | string }> = ({ role }) => {
           Bank / Partner
         </span>
       );
+    case 'RESTRICTED':
+      return (
+        <span className="inline-flex items-center px-2.5 py-0.5 rounded-md text-xs font-semibold bg-rose-50 text-rose-800 border border-rose-200 whitespace-nowrap">
+          Restricted
+        </span>
+      );
     default:
       return (
         <span className="inline-flex items-center px-2.5 py-0.5 rounded-md text-xs font-medium bg-slate-100 text-slate-700 whitespace-nowrap">

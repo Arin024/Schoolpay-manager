@@ -13,6 +13,13 @@ import {
   X,
   Receipt,
   Check,
+  Users,
+  Megaphone,
+  History,
+  UserCheck,
+  Mail,
+  Phone,
+  Lock,
 } from 'lucide-react';
 import { api } from '../../services/api.js';
 import { useAuth } from '../../context/AuthContext.js';
@@ -34,7 +41,11 @@ type ParentTab =
   | 'attendance'
   | 'behaviour'
   | 'fees'
-  | 'notices';
+  | 'payments'
+  | 'receipts'
+  | 'announcements'
+  | 'profile'
+  | 'notifications';
 
 export const ParentPortalView: React.FC = () => {
   const { activeSchoolId, user } = useAuth();
@@ -74,6 +85,9 @@ export const ParentPortalView: React.FC = () => {
         term_id: termId || undefined,
       });
       setData(res);
+      if (res.sessions) {
+        setSessions(res.sessions);
+      }
       if (!studentId && res.selectedChild?.id) {
         setSelectedChildId(res.selectedChild.id);
       }
@@ -91,7 +105,6 @@ export const ParentPortalView: React.FC = () => {
   };
 
   useEffect(() => {
-    api.getSchoolAcademicSessions().then((r) => setSessions(r.sessions || [])).catch(() => {});
     loadDashboard('', '', '');
   }, [activeSchoolId]);
 
@@ -294,14 +307,23 @@ export const ParentPortalView: React.FC = () => {
         <div className="flex flex-wrap items-center gap-1.5 pt-3 border-t border-slate-100">
           {(
             [
-              { key: 'overview', label: 'Overview', icon: User },
-              { key: 'results', label: 'Academic Results', icon: BarChart3 },
+              { key: 'overview', label: 'My Children', icon: Users },
+              { key: 'results', label: 'Examination Results', icon: BarChart3 },
               { key: 'reports', label: 'Report Cards', icon: FileText },
-              { key: 'attendance', label: 'Attendance', icon: CalendarCheck },
-              { key: 'behaviour', label: 'Conduct & Remarks', icon: MessageSquare },
-              { key: 'fees', label: 'School Fees & Payments', icon: CreditCard },
-              { key: 'notices', label: 'Notices & Alerts', icon: Bell },
-            ] as const
+              { key: 'attendance', label: 'Attendance History', icon: CalendarCheck },
+              { key: 'behaviour', label: 'Behaviour & Remarks', icon: MessageSquare },
+              { key: 'fees', label: 'Fee Status', icon: CreditCard },
+              { key: 'payments', label: 'Payment History', icon: History },
+              { key: 'receipts', label: 'Receipts', icon: Receipt },
+              { key: 'announcements', label: 'Announcements', icon: Megaphone },
+              { key: 'profile', label: 'Profile', icon: UserCheck },
+              {
+                key: 'notifications',
+                label: 'Notifications',
+                icon: Bell,
+                badge: data.notifications.filter((n) => !n.read_at).length,
+              },
+            ] as Array<{ key: ParentTab; label: string; icon: any; badge?: number }>
           ).map((item) => {
             const Icon = item.icon;
             const active = tab === item.key;
@@ -310,12 +332,17 @@ export const ParentPortalView: React.FC = () => {
                 key={item.key}
                 type="button"
                 onClick={() => setTab(item.key)}
-                className={`px-3.5 py-2 rounded-xl text-xs font-semibold inline-flex items-center gap-1.5 transition cursor-pointer whitespace-nowrap shrink-0 ${
+                className={`px-3 py-2 rounded-xl text-xs font-semibold inline-flex items-center gap-1.5 transition cursor-pointer whitespace-nowrap shrink-0 ${
                   active ? 'bg-emerald-600 text-white' : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
                 }`}
               >
                 <Icon className="w-3.5 h-3.5" />
                 <span>{item.label}</span>
+                {item.badge ? (
+                  <span className="px-1.5 py-0.5 rounded bg-rose-500 text-white text-[10px] font-bold tabular-nums">
+                    {item.badge}
+                  </span>
+                ) : null}
               </button>
             );
           })}
@@ -767,61 +794,219 @@ export const ParentPortalView: React.FC = () => {
         </div>
       )}
 
-      {/* TAB 7: NOTICES & ALERTS */}
-      {tab === 'notices' && (
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 text-xs">
-          <div className="bg-white rounded-2xl border border-slate-200 p-6 space-y-3">
-            <h3 className="text-sm font-bold text-slate-900">School Announcements ({data.announcements.length})</h3>
-            {data.announcements.length === 0 ? (
-              <p className="py-8 text-center text-slate-400">No announcements published yet.</p>
-            ) : (
-              <div className="divide-y divide-slate-100">
-                {data.announcements.map((a) => (
-                  <div key={a.id} className="py-3 first:pt-0 last:pb-0 space-y-1">
+      {/* TAB 7: PAYMENT HISTORY */}
+      {tab === 'payments' && (
+        <div className="bg-white rounded-2xl border border-slate-200 p-6 space-y-4">
+          <div className="flex items-center justify-between">
+            <h3 className="text-sm font-bold text-slate-900">
+              Payment History · {data.selectedChild?.full_name} ({data.payments.length})
+            </h3>
+            <span className="text-xs text-slate-500 tabular-nums">
+              Total Paid: <strong className="text-emerald-700">₦{Number(data.feeSummary?.totalPaidNaira || 0).toLocaleString()}</strong>
+            </span>
+          </div>
+          {data.payments.length === 0 ? (
+            <p className="py-10 text-center text-xs text-slate-400">No payments recorded for this child yet.</p>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full text-left text-xs">
+                <thead>
+                  <tr className="border-b border-slate-200 text-slate-500 bg-slate-50/70">
+                    <th className="py-2.5 px-3">Reference</th>
+                    <th className="py-2.5 px-3">Date</th>
+                    <th className="py-2.5 px-3">Invoice</th>
+                    <th className="py-2.5 px-3">Method</th>
+                    <th className="py-2.5 px-3 text-right">Amount</th>
+                    <th className="py-2.5 px-3">Status</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100">
+                  {data.payments.map((p) => (
+                    <tr key={p.id}>
+                      <td className="py-2.5 px-3 font-mono font-semibold text-slate-900">{p.payment_reference}</td>
+                      <td className="py-2.5 px-3 font-mono text-slate-600 tabular-nums">
+                        {p.payment_date || p.paid_at ? new Date(p.payment_date || p.paid_at!).toLocaleDateString() : '—'}
+                      </td>
+                      <td className="py-2.5 px-3 font-mono text-slate-600">{p.invoice_number || '—'}</td>
+                      <td className="py-2.5 px-3 text-slate-600">{p.payment_method}</td>
+                      <td className="py-2.5 px-3 text-right font-bold tabular-nums text-emerald-700">
+                        ₦{Number(p.amount_naira ?? p.amount / 100).toLocaleString()}
+                      </td>
+                      <td className="py-2.5 px-3 font-semibold text-slate-700">{p.status}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* TAB 8: OFFICIAL DIGITAL RECEIPTS */}
+      {tab === 'receipts' && (
+        <div className="bg-white rounded-2xl border border-slate-200 p-6 space-y-4">
+          <h3 className="text-sm font-bold text-slate-900">
+            Official Digital Receipts · {data.selectedChild?.full_name} ({data.receipts.length})
+          </h3>
+          {data.receipts.length === 0 ? (
+            <p className="py-10 text-center text-xs text-slate-400">No payment receipts issued yet.</p>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full text-left text-xs">
+                <thead>
+                  <tr className="border-b border-slate-200 text-slate-500 bg-slate-50/70">
+                    <th className="py-2.5 px-3">Receipt #</th>
+                    <th className="py-2.5 px-3">Date</th>
+                    <th className="py-2.5 px-3">Method</th>
+                    <th className="py-2.5 px-3 text-right">Amount Paid</th>
+                    <th className="py-2.5 px-3 text-right">Action</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100">
+                  {data.receipts.map((rcp) => (
+                    <tr key={rcp.id}>
+                      <td className="py-2.5 px-3 font-mono font-semibold text-slate-900">{rcp.receipt_number}</td>
+                      <td className="py-2.5 px-3 font-mono text-slate-600 tabular-nums">
+                        {new Date(rcp.issue_date || rcp.created_at).toLocaleDateString()}
+                      </td>
+                      <td className="py-2.5 px-3 text-slate-600">{rcp.payment_method || 'ONLINE'}</td>
+                      <td className="py-2.5 px-3 text-right font-bold tabular-nums text-emerald-700">
+                        ₦{Number(rcp.amount_naira ?? rcp.amount / 100).toLocaleString()}
+                      </td>
+                      <td className="py-2.5 px-3 text-right">
+                        <button
+                          type="button"
+                          onClick={() => handleOpenReceipt(rcp.id)}
+                          className="px-3 py-1.5 bg-slate-900 hover:bg-slate-800 text-white rounded-lg text-[11px] font-semibold inline-flex items-center gap-1 cursor-pointer"
+                        >
+                          <Receipt className="w-3 h-3" />
+                          <span>View / Print</span>
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* TAB 9: SCHOOL ANNOUNCEMENTS */}
+      {tab === 'announcements' && (
+        <div className="bg-white rounded-2xl border border-slate-200 p-6 space-y-4 text-xs">
+          <h3 className="text-sm font-bold text-slate-900">School Announcements ({data.announcements.length})</h3>
+          {data.announcements.length === 0 ? (
+            <p className="py-10 text-center text-slate-400">No announcements published for parents yet.</p>
+          ) : (
+            <div className="divide-y divide-slate-100">
+              {data.announcements.map((a) => (
+                <div key={a.id} className="py-3.5 first:pt-0 last:pb-0 space-y-1">
+                  <div className="flex items-center justify-between gap-2">
                     <p className="font-bold text-slate-900 text-sm">{a.title}</p>
-                    <p className="text-[11px] text-slate-500">
-                      {a.priority} ·{' '}
-                      <span className="font-mono tabular-nums">
-                        {a.published_at ? new Date(a.published_at).toLocaleDateString() : ''}
-                      </span>
-                    </p>
-                    <p className="text-slate-700 leading-relaxed whitespace-pre-line">{a.content}</p>
+                    <span className="text-[11px] font-mono text-slate-400 tabular-nums">
+                      {a.published_at ? new Date(a.published_at).toLocaleDateString() : ''}
+                    </span>
                   </div>
-                ))}
-              </div>
-            )}
+                  <p className="text-[11px] text-slate-500">Priority: {a.priority}</p>
+                  <p className="text-slate-700 leading-relaxed whitespace-pre-line">{a.content}</p>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* TAB 10: GUARDIAN PROFILE */}
+      {tab === 'profile' && (
+        <div className="bg-white rounded-2xl border border-slate-200 p-6 space-y-5 text-xs">
+          <div className="flex items-center justify-between pb-4 border-b border-slate-200">
+            <div>
+              <h3 className="text-sm font-bold text-slate-900">Parent / Guardian Profile</h3>
+              <p className="text-slate-500 mt-0.5">
+                Contact information and verified child linkages are managed by School Administration.
+              </p>
+            </div>
+            <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-slate-100 text-slate-700 font-semibold">
+              <Lock className="w-3 h-3" />
+              <span>Read-Only</span>
+            </span>
           </div>
 
-          <div className="bg-white rounded-2xl border border-slate-200 p-6 space-y-3">
-            <h3 className="text-sm font-bold text-slate-900">Notifications ({data.notifications.length})</h3>
-            {data.notifications.length === 0 ? (
-              <p className="py-8 text-center text-slate-400">No notifications recorded.</p>
-            ) : (
-              <div className="divide-y divide-slate-100">
-                {data.notifications.map((n) => (
-                  <div key={n.id} className="py-3 first:pt-0 last:pb-0 flex items-start justify-between gap-3">
-                    <div className="space-y-0.5">
-                      <p className="font-semibold text-slate-900">{n.title}</p>
-                      <p className="text-slate-600">{n.message}</p>
-                      <p className="text-[10px] font-mono text-slate-400 tabular-nums">
-                        {new Date(n.created_at).toLocaleString()}
-                      </p>
-                    </div>
-                    {!n.read_at && (
-                      <button
-                        type="button"
-                        onClick={() => handleMarkNoticeRead(n.id)}
-                        className="p-1.5 rounded-lg bg-emerald-50 text-emerald-700 hover:bg-emerald-100 shrink-0"
-                        title="Mark read"
-                      >
-                        <Check className="w-3.5 h-3.5" />
-                      </button>
-                    )}
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div className="p-4 rounded-xl bg-slate-50 border border-slate-200 space-y-2">
+              <p className="text-[11px] uppercase tracking-wider font-bold text-slate-400">Guardian Details</p>
+              <p className="text-sm font-bold text-slate-900">
+                {data.parentProfile
+                  ? `${data.parentProfile.first_name} ${data.parentProfile.last_name}`.trim()
+                  : user?.full_name}
+              </p>
+              <p className="flex items-center gap-1.5 text-slate-600">
+                <Mail className="w-3.5 h-3.5 text-slate-400" />
+                <span>{user?.email || data.parentProfile?.email || '—'}</span>
+              </p>
+              <p className="flex items-center gap-1.5 text-slate-600">
+                <Phone className="w-3.5 h-3.5 text-slate-400" />
+                <span>{data.parentProfile?.phone || user?.phone || 'Not recorded'}</span>
+              </p>
+              {data.parentProfile?.occupation && (
+                <p className="text-slate-600">Occupation: {data.parentProfile.occupation}</p>
+              )}
+              {data.parentProfile?.address && (
+                <p className="text-slate-600">Address: {data.parentProfile.address}</p>
+              )}
+            </div>
+
+            <div className="p-4 rounded-xl bg-slate-50 border border-slate-200 space-y-2">
+              <p className="text-[11px] uppercase tracking-wider font-bold text-slate-400">
+                Verified Linked Children ({data.children.length})
+              </p>
+              <div className="space-y-1.5">
+                {data.children.map((ch) => (
+                  <div key={ch.id} className="p-2 rounded-lg bg-white border border-slate-200 flex items-center justify-between">
+                    <span className="font-semibold text-slate-900">{ch.full_name}</span>
+                    <span className="font-mono text-[11px] text-slate-500">
+                      {ch.admission_number} · {ch.class_name || 'Unassigned'}
+                    </span>
                   </div>
                 ))}
               </div>
-            )}
+            </div>
           </div>
+        </div>
+      )}
+
+      {/* TAB 11: NOTIFICATIONS */}
+      {tab === 'notifications' && (
+        <div className="bg-white rounded-2xl border border-slate-200 p-6 space-y-3 text-xs">
+          <h3 className="text-sm font-bold text-slate-900">Notifications ({data.notifications.length})</h3>
+          {data.notifications.length === 0 ? (
+            <p className="py-10 text-center text-slate-400">No notifications recorded.</p>
+          ) : (
+            <div className="divide-y divide-slate-100">
+              {data.notifications.map((n) => (
+                <div key={n.id} className="py-3 first:pt-0 last:pb-0 flex items-start justify-between gap-3">
+                  <div className="space-y-0.5">
+                    <p className="font-semibold text-slate-900">{n.title}</p>
+                    <p className="text-slate-600">{n.message}</p>
+                    <p className="text-[10px] font-mono text-slate-400 tabular-nums">
+                      {new Date(n.created_at).toLocaleString()}
+                    </p>
+                  </div>
+                  {!n.read_at && (
+                    <button
+                      type="button"
+                      onClick={() => handleMarkNoticeRead(n.id)}
+                      className="p-1.5 rounded-lg bg-emerald-50 text-emerald-700 hover:bg-emerald-100 shrink-0 cursor-pointer"
+                      title="Mark read"
+                    >
+                      <Check className="w-3.5 h-3.5" />
+                    </button>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
         </div>
       )}
 

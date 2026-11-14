@@ -44,6 +44,7 @@ import {
   PerformanceOverviewData,
   ParentDashboardData,
   StudentDashboardData,
+  TeacherDashboardData,
 } from '../types/index.js';
 
 const API_BASE = '/api/v1';
@@ -2087,6 +2088,24 @@ export const api = {
   async revokeSchoolUser(userId: string): Promise<{ success: boolean; message: string }> {
     return safeFetch(`${API_BASE}/school/users/${userId}`, {
       method: 'DELETE',
+      headers: getAuthHeaders(),
+    });
+  },
+
+  async toggleSchoolUserStatus(
+    userId: string,
+    isActive: boolean
+  ): Promise<{ success: boolean; message: string; is_active: number }> {
+    return safeFetch(`${API_BASE}/school/users/${userId}/status`, {
+      method: 'PATCH',
+      headers: getAuthHeaders(),
+      body: JSON.stringify({ is_active: isActive }),
+    });
+  },
+
+  // Teacher Read-Only Portal
+  async getTeacherDashboard(): Promise<{ success: boolean } & TeacherDashboardData> {
+    return safeFetch(`${API_BASE}/portal/teacher/dashboard`, {
       headers: getAuthHeaders(),
     });
   },

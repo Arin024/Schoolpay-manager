@@ -22,7 +22,7 @@ import { useAuth } from '../../context/AuthContext.js';
 import { api } from '../../services/api.js';
 import { ParentItem, Student } from '../../types/index.js';
 
-export const SchoolParentsView: React.FC = () => {
+export const SchoolParentsView: React.FC<{ readOnly?: boolean }> = ({ readOnly = false }) => {
   const { activeSchool } = useAuth();
   const [parents, setParents] = useState<ParentItem[]>([]);
   const [allStudents, setAllStudents] = useState<Student[]>([]);
@@ -260,17 +260,19 @@ export const SchoolParentsView: React.FC = () => {
             <Download className="w-4 h-4 text-slate-600" />
             <span>Export CSV</span>
           </button>
-          <button
-            onClick={() => {
-              setFormData(initialFormState);
-              setFormError(null);
-              setIsAddModalOpen(true);
-            }}
-            className="px-4 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold transition flex items-center gap-1.5 shadow-sm cursor-pointer"
-          >
-            <Plus className="w-4 h-4" />
-            <span>Add Parent / Guardian</span>
-          </button>
+          {!readOnly && (
+            <button
+              onClick={() => {
+                setFormData(initialFormState);
+                setFormError(null);
+                setIsAddModalOpen(true);
+              }}
+              className="px-4 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold transition flex items-center gap-1.5 shadow-sm cursor-pointer"
+            >
+              <Plus className="w-4 h-4" />
+              <span>Add Parent / Guardian</span>
+            </button>
+          )}
         </div>
       </div>
 
@@ -316,15 +318,17 @@ export const SchoolParentsView: React.FC = () => {
               <Users className="w-6 h-6" />
             </div>
             <p className="text-xs font-semibold text-slate-700">No parent records found.</p>
-            <button
-              onClick={() => {
-                setFormData(initialFormState);
-                setIsAddModalOpen(true);
-              }}
-              className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold transition"
-            >
-              Add First Parent
-            </button>
+            {!readOnly && (
+              <button
+                onClick={() => {
+                  setFormData(initialFormState);
+                  setIsAddModalOpen(true);
+                }}
+                className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold transition"
+              >
+                Add First Parent
+              </button>
+            )}
           </div>
         ) : (
           <div className="overflow-x-auto">
@@ -336,7 +340,7 @@ export const SchoolParentsView: React.FC = () => {
                   <th className="py-3 px-4">Phone &amp; Email</th>
                   <th className="py-3 px-4">Occupation</th>
                   <th className="py-3 px-4">Verified Children</th>
-                  <th className="py-3 px-4 text-right">Actions</th>
+                  {!readOnly && <th className="py-3 px-4 text-right">Actions</th>}
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
@@ -368,7 +372,7 @@ export const SchoolParentsView: React.FC = () => {
                             {parent.portal_user_email || 'Linked'}
                           </p>
                         </div>
-                      ) : (
+                      ) : !readOnly ? (
                         <button
                           type="button"
                           onClick={() => openProvisionLoginModal(parent)}
@@ -377,6 +381,8 @@ export const SchoolParentsView: React.FC = () => {
                           <KeyRound className="w-3 h-3" />
                           <span>Provision Login</span>
                         </button>
+                      ) : (
+                        <span className="text-[11px] text-slate-400">Not provisioned</span>
                       )}
                     </td>
                     <td className="py-3.5 px-4 text-slate-600">
@@ -416,31 +422,33 @@ export const SchoolParentsView: React.FC = () => {
                         <span className="text-[11px] text-slate-400 italic">No linked students</span>
                       )}
                     </td>
-                    <td className="py-3.5 px-4 text-right">
-                      <div className="flex items-center justify-end gap-1">
-                        <button
-                          onClick={() => openLinkChildrenModal(parent)}
-                          className="p-1.5 rounded-lg text-slate-500 hover:text-emerald-700 hover:bg-emerald-50 transition"
-                          title="Manage Verified Children"
-                        >
-                          <LinkIcon className="w-4 h-4" />
-                        </button>
-                        <button
-                          onClick={() => openEditModal(parent)}
-                          className="p-1.5 rounded-lg text-slate-500 hover:text-blue-700 hover:bg-blue-50 transition"
-                          title="Edit Parent"
-                        >
-                          <Edit2 className="w-4 h-4" />
-                        </button>
-                        <button
-                          onClick={() => setParentToDelete(parent)}
-                          className="p-1.5 rounded-lg text-slate-500 hover:text-red-700 hover:bg-red-50 transition"
-                          title="Delete Parent"
-                        >
-                          <Trash2 className="w-4 h-4" />
-                        </button>
-                      </div>
-                    </td>
+                    {!readOnly && (
+                      <td className="py-3.5 px-4 text-right">
+                        <div className="flex items-center justify-end gap-1">
+                          <button
+                            onClick={() => openLinkChildrenModal(parent)}
+                            className="p-1.5 rounded-lg text-slate-500 hover:text-emerald-700 hover:bg-emerald-50 transition"
+                            title="Manage Verified Children"
+                          >
+                            <LinkIcon className="w-4 h-4" />
+                          </button>
+                          <button
+                            onClick={() => openEditModal(parent)}
+                            className="p-1.5 rounded-lg text-slate-500 hover:text-blue-700 hover:bg-blue-50 transition"
+                            title="Edit Parent"
+                          >
+                            <Edit2 className="w-4 h-4" />
+                          </button>
+                          <button
+                            onClick={() => setParentToDelete(parent)}
+                            className="p-1.5 rounded-lg text-slate-500 hover:text-red-700 hover:bg-red-50 transition"
+                            title="Delete Parent"
+                          >
+                            <Trash2 className="w-4 h-4" />
+                          </button>
+                        </div>
+                      </td>
+                    )}
                   </tr>
                 ))}
               </tbody>
