@@ -1223,6 +1223,38 @@ export interface TeacherDashboardData {
   };
 }
 
+export interface PublicSchoolSummary {
+  id: string;
+  name: string;
+  slug: string;
+  type: string;
+  status: string;
+  state: string;
+  lga: string;
+  address?: string | null;
+  phone?: string | null;
+  email?: string | null;
+  website?: string | null;
+  logo_url?: string | null;
+}
 
+export interface PublicDocumentVerificationResult {
+  valid: boolean;
+  document_type: 'RECEIPT' | 'REPORT_CARD';
+  school: {
+    id: string;
+    name: string;
+    slug: string;
+    state: string;
+    lga: string;
+  };
+  details: Record<string, any>;
+}
 
-
+export interface BulkProvisionCredential {
+  role: 'STUDENT' | 'PARENT';
+  name: string;
+  loginIdentifier: string;
+  aliasIdentifier: string | null;
+  temporaryPassword: string;
+}

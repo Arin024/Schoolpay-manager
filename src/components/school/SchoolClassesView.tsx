@@ -39,6 +39,57 @@ export const SchoolClassesView: React.FC = () => {
 
   const [formSubmitting, setFormSubmitting] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
+  const [presetLoading, setPresetLoading] = useState(false);
+
+  const handleLoadNigerianPreset = async (mode: 'SECONDARY' | 'PRIMARY' | 'K12') => {
+    setPresetLoading(true);
+    try {
+      const existingNames = new Set(classes.map((c) => c.name.trim().toLowerCase()));
+      const templates: Array<{ name: string; level: string; description: string; arms?: string[] }> = [];
+
+      if (mode === 'PRIMARY' || mode === 'K12') {
+        templates.push(
+          { name: 'Nursery 1', level: 'Early Years / Nursery', description: 'Early Years Reception 1', arms: ['A', 'B'] },
+          { name: 'Nursery 2', level: 'Early Years / Nursery', description: 'Early Years Reception 2', arms: ['A', 'B'] },
+          { name: 'Primary 1', level: 'Primary', description: 'Lower Basic 1', arms: ['A', 'B'] },
+          { name: 'Primary 2', level: 'Primary', description: 'Lower Basic 2', arms: ['A', 'B'] },
+          { name: 'Primary 3', level: 'Primary', description: 'Lower Basic 3', arms: ['A', 'B'] },
+          { name: 'Primary 4', level: 'Primary', description: 'Middle Basic 4', arms: ['A', 'B'] },
+          { name: 'Primary 5', level: 'Primary', description: 'Middle Basic 5', arms: ['A', 'B'] },
+          { name: 'Primary 6', level: 'Primary', description: 'Upper Primary / Common Entrance', arms: ['A', 'B'] }
+        );
+      }
+      if (mode === 'SECONDARY' || mode === 'K12') {
+        templates.push(
+          { name: 'JSS 1', level: 'Junior Secondary', description: 'Junior Secondary School 1 (Basic 7)', arms: ['Gold', 'Silver'] },
+          { name: 'JSS 2', level: 'Junior Secondary', description: 'Junior Secondary School 2 (Basic 8)', arms: ['Gold', 'Silver'] },
+          { name: 'JSS 3', level: 'Junior Secondary', description: 'Junior Secondary School 3 (BECE / Basic 9)', arms: ['Gold', 'Silver'] },
+          { name: 'SSS 1', level: 'Senior Secondary', description: 'Senior Secondary School 1', arms: ['Science', 'Art', 'Commercial'] },
+          { name: 'SSS 2', level: 'Senior Secondary', description: 'Senior Secondary School 2', arms: ['Science', 'Art', 'Commercial'] },
+          { name: 'SSS 3', level: 'Senior Secondary', description: 'Senior Secondary School 3 (WAEC / NECO)', arms: ['Science', 'Art', 'Commercial'] }
+        );
+      }
+
+      for (const tpl of templates) {
+        if (existingNames.has(tpl.name.toLowerCase())) continue;
+        const created = await api.createClass({
+          name: tpl.name,
+          level: tpl.level,
+          description: tpl.description,
+        });
+        if (created?.class?.id && tpl.arms) {
+          for (const armName of tpl.arms) {
+            await api.createClassArm(created.class.id, { name: armName, capacity: 40 });
+          }
+        }
+      }
+      await loadData();
+    } catch (err: any) {
+      alert(err?.message || 'Failed to apply Nigerian class preset');
+    } finally {
+      setPresetLoading(false);
+    }
+  };
 
   useEffect(() => {
     loadData();
@@ -131,17 +182,37 @@ export const SchoolClassesView: React.FC = () => {
           </p>
         </div>
 
-        <button
-          onClick={() => {
-            setNewClassName('');
-            setFormError(null);
-            setIsAddClassModalOpen(true);
-          }}
-          className="px-4 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold transition flex items-center gap-1.5 shadow-sm self-start md:self-auto cursor-pointer"
-        >
-          <Plus className="w-4 h-4" />
-          <span>Add Academic Class</span>
-        </button>
+        <div className="flex flex-wrap items-center gap-2 self-start md:self-auto">
+          <button
+            type="button"
+            disabled={presetLoading}
+            onClick={() => {
+              const t = String(activeSchool?.type || '').toLowerCase();
+              const mode =
+                t.includes('comprehensive') || t.includes('k-12')
+                  ? 'K12'
+                  : t.includes('primary') || t.includes('nursery')
+                    ? 'PRIMARY'
+                    : 'SECONDARY';
+              handleLoadNigerianPreset(mode);
+            }}
+            className="px-3.5 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-800 rounded-xl text-xs font-bold transition flex items-center gap-1.5 cursor-pointer disabled:opacity-60"
+          >
+            <Sparkles className="w-4 h-4 text-emerald-600" />
+            <span>{presetLoading ? 'Setting up...' : 'Load Nigerian Classes'}</span>
+          </button>
+          <button
+            onClick={() => {
+              setNewClassName('');
+              setFormError(null);
+              setIsAddClassModalOpen(true);
+            }}
+            className="px-4 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold transition flex items-center gap-1.5 shadow-sm cursor-pointer"
+          >
+            <Plus className="w-4 h-4" />
+            <span>Add Academic Class</span>
+          </button>
+        </div>
       </div>
 
       {/* Classes Grid */}
@@ -151,17 +222,40 @@ export const SchoolClassesView: React.FC = () => {
           <span>Loading classes and arms...</span>
         </div>
       ) : classes.length === 0 ? (
-        <div className="bg-white rounded-2xl border border-slate-200 p-16 text-center space-y-3 shadow-sm">
+        <div className="bg-white rounded-2xl border border-slate-200 p-12 text-center space-y-4 shadow-sm">
           <div className="w-12 h-12 rounded-full bg-slate-100 text-slate-400 flex items-center justify-center mx-auto">
             <Building2 className="w-6 h-6" />
           </div>
-          <p className="text-xs font-semibold text-slate-700">No classes configured for this school yet.</p>
-          <button
-            onClick={() => setIsAddClassModalOpen(true)}
-            className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold transition"
-          >
-            Create First Class (e.g. JSS 1, SSS 1, Basic 1)
-          </button>
+          <div>
+            <p className="text-sm font-bold text-slate-800">No classes configured for this school yet.</p>
+            <p className="text-xs text-slate-500 mt-1">
+              Quickly load Nigerian standard classes &amp; streams (JSS 1–3, SSS 1–3 Science/Art/Commercial, or Nursery &amp; Primary 1–6) in one click.
+            </p>
+          </div>
+          <div className="flex flex-wrap items-center justify-center gap-2">
+            <button
+              type="button"
+              disabled={presetLoading}
+              onClick={() => handleLoadNigerianPreset('SECONDARY')}
+              className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold transition cursor-pointer disabled:opacity-60"
+            >
+              {presetLoading ? 'Creating...' : 'Auto-Setup Secondary (JSS 1–3 & SSS 1–3)'}
+            </button>
+            <button
+              type="button"
+              disabled={presetLoading}
+              onClick={() => handleLoadNigerianPreset('PRIMARY')}
+              className="px-4 py-2 bg-slate-800 hover:bg-slate-900 text-white rounded-xl text-xs font-bold transition cursor-pointer disabled:opacity-60"
+            >
+              Auto-Setup Nursery &amp; Primary 1–6
+            </button>
+            <button
+              onClick={() => setIsAddClassModalOpen(true)}
+              className="px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-800 rounded-xl text-xs font-bold transition cursor-pointer"
+            >
+              Create Custom Class
+            </button>
+          </div>
         </div>
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">

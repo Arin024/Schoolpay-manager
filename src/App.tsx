@@ -127,10 +127,26 @@ function isTabAllowedForRole(tab: SchoolTab, roleName: string | undefined, isSup
   return tab === 'overview';
 }
 
+function parsePortalSlugFromLocation(): string | null {
+  try {
+    const rawHash = window.location.hash.replace(/^#\/?/, '');
+    if (rawHash.toLowerCase().startsWith('portal/')) {
+      const slug = rawHash.slice('portal/'.length).split(/[/?#]/)[0]?.trim();
+      if (slug) return slug;
+    }
+    const params = new URLSearchParams(window.location.search);
+    const qSlug = params.get('portal') || params.get('school');
+    return qSlug ? qSlug.trim() : null;
+  } catch {
+    return null;
+  }
+}
+
 const AppContent: React.FC = () => {
   const { user, isSuperAdmin, isLoading, activeSchool, activeSettings, activeRole, logout } = useAuth();
   const [activeView, setActiveView] = useState<AppView>('school');
   const [schoolTab, setSchoolTab] = useState<SchoolTab>('overview');
+  const [portalSlug, setPortalSlug] = useState<string | null>(() => parsePortalSlugFromLocation());
   const [registeredSchoolName, setRegisteredSchoolName] = useState<string | undefined>(undefined);
   const [openEnrollOnStudentTab, setOpenEnrollOnStudentTab] = useState(false);
   const [openImportOnStudentTab, setOpenImportOnStudentTab] = useState(false);
@@ -307,9 +323,16 @@ const AppContent: React.FC = () => {
       }
 
       // 3. Fallback: Parse URL hash if state was empty
-      const rawHash = window.location.hash.replace(/^#\/?/, '').toLowerCase();
+      const rawHashOriginal = window.location.hash.replace(/^#\/?/, '');
+      const rawHash = rawHashOriginal.toLowerCase();
       const hash = rawHash.startsWith('school/') ? rawHash.slice('school/'.length) : rawHash;
       if (!hash || hash === 'login' || hash === 'home') {
+        const fallbackView = user ? (isSuperAdmin && !activeSchool ? 'superadmin' : 'school') : 'login';
+        setActiveView(fallbackView);
+        updatePageSeo(fallbackView, 'overview', activeSchool?.name);
+      } else if (hash.startsWith('portal/')) {
+        const slug = rawHashOriginal.slice('portal/'.length).split(/[/?#]/)[0]?.trim() || null;
+        setPortalSlug(slug);
         const fallbackView = user ? (isSuperAdmin && !activeSchool ? 'superadmin' : 'school') : 'login';
         setActiveView(fallbackView);
         updatePageSeo(fallbackView, 'overview', activeSchool?.name);
@@ -349,7 +372,8 @@ const AppContent: React.FC = () => {
 
   // Initial load and auth state synchronization
   useEffect(() => {
-    const rawHash = window.location.hash.replace(/^#\/?/, '').toLowerCase();
+    const rawHashOriginal = window.location.hash.replace(/^#\/?/, '');
+    const rawHash = rawHashOriginal.toLowerCase();
     const hash = rawHash.startsWith('school/') ? rawHash.slice('school/'.length) : rawHash;
     const defaultAuthView: AppView = isSuperAdmin && !activeSchool ? 'superadmin' : 'school';
     let initialView: AppView = user ? defaultAuthView : 'login';
@@ -358,6 +382,10 @@ const AppContent: React.FC = () => {
     if (hash === 'register') {
       initialView = user ? defaultAuthView : 'register';
     } else if (hash === 'login') {
+      initialView = user ? defaultAuthView : 'login';
+    } else if (hash.startsWith('portal/')) {
+      const parsed = rawHashOriginal.slice('portal/'.length).split(/[/?#]/)[0]?.trim() || null;
+      setPortalSlug(parsed);
       initialView = user ? defaultAuthView : 'login';
     } else if (hash === 'thank-you') {
       initialView = 'thank-you';
@@ -379,12 +407,13 @@ const AppContent: React.FC = () => {
     setActiveView(initialView);
     setSchoolTab(initialTab);
 
-    // If user is authenticated and on login/register, blank hash, or a disallowed role hash, sanitize URL to dashboard
+    // If user is authenticated and on login/register/portal, blank hash, or a disallowed role hash, sanitize URL to dashboard
     if (
       user &&
       (hash === 'login' ||
         hash === 'register' ||
         hash === '' ||
+        hash.startsWith('portal/') ||
         (initialView === 'school' && rawHash !== initialTab) ||
         (initialView !== 'superadmin' && rawHash === 'superadmin'))
     ) {
@@ -392,11 +421,14 @@ const AppContent: React.FC = () => {
       window.history.replaceState({ view: initialView, schoolTab: initialTab }, '', targetHash);
     } else {
       // Seed baseline history state so phone back button doesn't close on first press
-      window.history.replaceState(
-        { view: initialView, schoolTab: initialTab },
-        '',
-        window.location.hash || (initialView === 'school' ? `#${initialTab}` : `#${initialView}`)
-      );
+      const preservedHash =
+        window.location.hash ||
+        (initialView === 'login' && portalSlug
+          ? `#portal/${portalSlug}`
+          : initialView === 'school'
+            ? `#${initialTab}`
+            : `#${initialView}`);
+      window.history.replaceState({ view: initialView, schoolTab: initialTab }, '', preservedHash);
     }
 
     updatePageSeo(initialView, initialTab, activeSchool?.name);
@@ -545,6 +577,13 @@ const AppContent: React.FC = () => {
                   onSwitchToRegister={() => navigateTo('register')}
                   onForgotPassword={handleOpenForgotModal}
                   onSuccess={() => navigateTo('school', 'overview')}
+                  initialPortalSlug={portalSlug}
+                  onPortalSlugChange={(slug) => {
+                    setPortalSlug(slug);
+                    if (!user) {
+                      window.history.replaceState({ view: 'login', portalSlug: slug }, '', slug ? `#portal/${slug}` : '#login');
+                    }
+                  }}
                 />
               )}
             </div>

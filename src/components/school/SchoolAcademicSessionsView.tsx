@@ -24,19 +24,28 @@ export const SchoolAcademicSessionsView: React.FC = () => {
   const [isAddTermModalOpen, setIsAddTermModalOpen] = useState(false);
   const [selectedSessionForTerm, setSelectedSessionForTerm] = useState<AcademicSessionItem | null>(null);
 
+  const now = new Date();
+  const currentMonth = now.getUTCMonth() + 1;
+  const currentStartYear = currentMonth >= 9 ? now.getUTCFullYear() : now.getUTCFullYear() - 1;
+  const currentEndYear = currentStartYear + 1;
+  const defaultSessionName = `${currentStartYear}/${currentEndYear}`;
+
   // Form states
-  const [newSessionName, setNewSessionName] = useState('2024/2025');
-  const [newSessionStart, setNewSessionStart] = useState('2024-09-01');
-  const [newSessionEnd, setNewSessionEnd] = useState('2025-07-31');
+  const [newSessionName, setNewSessionName] = useState(defaultSessionName);
+  const [newSessionStart, setNewSessionStart] = useState(`${currentStartYear}-09-01`);
+  const [newSessionEnd, setNewSessionEnd] = useState(`${currentEndYear}-07-31`);
   const [newSessionStatus, setNewSessionStatus] = useState<SessionStatus>('ACTIVE');
 
-  const [newTermName, setNewTermName] = useState('First Term');
-  const [newTermStart, setNewTermStart] = useState('2024-09-01');
-  const [newTermEnd, setNewTermEnd] = useState('2024-12-15');
+  const [newTermName, setNewTermName] = useState(
+    currentMonth >= 1 && currentMonth <= 4 ? 'Second Term' : currentMonth >= 5 && currentMonth <= 8 ? 'Third Term' : 'First Term'
+  );
+  const [newTermStart, setNewTermStart] = useState(`${currentStartYear}-09-09`);
+  const [newTermEnd, setNewTermEnd] = useState(`${currentStartYear}-12-18`);
   const [newTermStatus, setNewTermStatus] = useState<SessionStatus>('ACTIVE');
 
   const [formSubmitting, setFormSubmitting] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
+  const [seedingTermsId, setSeedingTermsId] = useState<string | null>(null);
 
   useEffect(() => {
     loadSessions();
@@ -99,6 +108,30 @@ export const SchoolAcademicSessionsView: React.FC = () => {
     }
   };
 
+  const handleSeedNigerianTerms = async (sess: AcademicSessionItem) => {
+    setSeedingTermsId(sess.id);
+    try {
+      const yearMatch = String(sess.name || '').match(/^(\d{4})/);
+      const y1 = yearMatch ? parseInt(yearMatch[1], 10) : currentStartYear;
+      const y2 = y1 + 1;
+      const existingNames = new Set((sess.terms || []).map((t) => t.name.trim().toLowerCase()));
+      const templates: Array<{ name: string; start_date: string; end_date: string; status: SessionStatus }> = [
+        { name: 'First Term', start_date: `${y1}-09-09`, end_date: `${y1}-12-18`, status: currentMonth >= 9 ? 'ACTIVE' : 'COMPLETED' },
+        { name: 'Second Term', start_date: `${y2}-01-12`, end_date: `${y2}-04-10`, status: currentMonth >= 1 && currentMonth <= 4 ? 'ACTIVE' : currentMonth >= 9 ? 'UPCOMING' : 'COMPLETED' },
+        { name: 'Third Term', start_date: `${y2}-04-27`, end_date: `${y2}-07-24`, status: currentMonth >= 5 && currentMonth <= 8 ? 'ACTIVE' : 'UPCOMING' },
+      ];
+      for (const tpl of templates) {
+        if (existingNames.has(tpl.name.toLowerCase())) continue;
+        await api.createTerm(sess.id, tpl);
+      }
+      await loadSessions();
+    } catch (err: any) {
+      alert(err?.message || 'Failed to add Nigerian terms');
+    } finally {
+      setSeedingTermsId(null);
+    }
+  };
+
   return (
     <div className="space-y-6">
       {/* Top Header */}
@@ -109,14 +142,14 @@ export const SchoolAcademicSessionsView: React.FC = () => {
             <span>Academic Sessions &amp; Terms / Semesters</span>
           </h2>
           <p className="text-xs text-slate-500 mt-0.5">
-            Manage school calendar years (e.g. 2024/2025) and term schedules (First, Second, Third Term) for{' '}
+            Manage Nigerian school calendar years (e.g. {defaultSessionName}) and term schedules (First, Second, Third Term) for{' '}
             <strong className="text-slate-700">{activeSchool?.name}</strong>.
           </p>
         </div>
 
         <button
           onClick={() => {
-            setNewSessionName('');
+            setNewSessionName(defaultSessionName);
             setFormError(null);
             setIsAddSessionModalOpen(true);
           }}
@@ -177,17 +210,30 @@ export const SchoolAcademicSessionsView: React.FC = () => {
                   </div>
                 </div>
 
-                <button
-                  onClick={() => {
-                    setSelectedSessionForTerm(sess);
-                    setFormError(null);
-                    setIsAddTermModalOpen(true);
-                  }}
-                  className="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-800 rounded-xl text-xs font-semibold flex items-center gap-1 self-start sm:self-auto"
-                >
-                  <Plus className="w-3.5 h-3.5 text-emerald-600" />
-                  <span>Add Term</span>
-                </button>
+                <div className="flex flex-wrap items-center gap-2 self-start sm:self-auto">
+                  {(!sess.terms || sess.terms.length < 3) && (
+                    <button
+                      type="button"
+                      disabled={seedingTermsId === sess.id}
+                      onClick={() => handleSeedNigerianTerms(sess)}
+                      className="px-3 py-1.5 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-200 rounded-xl text-xs font-bold flex items-center gap-1 cursor-pointer disabled:opacity-60"
+                    >
+                      <BookOpen className="w-3.5 h-3.5 text-emerald-600" />
+                      <span>{seedingTermsId === sess.id ? 'Adding Terms...' : 'Setup 3 Nigerian Terms'}</span>
+                    </button>
+                  )}
+                  <button
+                    onClick={() => {
+                      setSelectedSessionForTerm(sess);
+                      setFormError(null);
+                      setIsAddTermModalOpen(true);
+                    }}
+                    className="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-800 rounded-xl text-xs font-semibold flex items-center gap-1 cursor-pointer"
+                  >
+                    <Plus className="w-3.5 h-3.5 text-emerald-600" />
+                    <span>Add Term</span>
+                  </button>
+                </div>
               </div>
 
               {/* Terms inside Session */}

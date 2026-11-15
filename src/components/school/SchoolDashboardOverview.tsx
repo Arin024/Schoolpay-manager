@@ -14,6 +14,9 @@ import {
   ShieldCheck,
   CheckCircle2,
   CreditCard,
+  Copy,
+  Check,
+  Link2,
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext.js';
 import { api } from '../../services/api.js';
@@ -35,6 +38,17 @@ export const SchoolDashboardOverview: React.FC<SchoolDashboardOverviewProps> = (
   const { activeSchool } = useAuth();
   const [stats, setStats] = useState<SchoolDashboardStats | null>(null);
   const [loading, setLoading] = useState(true);
+  const [copiedPortalLink, setCopiedPortalLink] = useState(false);
+
+  const shareablePortalUrl = activeSchool?.slug
+    ? `${window.location.origin}/#portal/${activeSchool.slug}`
+    : `${window.location.origin}/#login`;
+
+  const handleCopyPortalLink = () => {
+    navigator.clipboard.writeText(shareablePortalUrl);
+    setCopiedPortalLink(true);
+    setTimeout(() => setCopiedPortalLink(false), 2500);
+  };
 
   useEffect(() => {
     loadDashboardStats();
@@ -168,6 +182,41 @@ export const SchoolDashboardOverview: React.FC<SchoolDashboardOverviewProps> = (
           </p>
         </div>
       </div>
+
+      {/* Shareable Branded Portal Link for Parents, Students, Staff & Outsiders */}
+      {!readOnly && activeSchool && (
+        <div className="bg-slate-900 text-white rounded-2xl p-5 flex flex-col lg:flex-row lg:items-center justify-between gap-4 border border-slate-800 shadow-sm">
+          <div className="space-y-1">
+            <div className="flex items-center gap-2">
+              <Link2 className="w-4 h-4 text-emerald-400" />
+              <h3 className="text-sm font-bold text-white">Shareable School Portal Link</h3>
+            </div>
+            <p className="text-xs text-slate-300 max-w-2xl">
+              Share this link with <strong>Parents, Students, Teachers, and Outsiders</strong>. Students &amp; Parents self-activate or sign in with their own Admission No / Phone &amp; personal password (never share admin credentials).
+            </p>
+            <p className="text-[11px] font-mono text-emerald-300 break-all pt-0.5 select-all">
+              {shareablePortalUrl}
+            </p>
+          </div>
+          <div className="flex items-center gap-2 shrink-0">
+            <button
+              type="button"
+              onClick={handleCopyPortalLink}
+              className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-xs font-bold flex items-center gap-1.5 transition cursor-pointer"
+            >
+              {copiedPortalLink ? <Check className="w-4 h-4" /> : <Copy className="w-4 h-4" />}
+              <span>{copiedPortalLink ? 'Portal Link Copied' : 'Copy Portal Link'}</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => onNavigateTab('users')}
+              className="px-3.5 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-xl text-xs font-semibold border border-slate-700 transition cursor-pointer"
+            >
+              Issue Logins
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Quick Actions & Recent Activity Row */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">

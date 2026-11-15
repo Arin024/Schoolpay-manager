@@ -18,7 +18,8 @@ interface AuthContextType {
   isParent: boolean;
   isStudent: boolean;
   impersonatedBy: string | null;
-  login: (credentials: { email: string; password: string; schoolId?: string }) => Promise<void>;
+  login: (credentials: { email?: string; identifier?: string; password: string; schoolId?: string; schoolSlug?: string }) => Promise<void>;
+  completeSessionAuth: (data: any) => Promise<void>;
   registerSchoolSuccess: (data: any) => void;
   logout: () => Promise<void>;
   switchSchool: (schoolId: string) => Promise<void>;
@@ -117,21 +118,19 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     initAuth();
   }, []);
 
-  const login = async (credentials: { email: string; password: string; schoolId?: string }) => {
-    const data = await api.login(credentials);
+  const completeSessionAuth = async (data: any) => {
     localStorage.setItem('bursariq_session_token', data.token);
     localStorage.setItem('schoolpay_session_token', data.token);
-    
+
     setUser(data.user);
     setRoles(data.roles || []);
     setActiveRole(data.activeRole || null);
-    
+
     if (data.activeSchoolId) {
       localStorage.setItem('bursariq_active_school', data.activeSchoolId);
       localStorage.setItem('schoolpay_active_school', data.activeSchoolId);
       setActiveSchoolId(data.activeSchoolId);
-      
-      // Immediately hydrate from server response if available
+
       if (data.activeSchool) {
         setActiveSchool(data.activeSchool);
       }
@@ -139,7 +138,6 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         setActiveSettings(data.activeSettings);
       }
 
-      // Fetch fresh details if missing in response
       if (!data.activeSchool || !data.activeSettings) {
         try {
           const schoolDetails = await api.getSchoolProfile(data.activeSchoolId);
@@ -154,6 +152,11 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       setActiveSchool(null);
       setActiveSettings(null);
     }
+  };
+
+  const login = async (credentials: { email?: string; identifier?: string; password: string; schoolId?: string; schoolSlug?: string }) => {
+    const data = await api.login(credentials);
+    await completeSessionAuth(data);
   };
 
   const registerSchoolSuccess = (data: any) => {
@@ -298,6 +301,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         isStudent,
         impersonatedBy,
         login,
+        completeSessionAuth,
         registerSchoolSuccess,
         logout,
         switchSchool,

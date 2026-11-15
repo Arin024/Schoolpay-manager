@@ -40,6 +40,13 @@ import { recoveryRouter } from './recoveryRoutes.ts';
 import { dataProtectionRouter } from './dataProtectionRoutes.ts';
 import { performanceRouter } from './performanceRoutes.ts';
 import { portalRouter } from './portalRoutes.ts';
+import { publicPortalRouter, normalizePhoneDigits } from './publicPortalRoutes.ts';
+import {
+  getCurrentNigerianCalendar,
+  generateNextAdmissionNumber,
+  createBatchAdmissionAllocator,
+  assignMissingAdmissionNumbersForSchool,
+} from './admissionNumberService.ts';
 import {
   ADMIN_ONLY_ROLES,
   DIRECTORY_READ_ROLES,
@@ -123,6 +130,9 @@ apiRouter.use('/v1/school', performanceRouter);
 
 // Mount Parent & Student Read-Only Portals
 apiRouter.use('/v1/portal', portalRouter);
+
+// Mount Unauthenticated Public School Portal Directory, Verification & Self-Activation
+apiRouter.use('/v1/public', publicPortalRouter);
 
 // Public Webhook receiver for payment gateways (Bachs, Paystack, Flutterwave, Sandbox)
 apiRouter.post('/v1/webhooks/payments/:provider', handlePaymentWebhook);
@@ -297,12 +307,13 @@ apiRouter.post(['/v1/auth/register-school', '/v1/auth/register'], async (req, re
         [schoolId, schoolName.trim(), slug, schoolType, address || '', state, lga, phone, schoolEmail.toLowerCase(), req.body.website || null]
       );
 
-      // 2. School Settings
+      // 2. School Settings (with active Nigerian academic session & term)
+      const nigeriaCal = getCurrentNigerianCalendar();
       await pgClient.query(
         `INSERT INTO school_settings (id, school_id, currency, currency_symbol, current_academic_session, current_term, payment_notification_email, payment_notification_sms, portal_subdomain)
-          VALUES ($1, $2, 'NGN', '₦', '2024/2025', '1st Term', $3, 0, $4)
+          VALUES ($1, $2, 'NGN', '₦', $3, $4, $5, 0, $6)
           ON CONFLICT (id) DO NOTHING`,
-        [settingsId, schoolId, schoolEmail.toLowerCase(), baseSlug]
+        [settingsId, schoolId, nigeriaCal.sessionName, nigeriaCal.termShort, schoolEmail.toLowerCase(), baseSlug]
       );
 
       // 3. User & Owner Profile
@@ -403,9 +414,10 @@ apiRouter.post(['/v1/auth/register-school', '/v1/auth/register'], async (req, re
     `).run(
       schoolId, schoolName.trim(), slug, schoolType, address || '', state, lga, phone, schoolEmail.toLowerCase(), req.body.website || null
     );
+    const localNigeriaCal = getCurrentNigerianCalendar();
     cacheDb.prepare(`
       INSERT INTO school_settings (id, school_id, currency, currency_symbol, current_academic_session, current_term, payment_notification_email, payment_notification_sms, portal_subdomain)
-      VALUES (?, ?, 'NGN', '₦', '2024/2025', '1st Term', ?, 0, ?)
+      VALUES (?, ?, 'NGN', '₦', ?, ?, ?, 0, ?)
       ON CONFLICT(id) DO UPDATE SET
         currency = excluded.currency,
         currency_symbol = excluded.currency_symbol,
@@ -413,7 +425,7 @@ apiRouter.post(['/v1/auth/register-school', '/v1/auth/register'], async (req, re
         current_term = excluded.current_term,
         payment_notification_email = excluded.payment_notification_email,
         portal_subdomain = excluded.portal_subdomain
-    `).run(settingsId, schoolId, schoolEmail.toLowerCase(), baseSlug);
+    `).run(settingsId, schoolId, localNigeriaCal.sessionName, localNigeriaCal.termShort, schoolEmail.toLowerCase(), baseSlug);
     cacheDb.prepare(`
       INSERT INTO users (
         id, email, password_hash, salt, full_name, phone,
@@ -541,45 +553,155 @@ apiRouter.post(['/v1/auth/register-school', '/v1/auth/register'], async (req, re
 
 // POST /api/v1/auth/login
 apiRouter.post('/v1/auth/login', async (req, res) => {
-  const { email, password, schoolId } = req.body;
+  const { email, identifier, password, schoolId, schoolSlug } = req.body || {};
+  const rawIdentifier = String(identifier || email || '').trim();
 
-  if (!email || !password) {
-    return res.status(400).json({ error: 'MISSING_CREDENTIALS', message: 'Email and password are required.' });
+  if (!rawIdentifier || !password) {
+    return res.status(400).json({ error: 'MISSING_CREDENTIALS', message: 'Email, phone, or admission number and password are required.' });
   }
 
-  const normalizedEmail = (email || '').trim().toLowerCase();
+  const normalizedEmail = rawIdentifier.toLowerCase();
+  const isEmailInput = rawIdentifier.includes('@');
+  const pgPool = getPgPool();
+
+  // Resolve optional target school ID if schoolSlug or schoolId provided
+  let targetSchoolId: string | null = schoolId ? String(schoolId).trim() : null;
+  if (!targetSchoolId && schoolSlug) {
+    const cleanSlug = String(schoolSlug).trim();
+    if (pgPool) {
+      try {
+        const sRow = (
+          await queryPg(
+            `SELECT id FROM schools WHERE LOWER(slug) = LOWER($1) AND (is_deleted = 0 OR is_deleted IS NULL) LIMIT 1`,
+            [cleanSlug]
+          )
+        ).rows[0];
+        if (sRow) targetSchoolId = sRow.id;
+      } catch {}
+    }
+    if (!targetSchoolId) {
+      const sqS = cacheDb
+        .prepare(`SELECT id FROM schools WHERE LOWER(slug) = LOWER(?) AND UPPER(COALESCE(status, 'TRIAL')) != 'CANCELLED' LIMIT 1`)
+        .get(cleanSlug) as any;
+      if (sqS) targetSchoolId = sqS.id;
+    }
+    if (!targetSchoolId) {
+      return res.status(404).json({ error: 'SCHOOL_NOT_FOUND', message: 'Selected school portal was not found.' });
+    }
+  }
 
   // 1. Direct Authoritative Neon PostgreSQL lookup first whenever pool is configured
   let user: UserRecord | undefined = undefined;
   let pgLookupFailed = false;
-  const pgPool = getPgPool();
+  let studentNotActivated = false;
+  let parentNotActivated = false;
+
   if (pgPool) {
     try {
-      // 1a. Direct user email match
-      const pgUserRes = await queryPg(
-        'SELECT * FROM users WHERE LOWER(email) = $1 AND is_active = 1 LIMIT 1',
-        [normalizedEmail]
-      );
-      if (pgUserRes.rows.length > 0) {
-        user = pgUserRes.rows[0] as any;
-      } else {
-        // 1b. Check if email matches official school email (resolve to primary school owner)
-        const schoolOwnerRes = await queryPg(
-          `SELECT u.* FROM schools s
-           JOIN user_roles ur ON ur.school_id = s.id AND ur.role_id = 'role_school_owner'
-           JOIN users u ON u.id = ur.user_id
-           WHERE LOWER(s.email) = $1 AND u.is_active = 1
-           ORDER BY ur.is_primary DESC, ur.created_at ASC
-           LIMIT 1`,
+      if (isEmailInput) {
+        // 1a. Direct user email match
+        const pgUserRes = await queryPg(
+          'SELECT * FROM users WHERE LOWER(email) = $1 AND is_active = 1 LIMIT 1',
           [normalizedEmail]
         );
-        if (schoolOwnerRes.rows.length > 0) {
-          user = schoolOwnerRes.rows[0] as any;
-        } else if (normalizedEmail === 'superadmin@schoolpay.ng' || normalizedEmail === 'schoolpay28@gmail.com') {
-          const saRes = await queryPg(
-            "SELECT * FROM users WHERE (LOWER(email) = 'schoolpay28@gmail.com' OR LOWER(email) = 'superadmin@schoolpay.ng') AND is_active = 1 LIMIT 1"
+        if (pgUserRes.rows.length > 0) {
+          user = pgUserRes.rows[0] as any;
+        } else {
+          // 1b. Check if email matches official school email (resolve to primary school owner)
+          const schoolOwnerRes = await queryPg(
+            `SELECT u.* FROM schools s
+             JOIN user_roles ur ON ur.school_id = s.id AND ur.role_id = 'role_school_owner'
+             JOIN users u ON u.id = ur.user_id
+             WHERE LOWER(s.email) = $1 AND u.is_active = 1
+             ORDER BY ur.is_primary DESC, ur.created_at ASC
+             LIMIT 1`,
+            [normalizedEmail]
           );
-          if (saRes.rows.length > 0) user = saRes.rows[0] as any;
+          if (schoolOwnerRes.rows.length > 0) {
+            user = schoolOwnerRes.rows[0] as any;
+          } else if (normalizedEmail === 'superadmin@schoolpay.ng' || normalizedEmail === 'schoolpay28@gmail.com') {
+            const saRes = await queryPg(
+              "SELECT * FROM users WHERE (LOWER(email) = 'schoolpay28@gmail.com' OR LOWER(email) = 'superadmin@schoolpay.ng') AND is_active = 1 LIMIT 1"
+            );
+            if (saRes.rows.length > 0) user = saRes.rows[0] as any;
+          }
+        }
+      } else {
+        // 1c. Non-email identifier: Check Student Admission Number (within targetSchoolId if provided)
+        if (targetSchoolId) {
+          const stuRes = await queryPg(
+            `SELECT s.id, s.user_id FROM students s
+             WHERE s.school_id = $1
+               AND LOWER(TRIM(s.admission_number)) = $2
+               AND (s.is_deleted = 0 OR s.is_deleted IS NULL)
+             LIMIT 1`,
+            [targetSchoolId, normalizedEmail]
+          );
+          if (stuRes.rows.length > 0) {
+            const matchedStu = stuRes.rows[0];
+            if (!matchedStu.user_id) {
+              studentNotActivated = true;
+            } else {
+              const uRes = await queryPg(
+                'SELECT * FROM users WHERE id = $1 AND is_active = 1 LIMIT 1',
+                [matchedStu.user_id]
+              );
+              if (uRes.rows[0]) user = uRes.rows[0] as any;
+            }
+          }
+        }
+
+        // 1d. Phone-number login fallback (strictly checks normalized 10 digits on users AND linked parents)
+        const identDigits = normalizePhoneDigits(rawIdentifier);
+        if (!user && !studentNotActivated && identDigits.length >= 7) {
+          const tail7 = identDigits.slice(-7);
+          const candidateSql = targetSchoolId
+            ? `SELECT DISTINCT u.* FROM users u
+               JOIN user_roles ur ON ur.user_id = u.id
+               WHERE ur.school_id = $1 AND u.is_active = 1 AND u.phone IS NOT NULL AND u.phone LIKE $2`
+            : `SELECT DISTINCT u.* FROM users u
+               WHERE u.is_active = 1 AND u.phone IS NOT NULL AND u.phone LIKE $1`;
+          const candidateRows = (
+            await queryPg(candidateSql, targetSchoolId ? [targetSchoolId, `%${tail7}%`] : [`%${tail7}%`])
+          ).rows;
+          let exactMatches = candidateRows.filter((u: any) => normalizePhoneDigits(u.phone) === identDigits);
+          if (exactMatches.length === 0) {
+            const pSql = targetSchoolId
+              ? `SELECT DISTINCT u.*, p.phone AS parent_phone, p.alternate_phone AS parent_alt_phone, p.user_id AS linked_user_id
+                 FROM parents p
+                 LEFT JOIN users u ON u.id = p.user_id AND u.is_active = 1
+                 WHERE p.school_id = $1 AND (p.is_deleted = 0 OR p.is_deleted IS NULL)
+                   AND (COALESCE(p.phone, '') LIKE $2 OR COALESCE(p.alternate_phone, '') LIKE $2)`
+              : `SELECT DISTINCT u.*, p.phone AS parent_phone, p.alternate_phone AS parent_alt_phone, p.user_id AS linked_user_id
+                 FROM parents p
+                 LEFT JOIN users u ON u.id = p.user_id AND u.is_active = 1
+                 WHERE (p.is_deleted = 0 OR p.is_deleted IS NULL)
+                   AND (COALESCE(p.phone, '') LIKE $1 OR COALESCE(p.alternate_phone, '') LIKE $1)`;
+            const pRows = (await queryPg(pSql, targetSchoolId ? [targetSchoolId, `%${tail7}%`] : [`%${tail7}%`])).rows;
+            const matchedParents = pRows.filter(
+              (pr: any) =>
+                normalizePhoneDigits(pr.parent_phone) === identDigits ||
+                normalizePhoneDigits(pr.parent_alt_phone) === identDigits
+            );
+            const activeUsersMap = new Map<string, any>();
+            for (const pr of matchedParents) {
+              if (pr.id) activeUsersMap.set(pr.id, pr);
+            }
+            if (activeUsersMap.size > 0) {
+              exactMatches = Array.from(activeUsersMap.values());
+            } else if (matchedParents.some((pr: any) => !pr.linked_user_id)) {
+              parentNotActivated = true;
+            }
+          }
+          if (exactMatches.length > 1) {
+            return res.status(400).json({
+              error: 'AMBIGUOUS_PHONE',
+              message: 'Multiple accounts share this phone number. Please sign in with your email address or admission number.',
+            });
+          }
+          if (exactMatches.length === 1) {
+            user = exactMatches[0] as any;
+          }
         }
       }
 
@@ -617,23 +739,122 @@ apiRouter.post('/v1/auth/login', async (req, res) => {
   }
 
   // 2. Secondary fallback lookup: Local SQLite cache
-  if (!user) {
-    user = cacheDb.prepare('SELECT * FROM users WHERE LOWER(email) = ? AND is_active = 1').get(normalizedEmail) as UserRecord | undefined;
-    if (!user) {
-      // Check if official school email in local cache
-      const localSchoolOwner = cacheDb.prepare(`
-        SELECT u.* FROM schools s
-        JOIN user_roles ur ON ur.school_id = s.id AND ur.role_id = 'role_school_owner'
-        JOIN users u ON u.id = ur.user_id
-        WHERE LOWER(s.email) = ? AND u.is_active = 1
-        ORDER BY ur.is_primary DESC
-        LIMIT 1
-      `).get(normalizedEmail) as UserRecord | undefined;
-      if (localSchoolOwner) user = localSchoolOwner;
+  if (!user && !studentNotActivated) {
+    if (isEmailInput) {
+      user = cacheDb.prepare('SELECT * FROM users WHERE LOWER(email) = ? AND is_active = 1').get(normalizedEmail) as UserRecord | undefined;
+      if (!user) {
+        // Check if official school email in local cache
+        const localSchoolOwner = cacheDb.prepare(`
+          SELECT u.* FROM schools s
+          JOIN user_roles ur ON ur.school_id = s.id AND ur.role_id = 'role_school_owner'
+          JOIN users u ON u.id = ur.user_id
+          WHERE LOWER(s.email) = ? AND u.is_active = 1
+          ORDER BY ur.is_primary DESC
+          LIMIT 1
+        `).get(normalizedEmail) as UserRecord | undefined;
+        if (localSchoolOwner) user = localSchoolOwner;
+      }
+      if (!user && (normalizedEmail === 'superadmin@schoolpay.ng' || normalizedEmail === 'schoolpay28@gmail.com')) {
+        user = cacheDb.prepare("SELECT * FROM users WHERE (LOWER(email) = 'schoolpay28@gmail.com' OR LOWER(email) = 'superadmin@schoolpay.ng') AND is_active = 1").get() as UserRecord | undefined;
+      }
+    } else {
+      if (targetSchoolId) {
+        const sqStu = cacheDb
+          .prepare(
+            `SELECT id, user_id FROM students
+             WHERE school_id = ?
+               AND LOWER(TRIM(admission_number)) = ?
+               AND (is_deleted = 0 OR is_deleted IS NULL)
+             LIMIT 1`
+          )
+          .get(targetSchoolId, normalizedEmail) as any;
+        if (sqStu) {
+          if (!sqStu.user_id) {
+            studentNotActivated = true;
+          } else {
+            user = cacheDb.prepare('SELECT * FROM users WHERE id = ? AND is_active = 1 LIMIT 1').get(sqStu.user_id) as UserRecord | undefined;
+          }
+        }
+      }
+
+      const identDigits = normalizePhoneDigits(rawIdentifier);
+      if (!user && !studentNotActivated && identDigits.length >= 7) {
+        const tail7 = identDigits.slice(-7);
+        const sqCandidates = (
+          targetSchoolId
+            ? cacheDb
+                .prepare(
+                  `SELECT DISTINCT u.* FROM users u
+                   JOIN user_roles ur ON ur.user_id = u.id
+                   WHERE ur.school_id = ? AND u.is_active = 1 AND u.phone IS NOT NULL AND u.phone LIKE ?`
+                )
+                .all(targetSchoolId, `%${tail7}%`)
+            : cacheDb
+                .prepare(
+                  `SELECT DISTINCT u.* FROM users u
+                   WHERE u.is_active = 1 AND u.phone IS NOT NULL AND u.phone LIKE ?`
+                )
+                .all(`%${tail7}%`)
+        ) as any[];
+        let exactMatches = sqCandidates.filter((u) => normalizePhoneDigits(u.phone) === identDigits);
+        if (exactMatches.length === 0) {
+          const sqPRows = (
+            targetSchoolId
+              ? cacheDb
+                  .prepare(
+                    `SELECT DISTINCT u.*, p.phone AS parent_phone, p.user_id AS linked_user_id
+                     FROM parents p
+                     LEFT JOIN users u ON u.id = p.user_id AND u.is_active = 1
+                     WHERE p.school_id = ? AND (p.is_deleted = 0 OR p.is_deleted IS NULL)
+                       AND COALESCE(p.phone, '') LIKE ?`
+                  )
+                  .all(targetSchoolId, `%${tail7}%`)
+              : cacheDb
+                  .prepare(
+                    `SELECT DISTINCT u.*, p.phone AS parent_phone, p.user_id AS linked_user_id
+                     FROM parents p
+                     LEFT JOIN users u ON u.id = p.user_id AND u.is_active = 1
+                     WHERE (p.is_deleted = 0 OR p.is_deleted IS NULL)
+                       AND COALESCE(p.phone, '') LIKE ?`
+                  )
+                  .all(`%${tail7}%`)
+          ) as any[];
+          const matchedParents = sqPRows.filter((pr) => normalizePhoneDigits(pr.parent_phone) === identDigits);
+          const activeMap = new Map<string, any>();
+          for (const pr of matchedParents) {
+            if (pr.id) activeMap.set(pr.id, pr);
+          }
+          if (activeMap.size > 0) {
+            exactMatches = Array.from(activeMap.values());
+          } else if (matchedParents.some((pr) => !pr.linked_user_id)) {
+            parentNotActivated = true;
+          }
+        }
+        if (exactMatches.length > 1) {
+          return res.status(400).json({
+            error: 'AMBIGUOUS_PHONE',
+            message: 'Multiple accounts share this phone number. Please sign in with your email address or admission number.',
+          });
+        }
+        if (exactMatches.length === 1) {
+          user = exactMatches[0] as UserRecord;
+        }
+      }
     }
-    if (!user && (normalizedEmail === 'superadmin@schoolpay.ng' || normalizedEmail === 'schoolpay28@gmail.com')) {
-      user = cacheDb.prepare("SELECT * FROM users WHERE (LOWER(email) = 'schoolpay28@gmail.com' OR LOWER(email) = 'superadmin@schoolpay.ng') AND is_active = 1").get() as UserRecord | undefined;
-    }
+  }
+
+  if (studentNotActivated) {
+    return res.status(401).json({
+      error: 'PORTAL_NOT_ACTIVATED',
+      message: 'This student portal login has not been activated yet. Switch to "Activate Access" using your school details or ask your school admin.',
+    });
+  }
+
+  if (parentNotActivated) {
+    return res.status(401).json({
+      error: 'PORTAL_NOT_ACTIVATED',
+      message: 'Your parent portal access has not been activated yet. Click "Activate Access" and pick "I am a Parent" to set your personal password.',
+    });
   }
 
   if (!user) {
@@ -643,12 +864,12 @@ apiRouter.post('/v1/auth/login', async (req, res) => {
         message: 'Authoritative database connection is recovering. Please retry in a few moments.',
       });
     }
-    return res.status(401).json({ error: 'INVALID_CREDENTIALS', message: 'Invalid email address or password.' });
+    return res.status(401).json({ error: 'INVALID_CREDENTIALS', message: 'Invalid login credentials or password.' });
   }
 
   const isValid = verifyPassword(password, user.password_hash, user.salt);
   if (!isValid) {
-    return res.status(401).json({ error: 'INVALID_CREDENTIALS', message: 'Invalid email address or password.' });
+    return res.status(401).json({ error: 'INVALID_CREDENTIALS', message: 'Invalid login credentials or password.' });
   }
 
   // Fetch all user roles and schools (authoritative from Neon PostgreSQL if configured)
@@ -717,13 +938,13 @@ apiRouter.post('/v1/auth/login', async (req, res) => {
   if (user.is_platform_admin === 1) {
     // Super admin default context is platform-level
     activeSchoolId = null;
-  } else if (schoolId) {
+  } else if (targetSchoolId) {
     // Verify user belongs to this specified school
-    const matched = roles.find((r) => r.school_id === schoolId);
+    const matched = roles.find((r) => r.school_id === targetSchoolId);
     if (!matched) {
       return res.status(403).json({ error: 'TENANT_UNAUTHORIZED', message: 'You do not belong to this school.' });
     }
-    activeSchoolId = schoolId;
+    activeSchoolId = targetSchoolId;
     activeRole = matched;
   } else {
     // Default to the first primary/available school
@@ -1704,12 +1925,14 @@ apiRouter.post(
       });
     }
 
-    const cleanAdm = admission_number ? String(admission_number).trim() : null;
+    const suppliedAdm = admission_number ? String(admission_number).trim() : '';
+    const autoGeneratedAdmissionNumber = !suppliedAdm;
+    const cleanAdm = suppliedAdm || (await generateNextAdmissionNumber(schoolId));
     const cleanGender = gender ? (String(gender).toLowerCase().startsWith('f') ? 'Female' : 'Male') : null;
     const pool = getPgPool();
 
-    // Check duplicate admission number if supplied
-    if (cleanAdm) {
+    // Check duplicate admission number if explicitly supplied
+    if (suppliedAdm) {
       if (pool) {
         const dup = await queryPg('SELECT id FROM students WHERE school_id = $1 AND LOWER(admission_number) = $2', [schoolId, cleanAdm.toLowerCase()]);
         if (dup.rows.length > 0) {
@@ -1801,7 +2024,14 @@ apiRouter.post(
     if (!student) {
       student = cacheDb.prepare('SELECT * FROM students WHERE id = ?').get(id);
     }
-    return res.status(201).json({ success: true, message: 'Student enrolled successfully', student });
+    return res.status(201).json({
+      success: true,
+      message: autoGeneratedAdmissionNumber
+        ? `Student enrolled successfully with auto-generated Admission Number ${cleanAdm}.`
+        : 'Student enrolled successfully',
+      autoGeneratedAdmissionNumber,
+      student,
+    });
   }
 );
 
@@ -1834,7 +2064,8 @@ apiRouter.put(
     const middleName = b.middle_name !== undefined ? String(b.middle_name).trim() : (existing.middle_name || '');
     const lastName = b.last_name !== undefined ? String(b.last_name).trim() : existing.last_name;
     const fullName = `${firstName} ${middleName ? middleName + ' ' : ''}${lastName}`.trim();
-    const cleanAdm = b.admission_number !== undefined ? (b.admission_number ? String(b.admission_number).trim() : null) : existing.admission_number;
+    const rawUpdateAdm = b.admission_number !== undefined ? String(b.admission_number || '').trim() : String(existing.admission_number || '').trim();
+    const cleanAdm = rawUpdateAdm || (await generateNextAdmissionNumber(schoolId));
     const cleanGender = b.gender !== undefined ? (b.gender ? (String(b.gender).toLowerCase().startsWith('f') ? 'Female' : 'Male') : null) : existing.gender;
 
     // Check admission number uniqueness if changed
@@ -2112,6 +2343,9 @@ apiRouter.post(
     const seenInBatchAdmissions = new Set<string>();
     const seenInBatchFingerprints = new Set<string>();
     const seenInBatchNames = new Set<string>();
+    const batchAllocator = await createBatchAdmissionAllocator(schoolId);
+    let generatedAdmissionCount = 0;
+    const importedStudentsPreview: Array<{ id: string; full_name: string; admission_number: string; class_name: string | null }> = [];
 
     try {
       for (let i = 0; i < rawRows.length; i++) {
@@ -2202,7 +2436,8 @@ apiRouter.post(
         }
 
         const studentId = 'stu_' + crypto.randomUUID().slice(0, 10);
-        const effectiveAdm = rawAdm || null;
+        const effectiveAdm = rawAdm || batchAllocator.allocateNext();
+        if (!rawAdm) generatedAdmissionCount++;
 
         // 1. Authoritative Neon PostgreSQL Persistence
         if (pgClient) {
@@ -2270,10 +2505,18 @@ apiRouter.post(
           console.warn('[Bulk Import Local Cache Notice]', sqErr);
         }
 
-        if (rawAdm) seenInBatchAdmissions.add(cleanAdmKey);
+        seenInBatchAdmissions.add(effectiveAdm.toLowerCase());
         seenInBatchFingerprints.add(rowFingerprint);
         seenInBatchNames.add(cleanNameKey);
         importedCount++;
+        if (importedStudentsPreview.length < 50) {
+          importedStudentsPreview.push({
+            id: studentId,
+            full_name: fullName,
+            admission_number: effectiveAdm,
+            class_name: className || null,
+          });
+        }
       }
 
       if (pgClient) {
@@ -2310,9 +2553,40 @@ apiRouter.post(
       importedCount,
       failedCount,
       skippedCount,
+      generatedAdmissionCount,
+      importedStudentsPreview,
       errors,
       warnings,
-      message: `Successfully imported ${importedCount} student(s). ${skippedCount} duplicate(s) safely skipped. ${failedCount} row(s) failed validation.`,
+      message: `Successfully imported ${importedCount} student(s) (${generatedAdmissionCount} assigned automatic Admission Numbers). ${skippedCount} duplicate(s) skipped. ${failedCount} row(s) failed.`,
+    });
+  }
+);
+
+// POST /api/v1/school/students/assign-missing-admission-numbers (Backfill Nigerian Admission Numbers for existing unnumbered students)
+apiRouter.post(
+  '/v1/school/students/assign-missing-admission-numbers',
+  requireAuth,
+  requireTenant,
+  requireRole(ADMIN_ONLY_ROLES),
+  async (req: AuthenticatedRequest, res) => {
+    const schoolId = req.targetSchoolId!;
+    const result = await assignMissingAdmissionNumbersForSchool(schoolId);
+    logAudit({
+      actorId: req.user!.id,
+      actorEmail: req.user!.email,
+      schoolId,
+      action: 'ASSIGN_MISSING_ADMISSION_NUMBERS',
+      entity: 'STUDENTS',
+      ipAddress: req.ip || '127.0.0.1',
+      metadata: { assignedCount: result.assignedCount, prefix: result.prefix },
+    });
+    return res.json({
+      success: true,
+      ...result,
+      message:
+        result.assignedCount > 0
+          ? `Assigned official Admission Numbers (${result.prefix}/...) to ${result.assignedCount} student(s).`
+          : 'All enrolled students already have an official Admission Number.',
     });
   }
 );
@@ -3950,8 +4224,8 @@ apiRouter.post(
     const { id: studentId } = req.params;
     const { email, password } = req.body || {};
 
-    if (!email || !password || String(password).length < 6) {
-      return res.status(400).json({ error: 'INVALID_PAYLOAD', message: 'Valid email and password (min 6 chars) are required.' });
+    if (!password || String(password).length < 6) {
+      return res.status(400).json({ error: 'INVALID_PAYLOAD', message: 'A password (min 6 chars) is required.' });
     }
 
     const pool = getPgPool();
@@ -3962,7 +4236,45 @@ apiRouter.post(
       return res.status(404).json({ error: 'NOT_FOUND', message: 'Student not found in your school.' });
     }
 
-    const cleanEmail = String(email).trim().toLowerCase();
+    if (!stu.admission_number || !String(stu.admission_number).trim()) {
+      const assignedAdm = await generateNextAdmissionNumber(schoolId);
+      stu.admission_number = assignedAdm;
+      if (pool) {
+        await queryPg('UPDATE students SET admission_number = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2 AND school_id = $3', [
+          assignedAdm,
+          studentId,
+          schoolId,
+        ]);
+      }
+      try {
+        cacheDb
+          .prepare('UPDATE students SET admission_number = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND school_id = ?')
+          .run(assignedAdm, studentId, schoolId);
+      } catch {}
+    }
+
+    const schoolRow = pool
+      ? (await queryPg('SELECT slug FROM schools WHERE id = $1', [schoolId])).rows[0]
+      : (cacheDb.prepare('SELECT slug FROM schools WHERE id = ?').get(schoolId) as any);
+    const cleanInputEmail = String(email || '').trim().toLowerCase();
+    const admToken = String(stu.admission_number || stu.id.slice(-6))
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '.')
+      .replace(/^\.+|\.+$/g, '') || 'student';
+    const slugToken = String(schoolRow?.slug || 'school')
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '.')
+      .replace(/^\.+|\.+$/g, '') || 'school';
+
+    const cleanEmail =
+      cleanInputEmail ||
+      (stu.email && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(stu.email).trim())
+        ? String(stu.email).trim().toLowerCase()
+        : `${admToken}.${schoolId.slice(-4)}@${slugToken}.student.bursariq.local`);
+
+    const studentFullName =
+      [stu.first_name, stu.middle_name, stu.last_name].filter(Boolean).join(' ') || stu.full_name || 'Student';
+
     let userRow = pool
       ? (await queryPg('SELECT * FROM users WHERE LOWER(email) = $1 LIMIT 1', [cleanEmail])).rows[0]
       : (cacheDb.prepare('SELECT * FROM users WHERE LOWER(email) = ? LIMIT 1').get(cleanEmail) as any);
@@ -3984,14 +4296,14 @@ apiRouter.post(
         await queryPg(
           `INSERT INTO users (id, email, password_hash, salt, full_name, phone, is_platform_admin, is_active, created_at, updated_at)
            VALUES ($1, $2, $3, $4, $5, $6, 0, 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
-          [userId, cleanEmail, hash, salt, stu.full_name, stu.phone || null]
+          [userId, cleanEmail, hash, salt, studentFullName, stu.phone || null]
         );
       }
       try {
         cacheDb.prepare(`
           INSERT INTO users (id, email, password_hash, salt, full_name, phone, is_platform_admin, is_active, created_at, updated_at)
           VALUES (?, ?, ?, ?, ?, ?, 0, 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-        `).run(userId, cleanEmail, hash, salt, stu.full_name, stu.phone || null);
+        `).run(userId, cleanEmail, hash, salt, studentFullName, stu.phone || null);
       } catch {}
     }
 
@@ -4024,7 +4336,276 @@ apiRouter.post(
       metadata: { userId, email: cleanEmail },
     });
 
-    return res.status(201).json({ success: true, message: 'Student portal access provisioned.', userId, studentId });
+    return res.status(201).json({
+      success: true,
+      message: 'Student portal access provisioned.',
+      userId,
+      studentId,
+      loginEmail: cleanEmail,
+      admissionNumber: stu.admission_number || null,
+    });
+  }
+);
+
+// POST /api/v1/school/users/bulk-provision-portals (Admin-only one-click login generation for unlinked students & parents)
+apiRouter.post(
+  '/v1/school/users/bulk-provision-portals',
+  requireAuth,
+  requireTenant,
+  requireRole(ADMIN_ONLY_ROLES),
+  async (req: AuthenticatedRequest, res) => {
+    const schoolId = req.targetSchoolId!;
+    const { target = 'BOTH', custom_password } = req.body || {};
+    const normalizedTarget = String(target || 'BOTH').toUpperCase();
+    if (!['STUDENTS', 'PARENTS', 'BOTH'].includes(normalizedTarget)) {
+      return res.status(400).json({ error: 'INVALID_TARGET', message: 'target must be STUDENTS, PARENTS, or BOTH.' });
+    }
+    if (custom_password && String(custom_password).length < 6) {
+      return res.status(400).json({ error: 'WEAK_PASSWORD', message: 'Custom initial password must be at least 6 characters.' });
+    }
+
+    const pool = getPgPool();
+    const schoolRow = pool
+      ? (await queryPg('SELECT slug, name FROM schools WHERE id = $1', [schoolId])).rows[0]
+      : (cacheDb.prepare('SELECT slug, name FROM schools WHERE id = ?').get(schoolId) as any);
+    const slugToken =
+      String(schoolRow?.slug || 'school')
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, '.')
+        .replace(/^\.+|\.+$/g, '') || 'school';
+
+    const generateTempPassword = () =>
+      custom_password
+        ? String(custom_password)
+        : 'Bq' + crypto.randomBytes(4).toString('hex').toUpperCase() + '!';
+
+    const credentials: Array<{
+      role: 'STUDENT' | 'PARENT';
+      name: string;
+      loginIdentifier: string;
+      aliasIdentifier: string | null;
+      temporaryPassword: string;
+    }> = [];
+    let skippedCount = 0;
+
+    // Automatically issue Nigerian Admission Numbers to any unnumbered students before generating portal logins
+    if (normalizedTarget === 'STUDENTS' || normalizedTarget === 'BOTH') {
+      await assignMissingAdmissionNumbersForSchool(schoolId);
+    }
+
+    if (normalizedTarget === 'STUDENTS' || normalizedTarget === 'BOTH') {
+      const unlinkedStudents: any[] = pool
+        ? (
+            await queryPg(
+              `SELECT * FROM students
+               WHERE school_id = $1
+                 AND user_id IS NULL
+                 AND (is_deleted = 0 OR is_deleted IS NULL)
+               ORDER BY created_at ASC`,
+              [schoolId]
+            )
+          ).rows
+        : (cacheDb
+            .prepare(
+              `SELECT * FROM students
+               WHERE school_id = ?
+                 AND user_id IS NULL
+                 AND (is_deleted = 0 OR is_deleted IS NULL)
+               ORDER BY created_at ASC`
+            )
+            .all(schoolId) as any[]);
+
+      for (const stu of unlinkedStudents) {
+        const adm = String(stu.admission_number || '').trim();
+        const rawEmail = stu.email && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(stu.email).trim())
+          ? String(stu.email).trim().toLowerCase()
+          : '';
+        if (!adm && !rawEmail) {
+          skippedCount += 1;
+          continue;
+        }
+        const admToken =
+          (adm || stu.id.slice(-6))
+            .toLowerCase()
+            .replace(/[^a-z0-9]+/g, '.')
+            .replace(/^\.+|\.+$/g, '') || 'student';
+        const loginEmail = rawEmail || `${admToken}.${schoolId.slice(-4)}@${slugToken}.student.bursariq.local`;
+
+        const existingUser = pool
+          ? (await queryPg('SELECT id FROM users WHERE LOWER(email) = $1 LIMIT 1', [loginEmail])).rows[0]
+          : cacheDb.prepare('SELECT id FROM users WHERE LOWER(email) = ? LIMIT 1').get(loginEmail);
+        if (existingUser) {
+          skippedCount += 1;
+          continue;
+        }
+
+        const tempPass = generateTempPassword();
+        const salt = generateSalt();
+        const hash = hashPassword(tempPass, salt);
+        const userId = 'usr_' + crypto.randomUUID().slice(0, 12);
+        const urId = 'ur_' + crypto.randomUUID().slice(0, 12);
+        const fullName =
+          [stu.first_name, stu.middle_name, stu.last_name].filter(Boolean).join(' ') || stu.full_name || 'Student';
+
+        if (pool) {
+          await queryPg(
+            `INSERT INTO users (id, email, password_hash, salt, full_name, phone, is_platform_admin, is_active, created_at, updated_at)
+             VALUES ($1, $2, $3, $4, $5, $6, 0, 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+            [userId, loginEmail, hash, salt, fullName, stu.phone || null]
+          );
+          await queryPg(
+            `INSERT INTO user_roles (id, user_id, school_id, role_id, is_primary, created_at)
+             VALUES ($1, $2, $3, 'role_student', 1, CURRENT_TIMESTAMP)
+             ON CONFLICT (user_id, school_id, role_id) DO NOTHING`,
+            [urId, userId, schoolId]
+          );
+          await queryPg('UPDATE students SET user_id = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2 AND school_id = $3', [
+            userId,
+            stu.id,
+            schoolId,
+          ]);
+        }
+        try {
+          cacheDb
+            .prepare(
+              `INSERT INTO users (id, email, password_hash, salt, full_name, phone, is_platform_admin, is_active, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, 0, 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`
+            )
+            .run(userId, loginEmail, hash, salt, fullName, stu.phone || null);
+          cacheDb
+            .prepare(
+              `INSERT INTO user_roles (id, user_id, school_id, role_id, is_primary, created_at)
+               VALUES (?, ?, ?, 'role_student', 1, CURRENT_TIMESTAMP)
+               ON CONFLICT(user_id, school_id, role_id) DO NOTHING`
+            )
+            .run(urId, userId, schoolId);
+          cacheDb
+            .prepare('UPDATE students SET user_id = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND school_id = ?')
+            .run(userId, stu.id, schoolId);
+        } catch {}
+
+        credentials.push({
+          role: 'STUDENT',
+          name: fullName,
+          loginIdentifier: adm || loginEmail,
+          aliasIdentifier: adm ? loginEmail : null,
+          temporaryPassword: tempPass,
+        });
+      }
+    }
+
+    if (normalizedTarget === 'PARENTS' || normalizedTarget === 'BOTH') {
+      const unlinkedParents: any[] = pool
+        ? (
+            await queryPg(
+              `SELECT * FROM parents
+               WHERE school_id = $1
+                 AND user_id IS NULL
+                 AND (is_deleted = 0 OR is_deleted IS NULL)
+               ORDER BY created_at ASC`,
+              [schoolId]
+            )
+          ).rows
+        : (cacheDb
+            .prepare(
+              `SELECT * FROM parents
+               WHERE school_id = ?
+                 AND user_id IS NULL
+                 AND (is_deleted = 0 OR is_deleted IS NULL)
+               ORDER BY created_at ASC`
+            )
+            .all(schoolId) as any[]);
+
+      for (const par of unlinkedParents) {
+        const rawEmail = par.email && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(par.email).trim())
+          ? String(par.email).trim().toLowerCase()
+          : '';
+        const phoneDigits = normalizePhoneDigits(par.phone);
+        if (!rawEmail && phoneDigits.length < 7) {
+          skippedCount += 1;
+          continue;
+        }
+        const loginEmail = rawEmail || `${phoneDigits}.${schoolId.slice(-4)}@${slugToken}.parent.bursariq.local`;
+
+        const existingUser = pool
+          ? (await queryPg('SELECT id FROM users WHERE LOWER(email) = $1 LIMIT 1', [loginEmail])).rows[0]
+          : cacheDb.prepare('SELECT id FROM users WHERE LOWER(email) = ? LIMIT 1').get(loginEmail);
+        if (existingUser) {
+          skippedCount += 1;
+          continue;
+        }
+
+        const tempPass = generateTempPassword();
+        const salt = generateSalt();
+        const hash = hashPassword(tempPass, salt);
+        const userId = 'usr_' + crypto.randomUUID().slice(0, 12);
+        const urId = 'ur_' + crypto.randomUUID().slice(0, 12);
+        const fullName = `${par.first_name || ''} ${par.last_name || ''}`.trim() || 'Parent';
+
+        if (pool) {
+          await queryPg(
+            `INSERT INTO users (id, email, password_hash, salt, full_name, phone, is_platform_admin, is_active, created_at, updated_at)
+             VALUES ($1, $2, $3, $4, $5, $6, 0, 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+            [userId, loginEmail, hash, salt, fullName, par.phone || null]
+          );
+          await queryPg(
+            `INSERT INTO user_roles (id, user_id, school_id, role_id, is_primary, created_at)
+             VALUES ($1, $2, $3, 'role_parent', 1, CURRENT_TIMESTAMP)
+             ON CONFLICT (user_id, school_id, role_id) DO NOTHING`,
+            [urId, userId, schoolId]
+          );
+          await queryPg('UPDATE parents SET user_id = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2 AND school_id = $3', [
+            userId,
+            par.id,
+            schoolId,
+          ]);
+        }
+        try {
+          cacheDb
+            .prepare(
+              `INSERT INTO users (id, email, password_hash, salt, full_name, phone, is_platform_admin, is_active, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, 0, 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`
+            )
+            .run(userId, loginEmail, hash, salt, fullName, par.phone || null);
+          cacheDb
+            .prepare(
+              `INSERT INTO user_roles (id, user_id, school_id, role_id, is_primary, created_at)
+               VALUES (?, ?, ?, 'role_parent', 1, CURRENT_TIMESTAMP)
+               ON CONFLICT(user_id, school_id, role_id) DO NOTHING`
+            )
+            .run(urId, userId, schoolId);
+          cacheDb
+            .prepare('UPDATE parents SET user_id = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND school_id = ?')
+            .run(userId, par.id, schoolId);
+        } catch {}
+
+        credentials.push({
+          role: 'PARENT',
+          name: fullName,
+          loginIdentifier: rawEmail || par.phone,
+          aliasIdentifier: par.phone && rawEmail ? par.phone : !rawEmail ? loginEmail : null,
+          temporaryPassword: tempPass,
+        });
+      }
+    }
+
+    logAudit({
+      actorId: req.user!.id,
+      actorEmail: req.user!.email,
+      schoolId,
+      action: 'BULK_PROVISION_PORTALS',
+      entity: 'SCHOOL',
+      entityId: schoolId,
+      metadata: { target: normalizedTarget, provisionedCount: credentials.length, skippedCount },
+    });
+
+    return res.status(201).json({
+      success: true,
+      message: `Provisioned ${credentials.length} individual portal account(s)${skippedCount ? ` (${skippedCount} skipped)` : ''}.`,
+      provisionedCount: credentials.length,
+      skippedCount,
+      credentials,
+    });
   }
 );
 

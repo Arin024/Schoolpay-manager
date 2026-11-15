@@ -28,6 +28,7 @@ import {
   KeyRound,
   BarChart3,
   UserCheck,
+  Sparkles,
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext.js';
 import { api } from '../../services/api.js';
@@ -78,6 +79,7 @@ export const SchoolStudentsView: React.FC<SchoolStudentsViewProps> = ({
   const [studentLoginSaving, setStudentLoginSaving] = useState(false);
   const [studentLoginError, setStudentLoginError] = useState<string | null>(null);
   const [studentStatusMsg, setStudentStatusMsg] = useState<string | null>(null);
+  const [assigningAdmissions, setAssigningAdmissions] = useState(false);
 
   const [acadStudent, setAcadStudent] = useState<Student | null>(null);
   const [acadData, setAcadData] = useState<any | null>(null);
@@ -237,18 +239,36 @@ export const SchoolStudentsView: React.FC<SchoolStudentsViewProps> = ({
     const matchedArm = matchedClass?.arms?.find((a) => a.id === formData.class_arm_id);
 
     try {
-      await api.createStudent({
+      const res = await api.createStudent({
         ...formData,
         class_name: matchedClass?.name || formData.class_name,
         class_arm_name: matchedArm?.name || formData.class_arm_name,
       });
       setIsEnrollModalOpen(false);
       setFormData(initialFormState);
+      if (res.student?.admission_number) {
+        setStudentStatusMsg(
+          `${res.student.full_name} enrolled! Official Admission Number: ${res.student.admission_number} (student can use this number to activate their portal).`
+        );
+      }
       await loadStudents();
     } catch (err: any) {
       setFormError(err?.message || 'Failed to enroll student');
     } finally {
       setFormSubmitting(false);
+    }
+  };
+
+  const handleAssignMissingAdmissions = async () => {
+    setAssigningAdmissions(true);
+    try {
+      const res = await api.assignMissingAdmissionNumbers();
+      setStudentStatusMsg(res.message);
+      await loadStudents();
+    } catch (err: any) {
+      setStudentStatusMsg(err?.message || 'Failed to assign admission numbers');
+    } finally {
+      setAssigningAdmissions(false);
     }
   };
 
@@ -508,6 +528,25 @@ export const SchoolStudentsView: React.FC<SchoolStudentsViewProps> = ({
           </button>
         </div>
       </div>
+
+      {!readOnly && students.some((s) => !s.admission_number || !String(s.admission_number).trim()) && (
+        <div className="p-3.5 rounded-xl bg-amber-50 border border-amber-200 text-amber-950 text-xs flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+          <div className="flex items-start gap-2">
+            <Sparkles className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+            <span>
+              Some students in your directory do not have an Admission Number yet. Click to automatically generate sequential Nigerian Admission Numbers so they can activate their Student Portal.
+            </span>
+          </div>
+          <button
+            type="button"
+            disabled={assigningAdmissions}
+            onClick={handleAssignMissingAdmissions}
+            className="px-3.5 py-2 bg-amber-600 hover:bg-amber-700 text-white rounded-xl text-xs font-bold shrink-0 transition cursor-pointer disabled:opacity-60"
+          >
+            {assigningAdmissions ? 'Assigning...' : 'Auto-Assign Admission Nos'}
+          </button>
+        </div>
+      )}
 
       {studentStatusMsg && (
         <div className="p-3 rounded-xl bg-emerald-50 border border-emerald-200 text-emerald-800 text-xs flex items-center justify-between">
@@ -1391,7 +1430,7 @@ export const SchoolStudentsView: React.FC<SchoolStudentsViewProps> = ({
                   <strong>Optional:</strong> <span className="font-mono text-[10px]">admission_number, middle_name, gender, class_name, arm, phone, email</span>
                 </p>
                 <p className="text-[11px] text-emerald-900 leading-relaxed">
-                  Admission numbers are <strong>fully optional</strong>. If omitted, students receive a durable internal ID. If provided, duplicate numbers in <strong>{activeSchool?.name}</strong> are safely detected and skipped without rejecting the entire file.
+                  Admission numbers are <strong>fully optional</strong>. Whenever omitted, BursarIQ automatically issues sequential school Admission Numbers (e.g. <span className="font-mono font-bold">BMC/2026/0001</span>) for portal activation and report cards. Duplicate numbers in <strong>{activeSchool?.name}</strong> are safely skipped.
                 </p>
               </div>
 
@@ -1450,8 +1489,23 @@ export const SchoolStudentsView: React.FC<SchoolStudentsViewProps> = ({
 
               {/* Import Summary */}
               {importSummary && (
-                <div className="p-3 rounded-xl bg-slate-100 border border-slate-200 space-y-1">
+                <div className="p-3 rounded-xl bg-slate-100 border border-slate-200 space-y-2">
                   <p className="font-bold text-slate-900">{importSummary.message}</p>
+                  {Array.isArray(importSummary.importedStudentsPreview) && importSummary.importedStudentsPreview.length > 0 && (
+                    <div className="bg-white border border-slate-200 rounded-lg p-2.5 space-y-1.5">
+                      <p className="text-[11px] font-bold text-emerald-800">
+                        Assigned Admission Numbers Preview ({importSummary.importedStudentsPreview.length} shown):
+                      </p>
+                      <div className="max-h-32 overflow-y-auto grid grid-cols-1 sm:grid-cols-2 gap-1 text-[11px]">
+                        {importSummary.importedStudentsPreview.map((st: any) => (
+                          <div key={st.id} className="flex items-center justify-between gap-2 px-2 py-1 bg-slate-50 rounded border border-slate-100">
+                            <span className="truncate font-medium text-slate-800">{st.full_name}</span>
+                            <span className="font-mono font-bold text-emerald-700 shrink-0">{st.admission_number}</span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
                   {importSummary.warnings && importSummary.warnings.length > 0 && (
                     <div className="text-[10px] text-amber-800 bg-amber-50 p-2.5 rounded-lg border border-amber-200 space-y-1 mt-1.5">
                       <p className="font-bold text-amber-950 flex items-center gap-1">
@@ -1560,22 +1614,24 @@ export const SchoolStudentsView: React.FC<SchoolStudentsViewProps> = ({
                 <div className="p-3 bg-rose-50 border border-rose-200 text-rose-700 rounded-xl">{studentLoginError}</div>
               )}
               <div>
-                <label className="block font-semibold text-slate-700 mb-1">Student Login Email *</label>
+                <label className="block font-semibold text-slate-700 mb-1">
+                  Student Login Email {loginStudent.admission_number ? '(Optional — can sign in by Admission No)' : '*'}
+                </label>
                 <input
                   type="email"
-                  required
+                  required={!loginStudent.admission_number}
                   value={studentLoginForm.email}
                   onChange={(e) => setStudentLoginForm({ ...studentLoginForm, email: e.target.value })}
-                  placeholder="student@school.edu.ng"
+                  placeholder={loginStudent.admission_number ? 'Optional (or auto-generated for Admission No login)' : 'student@school.edu.ng'}
                   className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl"
                 />
               </div>
               <div>
-                <label className="block font-semibold text-slate-700 mb-1">Initial Password * (min 8 chars)</label>
+                <label className="block font-semibold text-slate-700 mb-1">Initial Password * (min 6 chars)</label>
                 <input
                   type="password"
                   required
-                  minLength={8}
+                  minLength={6}
                   value={studentLoginForm.password}
                   onChange={(e) => setStudentLoginForm({ ...studentLoginForm, password: e.target.value })}
                   placeholder="••••••••"

@@ -13,11 +13,13 @@ import {
   Trash2,
   GraduationCap,
   Power,
+  Sparkles,
+  Download,
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext.js';
 import { api } from '../../services/api.js';
 import { RoleBadge } from '../common/StatusBadge.js';
-import { ParentItem, Student } from '../../types/index.js';
+import { BulkProvisionCredential, ParentItem, Student } from '../../types/index.js';
 
 export const SchoolUsersView: React.FC = () => {
   const { activeSchoolId, activeSchool, activeRole, user: currentUser } = useAuth();
@@ -57,6 +59,14 @@ export const SchoolUsersView: React.FC = () => {
   const [revokeError, setRevokeError] = useState<string | null>(null);
   const [togglingUserId, setTogglingUserId] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
+
+  // Bulk Auto-Provision Logins State
+  const [isBulkOpen, setIsBulkOpen] = useState(false);
+  const [bulkTarget, setBulkTarget] = useState<'BOTH' | 'STUDENTS' | 'PARENTS'>('BOTH');
+  const [bulkCustomPassword, setBulkCustomPassword] = useState('');
+  const [bulkSaving, setBulkSaving] = useState(false);
+  const [bulkError, setBulkError] = useState<string | null>(null);
+  const [bulkResults, setBulkResults] = useState<BulkProvisionCredential[] | null>(null);
 
   const canManage = ['SCHOOL_OWNER', 'SCHOOL_ADMIN', 'SUPER_ADMIN'].includes(activeRole?.role_name || '');
 
@@ -209,6 +219,45 @@ export const SchoolUsersView: React.FC = () => {
     }
   };
 
+  const handleBulkProvisionSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setBulkSaving(true);
+    setBulkError(null);
+    try {
+      const res = await api.bulkProvisionPortals({
+        target: bulkTarget,
+        custom_password: bulkCustomPassword.trim() || undefined,
+      });
+      setBulkResults(res.credentials || []);
+      setProvisionSuccess(res.message);
+      await loadData();
+    } catch (err: any) {
+      setBulkError(err?.message || 'Failed to auto-provision portal logins.');
+    } finally {
+      setBulkSaving(false);
+    }
+  };
+
+  const handleDownloadBulkCsv = () => {
+    if (!bulkResults || bulkResults.length === 0) return;
+    const rows = [
+      ['Role', 'Full Name', 'Primary Login (Adm No / Email / Phone)', 'Alt Email Identifier', 'Temporary Password'],
+      ...bulkResults.map((c) => [c.role, c.name, c.loginIdentifier, c.aliasIdentifier || '', c.temporaryPassword]),
+    ];
+    const csv = rows
+      .map((r) => r.map((cell) => `"${String(cell || '').replace(/"/g, '""')}"`).join(','))
+      .join('\n');
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+    const url = window.URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${activeSchool?.slug || 'school'}_portal_credentials.csv`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    window.URL.revokeObjectURL(url);
+  };
+
   return (
     <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-6 sm:p-8 space-y-6">
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-4 border-b border-slate-200">
@@ -227,18 +276,33 @@ export const SchoolUsersView: React.FC = () => {
             {users.length} Authorized User{users.length === 1 ? '' : 's'}
           </span>
           {canManage && (
-            <button
-              type="button"
-              onClick={() => {
-                setProvisionError(null);
-                setProvisionSuccess(null);
-                setIsProvisionOpen(true);
-              }}
-              className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold transition flex items-center gap-1.5 shadow-sm cursor-pointer whitespace-nowrap shrink-0"
-            >
-              <UserPlus className="w-4 h-4" />
-              <span>Provision Portal User</span>
-            </button>
+            <>
+              <button
+                type="button"
+                onClick={() => {
+                  setBulkError(null);
+                  setBulkResults(null);
+                  setBulkCustomPassword('');
+                  setIsBulkOpen(true);
+                }}
+                className="px-3.5 py-2 bg-slate-900 hover:bg-slate-800 text-white rounded-xl text-xs font-bold transition flex items-center gap-1.5 shadow-sm cursor-pointer whitespace-nowrap shrink-0"
+              >
+                <Sparkles className="w-4 h-4 text-emerald-400" />
+                <span>Bulk Generate Logins</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setProvisionError(null);
+                  setProvisionSuccess(null);
+                  setIsProvisionOpen(true);
+                }}
+                className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold transition flex items-center gap-1.5 shadow-sm cursor-pointer whitespace-nowrap shrink-0"
+              >
+                <UserPlus className="w-4 h-4" />
+                <span>Provision Portal User</span>
+              </button>
+            </>
           )}
         </div>
       </div>
@@ -742,6 +806,142 @@ export const SchoolUsersView: React.FC = () => {
                   Close
                 </button>
               </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* BULK AUTO-PROVISION PORTAL LOGINS MODAL */}
+      {isBulkOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-xs p-4 overflow-y-auto">
+          <div className="bg-white rounded-2xl max-w-2xl w-full shadow-2xl border border-slate-200 overflow-hidden my-8">
+            <div className="bg-slate-900 px-5 py-4 text-white flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <Sparkles className="w-4 h-4 text-emerald-400" />
+                <h3 className="font-bold text-sm">Bulk Generate Student &amp; Parent Logins</h3>
+              </div>
+              <button
+                type="button"
+                onClick={() => setIsBulkOpen(false)}
+                className="p-1 text-slate-400 hover:text-white"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="p-5 space-y-4 text-xs max-h-[80vh] overflow-y-auto">
+              <p className="text-slate-600">
+                Automatically issue separate, individual role-scoped portal credentials for unlinked students and parents in <strong>{activeSchool?.name}</strong>. Students can sign in using their Admission Number and parents using their Email or Phone at{' '}
+                <code className="bg-slate-100 px-1.5 py-0.5 rounded font-mono text-emerald-700">
+                  /#portal/{activeSchool?.slug}
+                </code>.
+              </p>
+
+              {bulkError && (
+                <div className="p-3 bg-rose-50 border border-rose-200 text-rose-800 rounded-xl">{bulkError}</div>
+              )}
+
+              {!bulkResults ? (
+                <form onSubmit={handleBulkProvisionSubmit} className="space-y-4">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <div>
+                      <label className="block font-semibold text-slate-700 mb-1">Accounts to Provision</label>
+                      <select
+                        value={bulkTarget}
+                        onChange={(e) => setBulkTarget(e.target.value as any)}
+                        className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl font-semibold"
+                      >
+                        <option value="BOTH">Unlinked Students &amp; Parents</option>
+                        <option value="STUDENTS">Unlinked Students Only</option>
+                        <option value="PARENTS">Unlinked Parents Only</option>
+                      </select>
+                    </div>
+                    <div>
+                      <label className="block font-semibold text-slate-700 mb-1">
+                        Initial Password (Optional)
+                      </label>
+                      <input
+                        type="text"
+                        value={bulkCustomPassword}
+                        onChange={(e) => setBulkCustomPassword(e.target.value)}
+                        placeholder="Leave blank for unique random passwords"
+                        className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl"
+                      />
+                    </div>
+                  </div>
+                  <div className="pt-3 border-t border-slate-200 flex items-center justify-end gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setIsBulkOpen(false)}
+                      className="px-4 py-2 border border-slate-300 text-slate-700 rounded-xl hover:bg-slate-50"
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      type="submit"
+                      disabled={bulkSaving}
+                      className="px-5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl font-bold disabled:opacity-60 cursor-pointer"
+                    >
+                      {bulkSaving ? 'Generating Logins...' : 'Generate Individual Logins'}
+                    </button>
+                  </div>
+                </form>
+              ) : (
+                <div className="space-y-3">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="font-bold text-emerald-800">
+                      {bulkResults.length} New Credential{bulkResults.length === 1 ? '' : 's'} Generated
+                    </span>
+                    {bulkResults.length > 0 && (
+                      <button
+                        type="button"
+                        onClick={handleDownloadBulkCsv}
+                        className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg font-bold inline-flex items-center gap-1.5 cursor-pointer"
+                      >
+                        <Download className="w-3.5 h-3.5" />
+                        <span>Download Credentials CSV</span>
+                      </button>
+                    )}
+                  </div>
+                  {bulkResults.length === 0 ? (
+                    <p className="text-slate-500 italic py-4 text-center">
+                      All eligible students and parents already have active portal accounts (or are missing admission number / contact info).
+                    </p>
+                  ) : (
+                    <div className="max-h-64 overflow-y-auto border border-slate-200 rounded-xl">
+                      <table className="w-full text-left text-[11px]">
+                        <thead className="bg-slate-50 border-b border-slate-200 text-slate-500 uppercase">
+                          <tr>
+                            <th className="py-2 px-3">Role</th>
+                            <th className="py-2 px-3">Name</th>
+                            <th className="py-2 px-3">Login Identifier</th>
+                            <th className="py-2 px-3">Temporary Password</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-slate-100">
+                          {bulkResults.map((c, idx) => (
+                            <tr key={idx}>
+                              <td className="py-2 px-3 font-bold">{c.role}</td>
+                              <td className="py-2 px-3 text-slate-900">{c.name}</td>
+                              <td className="py-2 px-3 font-mono text-slate-700">{c.loginIdentifier}</td>
+                              <td className="py-2 px-3 font-mono font-bold text-emerald-700">{c.temporaryPassword}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                  <div className="pt-2 flex justify-end">
+                    <button
+                      type="button"
+                      onClick={() => setIsBulkOpen(false)}
+                      className="px-4 py-2 bg-slate-900 text-white rounded-xl font-bold"
+                    >
+                      Done
+                    </button>
+                  </div>
+                </div>
+              )}
             </div>
           </div>
         </div>
