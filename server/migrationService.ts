@@ -25,6 +25,7 @@ function ensureSoftDeleteColumnsIdempotent() {
     'students',
     'staff',
     'classes',
+    'class_arms',
     'parents',
     'fee_categories',
     'invoices',

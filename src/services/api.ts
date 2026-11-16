@@ -459,12 +459,25 @@ export const api = {
     });
   },
 
-  async importStudents(students: any[]): Promise<{
+  async importStudents(
+    students: any[],
+    options?: { auto_create_classes?: boolean }
+  ): Promise<{
     importedCount: number;
     failedCount: number;
     skippedCount?: number;
     generatedAdmissionCount?: number;
-    importedStudentsPreview?: Array<{ id: string; full_name: string; admission_number: string; class_name: string | null }>;
+    createdClassesCount?: number;
+    createdArmsCount?: number;
+    importedStudentsPreview?: Array<{
+      id: string;
+      full_name: string;
+      admission_number: string;
+      class_id?: string | null;
+      class_name: string | null;
+      class_arm_name?: string | null;
+      gender?: string | null;
+    }>;
     errors: any[];
     warnings?: any[];
     message: string;
@@ -472,7 +485,31 @@ export const api = {
     return safeFetch(`${API_BASE}/school/students/import`, {
       method: 'POST',
       headers: getAuthHeaders(),
-      body: JSON.stringify({ students }),
+      body: JSON.stringify({
+        students,
+        auto_create_classes: options?.auto_create_classes ?? true,
+      }),
+    });
+  },
+
+  async bulkAssignStudents(data: {
+    student_ids: string[];
+    class_id?: string | null;
+    class_name?: string;
+    class_arm_id?: string | null;
+    class_arm_name?: string;
+    gender?: string;
+    student_status?: string;
+    create_missing_class?: boolean;
+  }): Promise<{
+    success: boolean;
+    updatedCount: number;
+    message: string;
+  }> {
+    return safeFetch(`${API_BASE}/school/students/bulk-assign`, {
+      method: 'POST',
+      headers: getAuthHeaders(),
+      body: JSON.stringify(data),
     });
   },
 
@@ -548,7 +585,27 @@ export const api = {
     });
   },
 
-  async createClass(data: { name: string; level: string; description?: string; academic_session_id?: string }): Promise<{ class: ClassItem; message: string }> {
+  async bulkSetupClasses(mode: 'SECONDARY' | 'PRIMARY' | 'K12'): Promise<{
+    success: boolean;
+    createdClassesCount: number;
+    createdArmsCount: number;
+    message: string;
+  }> {
+    return safeFetch(`${API_BASE}/school/classes/bulk-setup`, {
+      method: 'POST',
+      headers: getAuthHeaders(),
+      body: JSON.stringify({ mode }),
+    });
+  },
+
+  async createClass(data: {
+    name: string;
+    level: string;
+    description?: string;
+    academic_session_id?: string;
+    arms?: string | string[];
+    arm_capacity?: number;
+  }): Promise<{ class: ClassItem; message: string }> {
     return safeFetch(`${API_BASE}/school/classes`, {
       method: 'POST',
       headers: getAuthHeaders(),
@@ -563,11 +620,33 @@ export const api = {
     });
   },
 
-  async createClassArm(classId: string, data: { name: string; capacity?: number; class_teacher_id?: string }): Promise<{ arm: ClassArmItem; message: string }> {
+  async createClassArm(
+    classId: string,
+    data: { name: string; arms?: string[]; capacity?: number; class_teacher_id?: string }
+  ): Promise<{ arm: ClassArmItem; arms?: ClassArmItem[]; createdCount?: number; message: string }> {
     return safeFetch(`${API_BASE}/school/classes/${classId}/arms`, {
       method: 'POST',
       headers: getAuthHeaders(),
       body: JSON.stringify(data),
+    });
+  },
+
+  async updateClassArm(
+    classId: string,
+    armId: string,
+    data: { name?: string; capacity?: number; class_teacher_id?: string | null }
+  ): Promise<{ arm: ClassArmItem; message: string }> {
+    return safeFetch(`${API_BASE}/school/classes/${classId}/arms/${armId}`, {
+      method: 'PUT',
+      headers: getAuthHeaders(),
+      body: JSON.stringify(data),
+    });
+  },
+
+  async deleteClassArm(classId: string, armId: string, force = false): Promise<{ message: string }> {
+    return safeFetch(`${API_BASE}/school/classes/${classId}/arms/${armId}${force ? '?force=true' : ''}`, {
+      method: 'DELETE',
+      headers: getAuthHeaders(),
     });
   },
 

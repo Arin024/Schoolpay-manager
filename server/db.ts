@@ -334,12 +334,22 @@ export async function initDatabase() {
             'ALTER TABLE academic_sessions ALTER COLUMN end_date DROP NOT NULL',
             'ALTER TABLE terms ALTER COLUMN start_date DROP NOT NULL',
             'ALTER TABLE terms ALTER COLUMN end_date DROP NOT NULL',
+            'ALTER TABLE classes ADD COLUMN IF NOT EXISTS level VARCHAR(64)',
+            'ALTER TABLE classes ADD COLUMN IF NOT EXISTS description TEXT',
+            'ALTER TABLE classes ADD COLUMN IF NOT EXISTS academic_session_id VARCHAR(64)',
+            'ALTER TABLE classes ADD COLUMN IF NOT EXISTS is_deleted INTEGER DEFAULT 0',
+            'ALTER TABLE classes ALTER COLUMN level DROP NOT NULL',
+            'ALTER TABLE class_arms ADD COLUMN IF NOT EXISTS class_teacher_id VARCHAR(64)',
+            'ALTER TABLE class_arms ADD COLUMN IF NOT EXISTS is_deleted INTEGER DEFAULT 0',
+            'ALTER TABLE class_arms ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ',
+            'ALTER TABLE class_arms ADD COLUMN IF NOT EXISTS deleted_by VARCHAR(64)',
+            'ALTER TABLE class_arms ADD COLUMN IF NOT EXISTS deletion_reason TEXT',
           ];
           for (const stmt of alterStatements) {
             try {
               await client.query(stmt);
             } catch {
-              // Column may already be nullable
+              // Column may already exist or be nullable
             }
           }
 
@@ -701,10 +711,13 @@ function migrateStep2Columns() {
     } catch (e) {}
   }
 
-  // Ensure classes table has description and academic_session_id
+  // Ensure classes table has level, description and academic_session_id
   const classTableExists = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='classes'").get();
   if (classTableExists) {
     const classCols = db.prepare('PRAGMA table_info(classes)').all().map((c: any) => c.name);
+    if (!classCols.includes('level')) {
+      try { db.exec("ALTER TABLE classes ADD COLUMN level TEXT DEFAULT 'General';"); } catch (e) {}
+    }
     if (!classCols.includes('description')) {
       try { db.exec('ALTER TABLE classes ADD COLUMN description TEXT;'); } catch (e) {}
     }
@@ -713,6 +726,18 @@ function migrateStep2Columns() {
     }
     if (!classCols.includes('updated_at')) {
       try { db.exec('ALTER TABLE classes ADD COLUMN updated_at DATETIME DEFAULT CURRENT_TIMESTAMP;'); } catch (e) {}
+    }
+  }
+
+  // Ensure class_arms table has class_teacher_id and soft-delete columns
+  const armTableExists = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='class_arms'").get();
+  if (armTableExists) {
+    const armCols = db.prepare('PRAGMA table_info(class_arms)').all().map((c: any) => c.name);
+    if (!armCols.includes('class_teacher_id')) {
+      try { db.exec('ALTER TABLE class_arms ADD COLUMN class_teacher_id TEXT REFERENCES staff(id) ON DELETE SET NULL;'); } catch (e) {}
+    }
+    if (!armCols.includes('updated_at')) {
+      try { db.exec('ALTER TABLE class_arms ADD COLUMN updated_at DATETIME DEFAULT CURRENT_TIMESTAMP;'); } catch (e) {}
     }
   }
 }
