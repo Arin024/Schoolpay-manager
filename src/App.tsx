@@ -207,14 +207,14 @@ const AppContent: React.FC = () => {
     switch (view) {
       case 'login':
         updateSeo({
-          title: 'Sign In to Your School | BursarIQ',
-          description: 'Sign in to your school fee management and bursary portal. Fast, secure, and seamless.',
+          title: 'Sign In to Your School Portal | BursarIQ',
+          description: 'Sign in to your school portal as Administrator, Bursar, Teacher, Parent, or Student to manage academics, report cards, attendance, and tuition.',
         });
         break;
       case 'register':
         updateSeo({
           title: 'Register Your School – 30-Day Free Trial | BursarIQ',
-          description: 'Start your 30-day free trial on Nigeria’s trusted school fee management and bursary platform.',
+          description: 'Launch your dedicated Nigerian school platform with role-based portals, termly & annual report cards, attendance, and reconciled bursary.',
         });
         break;
       case 'thank-you':
@@ -559,14 +559,14 @@ const AppContent: React.FC = () => {
             <div className="text-center max-w-3xl mx-auto pt-4 pb-2">
               <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-emerald-100 text-emerald-800 text-xs font-bold uppercase tracking-wider mb-4 border border-emerald-200">
                 <ShieldCheck className="w-4 h-4 text-emerald-600" />
-                <span>Bank-Grade Security • Dedicated Private School Database</span>
+                <span>Built for Nigerian Schools • Dedicated Private School Portal</span>
               </div>
               <h1 className="text-3xl sm:text-5xl font-extrabold text-slate-900 tracking-tight leading-tight">
-                Simple school payments.<br className="hidden sm:inline" />
-                <span className="text-emerald-700">Smarter bursary management.</span>
+                One complete school platform.<br className="hidden sm:inline" />
+                <span className="text-emerald-700">Academics, portals, and bursary.</span>
               </h1>
               <p className="mt-3 text-sm sm:text-base text-slate-600 max-w-2xl mx-auto">
-                The all-in-one fee collection and bursary portal for Nigerian schools (bursariq.com.ng). Eliminate payment disputes, stop cash leakage, issue instant verifiable digital receipts, and give parents complete peace of mind.
+                The all-in-one digital operating system for Nigerian schools (bursariq.com.ng). Run role-separated Admin, Teacher, Parent, and Student portals, End-of-Term &amp; Full-Session cumulative report cards, attendance, behaviour tracking, and reconciled fee billing in one secure environment.
               </p>
 
               {/* Primary Call-To-Action (Above The Fold) */}
@@ -653,10 +653,10 @@ const AppContent: React.FC = () => {
               {/* Pillar 1: Who it is designed for & Core Mission */}
               <div className="text-center max-w-3xl mx-auto space-y-2">
                 <h2 className="text-2xl font-black text-slate-900 tracking-tight">
-                  Tailored for Nigerian Schools &amp; Educational Institutions
+                  Everything Your School Needs Across Every Stakeholder
                 </h2>
                 <p className="text-sm text-slate-600 leading-relaxed">
-                  BursarIQ is built specifically for Nursery &amp; Primary Schools, Secondary Colleges, Comprehensive K-12 Academies, and International Schools. Say goodbye to manual paper registers, stressful bank reconciliation, and missing fee payments. Experience seamless school fees collection with instant verifiable receipts, automated debtor tracking, and bank-grade privacy.
+                  Designed for Nigerian Nursery &amp; Primary Schools, Secondary Colleges, and K-12 Academies. Replace disconnected spreadsheets, paper result sheets, and payment mix-ups with dedicated portals where Administrators manage official school records, Teachers track classes and report cards, Parents monitor children&apos;s results and fees, and Students view published grades safely.
                 </p>
               </div>
 
@@ -664,41 +664,51 @@ const AppContent: React.FC = () => {
               <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
                 <div className="bg-white p-6 rounded-2xl border border-slate-200/90 shadow-xs space-y-3">
                   <div className="w-10 h-10 rounded-xl bg-emerald-100 text-emerald-800 flex items-center justify-center font-bold">
-                    <GraduationCap className="w-5 h-5 text-emerald-700" />
+                    <Users className="w-5 h-5 text-emerald-700" />
                   </div>
-                  <h3 className="font-bold text-slate-900 text-base">Student &amp; Class Directory</h3>
+                  <h3 className="font-bold text-slate-900 text-base">Role-Separated School Portals</h3>
                   <p className="text-xs text-slate-600 leading-relaxed">
-                    Organize nursery, primary, and secondary classes, student admission numbers, and parent contacts in one centralized digital portal without spreadsheet chaos or lost paper files.
+                    Every school gets a branded portal link for Proprietors, Admins, Bursars, Teachers, Parents, and Students. Students sign in with their Admission Number and Parents with their Phone Number—never sharing admin logins.
                   </p>
                 </div>
 
                 <div className="bg-white p-6 rounded-2xl border border-slate-200/90 shadow-xs space-y-3">
                   <div className="w-10 h-10 rounded-xl bg-blue-100 text-blue-800 flex items-center justify-center font-bold">
-                    <CreditCard className="w-5 h-5 text-blue-700" />
+                    <BarChart3 className="w-5 h-5 text-blue-700" />
                   </div>
-                  <h3 className="font-bold text-slate-900 text-base">Flexible Fee Structures &amp; Billing</h3>
+                  <h3 className="font-bold text-slate-900 text-base">End-of-Term &amp; Full-Session Report Cards</h3>
                   <p className="text-xs text-slate-600 leading-relaxed">
-                    Set up tuition, development levies, uniforms, books, and bus fees with ease. Support full payments or flexible partial installments tailored to parents&apos; budgets.
+                    Record CA and Examination scores across First, Second, and Third Terms, publish approved grades without draft leakage, and generate printable End-of-Term and Cumulative Annual Report Cards with promotion standing.
                   </p>
                 </div>
 
                 <div className="bg-white p-6 rounded-2xl border border-slate-200/90 shadow-xs space-y-3">
                   <div className="w-10 h-10 rounded-xl bg-purple-100 text-purple-800 flex items-center justify-center font-bold">
-                    <Receipt className="w-5 h-5 text-purple-700" />
+                    <GraduationCap className="w-5 h-5 text-purple-700" />
                   </div>
-                  <h3 className="font-bold text-slate-900 text-base">Instant Verifiable Digital Receipts</h3>
+                  <h3 className="font-bold text-slate-900 text-base">Nigerian Admissions &amp; Class Directory</h3>
                   <p className="text-xs text-slate-600 leading-relaxed">
-                    Eliminate fake bank tellers and receipt fraud. Issue instant, tamper-proof digital receipts with unique security verification codes that parents and schools can verify anywhere.
+                    Automatically generate school-coded Nigerian admission numbers on enrollment, manage classes, arms, subjects, staff assignments, parent links, and bulk CSV imports—or request hands-free assisted onboarding.
                   </p>
                 </div>
 
                 <div className="bg-white p-6 rounded-2xl border border-slate-200/90 shadow-xs space-y-3">
                   <div className="w-10 h-10 rounded-xl bg-amber-100 text-amber-800 flex items-center justify-center font-bold">
-                    <BarChart3 className="w-5 h-5 text-amber-700" />
+                    <CalendarCheck className="w-5 h-5 text-amber-700" />
                   </div>
-                  <h3 className="font-bold text-slate-900 text-base">Live Bursary &amp; Financial Reports</h3>
+                  <h3 className="font-bold text-slate-900 text-base">Attendance, Behaviour &amp; Notices</h3>
                   <p className="text-xs text-slate-600 leading-relaxed">
-                    School owners and bursars get crystal-clear daily, termly, and annual payment summaries. Export ready-to-present CSV and financial reports for board meetings with zero arithmetic errors.
+                    Maintain daily class attendance registers, record student conduct commendations and discipline remarks, and broadcast targeted school announcements straight to staff, parents, and learners.
+                  </p>
+                </div>
+
+                <div className="bg-white p-6 rounded-2xl border border-slate-200/90 shadow-xs space-y-3">
+                  <div className="w-10 h-10 rounded-xl bg-teal-100 text-teal-800 flex items-center justify-center font-bold">
+                    <Receipt className="w-5 h-5 text-teal-700" />
+                  </div>
+                  <h3 className="font-bold text-slate-900 text-base">Smart Bursary &amp; Document Verification</h3>
+                  <p className="text-xs text-slate-600 leading-relaxed">
+                    Manage tuition and levy invoices, flexible partial payments, online parent checkout, and debtor summaries while issuing tamper-proof receipts and report cards verifiable publicly by code.
                   </p>
                 </div>
 
@@ -706,19 +716,9 @@ const AppContent: React.FC = () => {
                   <div className="w-10 h-10 rounded-xl bg-rose-100 text-rose-800 flex items-center justify-center font-bold">
                     <ShieldCheck className="w-5 h-5 text-rose-700" />
                   </div>
-                  <h3 className="font-bold text-slate-900 text-base">Zero Fee Leakage &amp; 100% Reconciliation</h3>
+                  <h3 className="font-bold text-slate-900 text-base">Strict Tenant Isolation &amp; Permanent Records</h3>
                   <p className="text-xs text-slate-600 leading-relaxed">
-                    Stop unrecorded payments and revenue loss before they happen. Reconcile bank transfers with student accounts in real time, so every single naira collected is accounted for and safe.
-                  </p>
-                </div>
-
-                <div className="bg-white p-6 rounded-2xl border border-slate-200/90 shadow-xs space-y-3">
-                  <div className="w-10 h-10 rounded-xl bg-teal-100 text-teal-800 flex items-center justify-center font-bold">
-                    <Sparkles className="w-5 h-5 text-teal-700" />
-                  </div>
-                  <h3 className="font-bold text-slate-900 text-base">Stress-Free Resumption &amp; Delighted Parents</h3>
-                  <p className="text-xs text-slate-600 leading-relaxed">
-                    No more crowded bursary queues or tension on resumption day. Parents pay conveniently from their phones and receive instant clearance, giving your school a modern, prestigious edge.
+                    Every school&apos;s student, academic, and financial ledger is isolated and preserved with role-based permissions, cryptographic audit logging, and soft-delete recovery protection against accidental data loss.
                   </p>
                 </div>
               </div>
@@ -727,31 +727,31 @@ const AppContent: React.FC = () => {
               <div className="bg-slate-900 text-white rounded-3xl p-8 sm:p-10 space-y-8">
                 <div className="text-center max-w-2xl mx-auto">
                   <h3 className="text-xl sm:text-2xl font-black tracking-tight">How Your School Gets Started</h3>
-                  <p className="text-xs sm:text-sm text-slate-400 mt-1">Get up and running in minutes with our guided self-service onboarding.</p>
+                  <p className="text-xs sm:text-sm text-slate-400 mt-1">Launch your school&apos;s complete digital academic and bursary portal in minutes.</p>
                 </div>
 
                 <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
                   <div className="p-5 rounded-2xl bg-slate-800/80 border border-slate-700 space-y-3">
                     <div className="w-8 h-8 rounded-full bg-emerald-500 text-slate-950 font-black text-sm flex items-center justify-center">1</div>
-                    <h4 className="font-bold text-white text-sm">Register Your School</h4>
+                    <h4 className="font-bold text-white text-sm">Register Your School Portal</h4>
                     <p className="text-xs text-slate-400 leading-relaxed">
-                      Enter your school name, type, state, contact phone, and proprietor email. Your private school portal is created immediately with a 30-day free trial.
+                      Create your private school workspace and shareable portal link with your institution profile, state, and proprietor account on a 30-day free trial.
                     </p>
                   </div>
 
                   <div className="p-5 rounded-2xl bg-slate-800/80 border border-slate-700 space-y-3">
                     <div className="w-8 h-8 rounded-full bg-emerald-500 text-slate-950 font-black text-sm flex items-center justify-center">2</div>
-                    <h4 className="font-bold text-white text-sm">Enroll Students &amp; Classes</h4>
+                    <h4 className="font-bold text-white text-sm">Set Up Classes, Staff &amp; Students</h4>
                     <p className="text-xs text-slate-400 leading-relaxed">
-                      Create academic sessions, configure classes and arms, and enroll students individually or import your class lists in bulk via CSV.
+                      Configure Nigerian terms and sessions, add subjects and form teachers, link parents, and auto-generate student admission numbers individually or via CSV import.
                     </p>
                   </div>
 
                   <div className="p-5 rounded-2xl bg-slate-800/80 border border-slate-700 space-y-3">
                     <div className="w-8 h-8 rounded-full bg-emerald-500 text-slate-950 font-black text-sm flex items-center justify-center">3</div>
-                    <h4 className="font-bold text-white text-sm">Issue Invoices &amp; Collect Fees</h4>
+                    <h4 className="font-bold text-white text-sm">Publish Results, Attendance &amp; Fees</h4>
                     <p className="text-xs text-slate-400 leading-relaxed">
-                      Set fee categories, assign invoices to students, and accept payments with instant receipts and reconciled balance tracking.
+                      Publish End-of-Term and Full-Session report cards, record attendance, issue invoices and verified receipts, and let parents and students activate their own portals.
                     </p>
                   </div>
                 </div>

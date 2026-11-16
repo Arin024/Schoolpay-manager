@@ -112,7 +112,7 @@ export const RegisterForm: React.FC<RegisterFormProps> = ({ onSwitchToLogin, onS
             </div>
             <h2 className="text-2xl font-bold tracking-tight text-white">Register Your School</h2>
             <p className="text-xs sm:text-sm text-slate-300 mt-1">
-              &quot;Simple school payments. Smarter bursary management.&quot;
+              Complete school operations, academic report cards, role-based portals &amp; bursary in one place.
             </p>
           </div>
           <button

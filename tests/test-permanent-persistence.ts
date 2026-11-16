@@ -3,12 +3,14 @@ import pg from 'pg';
 import crypto from 'node:crypto';
 import { hashPassword, generateSalt, verifyPassword, createSession, destroySession } from '../server/auth.ts';
 import { initDatabase, getPgPool, isPgConnected } from '../server/db.ts';
+import { ensureNeonEnvironment } from '../server/neonEnvResolver.ts';
 
 async function runPersistenceTests() {
   console.log('======================================================================');
   console.log('   BURSARIQ: PERMANENT DATA PERSISTENCE & DELETION SAFETY TEST SUITE ');
   console.log('======================================================================');
 
+  await ensureNeonEnvironment();
   await initDatabase();
   const pool = getPgPool();
   assert(pool && isPgConnected(), 'Neon PostgreSQL pool must be connected and active');

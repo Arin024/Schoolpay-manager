@@ -24,7 +24,7 @@ export const Footer: React.FC<FooterProps> = ({ onNavigateView }) => {
               </span>
             </div>
             <p className="text-xs text-slate-500 leading-relaxed">
-              Nigeria&apos;s trusted school fee management and bursary portal (bursariq.com.ng). Effortless collections, instant digital receipts, and real-time reconciliation.
+              Complete school operations, role-separated Parent/Student/Teacher portals, End-of-Term &amp; Full-Session report cards, attendance, and reconciled bursary management for Nigerian schools (bursariq.com.ng).
             </p>
             <div className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-emerald-50 text-emerald-800 text-[11px] font-semibold border border-emerald-200">
               <ShieldCheck className="w-3.5 h-3.5 text-emerald-600" />

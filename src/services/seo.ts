@@ -13,7 +13,7 @@ export interface SeoConfig {
 }
 
 const DEFAULT_DESCRIPTION =
-  'Nigeria’s leading school fee payment and bursary management platform. Collect tuition seamlessly, stop cash leakage, issue instant verified receipts, and delight parents.';
+  'Complete Nigerian school operations, academics, and bursary platform. Manage student records, role-separated Parent/Student/Teacher portals, End-of-Term & Full-Session report cards, attendance, behaviour, and verified tuition receipts.';
 const DEFAULT_OG_IMAGE = '/og-image.png';
 const BASE_URL = 'https://bursariq.com.ng';
 
@@ -22,7 +22,7 @@ export function updateSeo(config: Partial<SeoConfig>) {
     ? config.title.includes('BursarIQ')
       ? config.title
       : `${config.title} | BursarIQ`
-    : 'BursarIQ – Simple School Payments. Smarter Bursary Management.';
+    : 'BursarIQ – School Operations, Academics, Portals & Bursary.';
 
   const description = config.description || DEFAULT_DESCRIPTION;
   const canonicalUrl = config.canonicalUrl || `${BASE_URL}${window.location.pathname || '/'}`;
