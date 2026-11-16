@@ -188,10 +188,11 @@ export const ParentPortalView: React.FC = () => {
     setStatusMsg(null);
     try {
       const amountKobo = Math.round(parseFloat(checkoutAmountNaira) * 100);
+      const safeUserEmail = user?.email && !user.email.endsWith('.bursariq.local') ? user.email : '';
       const initRes = await api.initializeOnlineCheckout(checkoutInvoice.id, {
         provider: checkoutProvider,
         amount_kobo: amountKobo,
-        email: checkoutEmail || user?.email || 'parent@school.edu.ng',
+        email: checkoutEmail || safeUserEmail || 'parent@school.edu.ng',
       });
 
       if (checkoutProvider === 'TEST_SANDBOX') {
@@ -997,7 +998,10 @@ export const ParentPortalView: React.FC = () => {
                               onClick={() => {
                                 setCheckoutInvoice(inv);
                                 setCheckoutAmountNaira(String(inv.balance / 100));
-                                setCheckoutEmail(user?.email || '');
+                                setCheckoutEmail(
+                                  data.parentProfile?.email ||
+                                    (user?.email && !user.email.endsWith('.bursariq.local') ? user.email : '')
+                                );
                                 setHostedCheckout(null);
                               }}
                               className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-[11px] font-bold cursor-pointer"
@@ -1212,7 +1216,10 @@ export const ParentPortalView: React.FC = () => {
               </p>
               <p className="flex items-center gap-1.5 text-slate-600">
                 <Mail className="w-3.5 h-3.5 text-slate-400" />
-                <span>{user?.email || data.parentProfile?.email || '—'}</span>
+                <span>
+                  {data.parentProfile?.email ||
+                    (user?.email && !user.email.endsWith('.bursariq.local') ? user.email : 'Not recorded (Admission-number portal)')}
+                </span>
               </p>
               <p className="flex items-center gap-1.5 text-slate-600">
                 <Phone className="w-3.5 h-3.5 text-slate-400" />

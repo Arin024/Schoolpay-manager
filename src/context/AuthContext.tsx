@@ -19,6 +19,12 @@ interface AuthContextType {
   isStudent: boolean;
   impersonatedBy: string | null;
   login: (credentials: { email?: string; identifier?: string; password: string; schoolId?: string; schoolSlug?: string }) => Promise<void>;
+  admissionLogin: (credentials: {
+    admission_number: string;
+    portal_type: 'STUDENT' | 'PARENT';
+    school_id?: string;
+    school_slug?: string;
+  }) => Promise<void>;
   completeSessionAuth: (data: any) => Promise<void>;
   registerSchoolSuccess: (data: any) => void;
   logout: () => Promise<void>;
@@ -158,6 +164,16 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   const login = async (credentials: { email?: string; identifier?: string; password: string; schoolId?: string; schoolSlug?: string }) => {
     const data = await api.login(credentials);
+    await completeSessionAuth(data);
+  };
+
+  const admissionLogin = async (credentials: {
+    admission_number: string;
+    portal_type: 'STUDENT' | 'PARENT';
+    school_id?: string;
+    school_slug?: string;
+  }) => {
+    const data = await api.admissionLogin(credentials);
     await completeSessionAuth(data);
   };
 
@@ -339,6 +355,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         isStudent,
         impersonatedBy,
         login,
+        admissionLogin,
         completeSessionAuth,
         registerSchoolSuccess,
         logout,

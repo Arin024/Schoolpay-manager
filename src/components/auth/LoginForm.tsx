@@ -50,7 +50,7 @@ export const LoginForm: React.FC<LoginFormProps> = ({
   initialPortalSlug = null,
   onPortalSlugChange,
 }) => {
-  const { login, completeSessionAuth } = useAuth();
+  const { login, admissionLogin, completeSessionAuth } = useAuth();
 
   // Top-level portal mode
   const [mainTab, setMainTab] = useState<PortalMainTab>('signin');
@@ -69,6 +69,8 @@ export const LoginForm: React.FC<LoginFormProps> = ({
   const [identifier, setIdentifier] = useState('');
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
+  const [parentUsePassword, setParentUsePassword] = useState(false);
+  const [ambiguousSchools, setAmbiguousSchools] = useState<PublicSchoolSummary[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
@@ -144,6 +146,7 @@ export const LoginForm: React.FC<LoginFormProps> = ({
     setPortalSlugError(null);
     setSchoolSearchOpen(false);
     setSchoolQuery('');
+    setAmbiguousSchools([]);
     setError(null);
     setActError(null);
     if (onPortalSlugChange) onPortalSlugChange(school.slug);
@@ -152,16 +155,55 @@ export const LoginForm: React.FC<LoginFormProps> = ({
   const handleClearSchool = () => {
     setSelectedSchool(null);
     setPortalSlugError(null);
+    setAmbiguousSchools([]);
     if (onPortalSlugChange) onPortalSlugChange(null);
+  };
+
+  const isAdmissionOnlyMode =
+    signInMode === 'student' || (signInMode === 'parent' && !parentUsePassword);
+
+  const performAdmissionLogin = async (
+    admNo: string,
+    portalRole: 'STUDENT' | 'PARENT',
+    schoolOverride?: PublicSchoolSummary | null
+  ) => {
+    const targetSchool = schoolOverride ?? selectedSchool;
+    setLoading(true);
+    setError(null);
+    try {
+      await admissionLogin({
+        admission_number: admNo.trim(),
+        portal_type: portalRole,
+        school_id: targetSchool?.id,
+        school_slug: targetSchool?.slug,
+      });
+      setAmbiguousSchools([]);
+      if (onSuccess) {
+        onSuccess();
+      }
+    } catch (err: any) {
+      if (err?.data?.error === 'AMBIGUOUS_ADMISSION_NUMBER' && Array.isArray(err?.data?.schools)) {
+        setAmbiguousSchools(err.data.schools);
+        setError(err.message || 'Multiple schools share this admission number. Tap your school below.');
+      } else {
+        setAmbiguousSchools([]);
+        setError(err?.message || 'Unable to sign in with that admission number.');
+      }
+    } finally {
+      setLoading(false);
+    }
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
+    setAmbiguousSchools([]);
 
-    if (signInMode === 'student' && !selectedSchool) {
-      setError('Select your school first using "Find Your School" above.');
-      setSchoolSearchOpen(true);
+    if (isAdmissionOnlyMode) {
+      await performAdmissionLogin(
+        identifier,
+        signInMode === 'parent' ? 'PARENT' : 'STUDENT'
+      );
       return;
     }
 
@@ -455,6 +497,7 @@ export const LoginForm: React.FC<LoginFormProps> = ({
                     type="button"
                     onClick={() => {
                       setSignInRoleMode('staff');
+                      setAmbiguousSchools([]);
                       setError(null);
                     }}
                     className={`py-2 px-2 rounded-lg text-[11px] font-bold flex items-center justify-center gap-1 transition cursor-pointer ${
@@ -470,6 +513,7 @@ export const LoginForm: React.FC<LoginFormProps> = ({
                     type="button"
                     onClick={() => {
                       setSignInRoleMode('parent');
+                      setAmbiguousSchools([]);
                       setError(null);
                     }}
                     className={`py-2 px-2 rounded-lg text-[11px] font-bold flex items-center justify-center gap-1 transition cursor-pointer ${
@@ -485,8 +529,8 @@ export const LoginForm: React.FC<LoginFormProps> = ({
                     type="button"
                     onClick={() => {
                       setSignInRoleMode('student');
+                      setAmbiguousSchools([]);
                       setError(null);
-                      if (!selectedSchool) setSchoolSearchOpen(true);
                     }}
                     className={`py-2 px-2 rounded-lg text-[11px] font-bold flex items-center justify-center gap-1 transition cursor-pointer ${
                       signInMode === 'student'
@@ -507,64 +551,110 @@ export const LoginForm: React.FC<LoginFormProps> = ({
                 </div>
               )}
 
+              {ambiguousSchools.length > 0 && (
+                <div className="mb-4 p-3 rounded-xl bg-amber-50 border border-amber-200 space-y-2">
+                  <p className="text-[11px] font-bold text-amber-900">
+                    Multiple schools matched &ldquo;{identifier.trim()}&rdquo;. Tap your school:
+                  </p>
+                  <div className="space-y-1.5">
+                    {ambiguousSchools.map((sch) => (
+                      <button
+                        key={sch.id}
+                        type="button"
+                        disabled={loading}
+                        onClick={() => {
+                          handleSelectSchool(sch);
+                          performAdmissionLogin(
+                            identifier,
+                            signInMode === 'parent' ? 'PARENT' : 'STUDENT',
+                            sch
+                          );
+                        }}
+                        className="w-full p-2.5 rounded-lg bg-white hover:bg-emerald-50 border border-amber-200 hover:border-emerald-300 text-left flex items-center justify-between gap-2 transition cursor-pointer"
+                      >
+                        <div className="min-w-0">
+                          <p className="text-xs font-bold text-slate-900 truncate">{sch.name}</p>
+                          <p className="text-[10px] text-slate-500 truncate">
+                            {sch.lga}, {sch.state} • {sch.type}
+                          </p>
+                        </div>
+                        <span className="text-[11px] font-bold text-emerald-700 shrink-0">
+                          Open &rarr;
+                        </span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+
               <form onSubmit={handleSubmit} className="space-y-4">
                 {signInMode === 'staff' ? (
-                  <div>
-                    <label className="block text-xs font-semibold text-slate-700 mb-1.5">
-                      Personal or Official Account Email
-                    </label>
-                    <div className="relative">
-                      <div className="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none text-slate-400">
-                        <Mail className="w-4 h-4" />
-                      </div>
-                      <input
-                        type="email"
-                        value={email}
-                        onChange={(e) => setEmail(e.target.value)}
-                        placeholder="e.g. teacher@school.edu.ng or proprietor@gmail.com"
-                        required
-                        autoComplete="email"
-                        className="w-full pl-10 pr-3.5 py-2.5 text-sm bg-slate-50 focus:bg-white border border-slate-300 focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500 rounded-xl transition"
-                      />
-                    </div>
-                  </div>
-                ) : signInMode === 'parent' ? (
-                  <div>
-                    <label className="block text-xs font-semibold text-slate-700 mb-1.5">
-                      Parent Email or Registered Phone Number
-                    </label>
-                    <div className="relative">
-                      <div className="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none text-slate-400">
-                        <Phone className="w-4 h-4" />
-                      </div>
-                      <input
-                        type="text"
-                        value={identifier}
-                        onChange={(e) => setIdentifier(e.target.value)}
-                        placeholder="e.g. 08031234567 or parent@gmail.com"
-                        required
-                        autoComplete="username"
-                        className="w-full pl-10 pr-3.5 py-2.5 text-sm bg-slate-50 focus:bg-white border border-slate-300 focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500 rounded-xl transition"
-                      />
-                    </div>
-                  </div>
-                ) : (
-                  <div className="space-y-3">
-                    {!selectedSchool && (
-                      <div className="p-3 rounded-xl bg-amber-50 border border-amber-200 text-amber-800 text-xs flex items-center justify-between gap-2">
-                        <span>Select your school first to sign in with an Admission Number.</span>
-                        <button
-                          type="button"
-                          onClick={() => setSchoolSearchOpen(true)}
-                          className="px-2.5 py-1 bg-amber-600 text-white rounded-lg font-bold text-[11px] shrink-0 cursor-pointer"
-                        >
-                          Pick School
-                        </button>
-                      </div>
-                    )}
+                  <>
                     <div>
                       <label className="block text-xs font-semibold text-slate-700 mb-1.5">
-                        Student Admission Number (or Student Email)
+                        Personal or Official Account Email
+                      </label>
+                      <div className="relative">
+                        <div className="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none text-slate-400">
+                          <Mail className="w-4 h-4" />
+                        </div>
+                        <input
+                          type="email"
+                          value={email}
+                          onChange={(e) => setEmail(e.target.value)}
+                          placeholder="e.g. teacher@school.edu.ng or proprietor@gmail.com"
+                          required
+                          autoComplete="email"
+                          className="w-full pl-10 pr-3.5 py-2.5 text-sm bg-slate-50 focus:bg-white border border-slate-300 focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500 rounded-xl transition"
+                        />
+                      </div>
+                    </div>
+
+                    <div>
+                      <div className="flex justify-between items-center mb-1.5">
+                        <label className="block text-xs font-semibold text-slate-700">Password</label>
+                        <button
+                          type="button"
+                          onClick={onForgotPassword}
+                          className="text-xs text-emerald-600 hover:text-emerald-700 font-semibold cursor-pointer"
+                        >
+                          Forgot Password?
+                        </button>
+                      </div>
+                      <div className="relative">
+                        <div className="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none text-slate-400">
+                          <Lock className="w-4 h-4" />
+                        </div>
+                        <input
+                          type={showPassword ? 'text' : 'password'}
+                          value={password}
+                          onChange={(e) => setPassword(e.target.value)}
+                          placeholder="••••••••••••"
+                          required
+                          autoComplete="current-password"
+                          className="w-full pl-10 pr-10 py-2.5 text-sm bg-slate-50 focus:bg-white border border-slate-300 focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500 rounded-xl transition"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => setShowPassword(!showPassword)}
+                          className="absolute inset-y-0 right-0 pr-3.5 flex items-center text-slate-400 hover:text-slate-600"
+                        >
+                          {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                        </button>
+                      </div>
+                    </div>
+                  </>
+                ) : signInMode === 'parent' && !parentUsePassword ? (
+                  <div className="space-y-3">
+                    <div className="p-3 rounded-xl bg-emerald-50 border border-emerald-200 text-[11px] text-emerald-900 flex items-start gap-2">
+                      <ShieldCheck className="w-4 h-4 text-emerald-600 shrink-0 mt-0.5" />
+                      <span>
+                        <strong>Read-only Parent Portal:</strong> Enter your child&apos;s school-generated Admission Number to view results, report cards, attendance, and fees — no password or email required.
+                      </span>
+                    </div>
+                    <div>
+                      <label className="block text-xs font-semibold text-slate-700 mb-1.5">
+                        Child&apos;s Admission Number
                       </label>
                       <div className="relative">
                         <div className="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none text-slate-400">
@@ -573,50 +663,105 @@ export const LoginForm: React.FC<LoginFormProps> = ({
                         <input
                           type="text"
                           value={identifier}
-                          onChange={(e) => setIdentifier(e.target.value)}
+                          onChange={(e) => {
+                            setIdentifier(e.target.value);
+                            if (ambiguousSchools.length > 0) setAmbiguousSchools([]);
+                          }}
                           placeholder="e.g. BMC/2026/0001 or ADM-2025-001"
+                          required
+                          autoComplete="off"
+                          className="w-full pl-10 pr-3.5 py-2.5 text-sm bg-slate-50 focus:bg-white border border-slate-300 focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500 rounded-xl transition"
+                        />
+                      </div>
+                    </div>
+                  </div>
+                ) : signInMode === 'parent' ? (
+                  <>
+                    <div>
+                      <label className="block text-xs font-semibold text-slate-700 mb-1.5">
+                        Parent Email or Registered Phone Number
+                      </label>
+                      <div className="relative">
+                        <div className="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none text-slate-400">
+                          <Phone className="w-4 h-4" />
+                        </div>
+                        <input
+                          type="text"
+                          value={identifier}
+                          onChange={(e) => setIdentifier(e.target.value)}
+                          placeholder="e.g. 08031234567 or parent@gmail.com"
                           required
                           autoComplete="username"
                           className="w-full pl-10 pr-3.5 py-2.5 text-sm bg-slate-50 focus:bg-white border border-slate-300 focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500 rounded-xl transition"
                         />
                       </div>
                     </div>
+                    <div>
+                      <div className="flex justify-between items-center mb-1.5">
+                        <label className="block text-xs font-semibold text-slate-700">Password</label>
+                        <button
+                          type="button"
+                          onClick={onForgotPassword}
+                          className="text-xs text-emerald-600 hover:text-emerald-700 font-semibold cursor-pointer"
+                        >
+                          Forgot Password?
+                        </button>
+                      </div>
+                      <div className="relative">
+                        <div className="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none text-slate-400">
+                          <Lock className="w-4 h-4" />
+                        </div>
+                        <input
+                          type={showPassword ? 'text' : 'password'}
+                          value={password}
+                          onChange={(e) => setPassword(e.target.value)}
+                          placeholder="••••••••••••"
+                          required
+                          autoComplete="current-password"
+                          className="w-full pl-10 pr-10 py-2.5 text-sm bg-slate-50 focus:bg-white border border-slate-300 focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500 rounded-xl transition"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => setShowPassword(!showPassword)}
+                          className="absolute inset-y-0 right-0 pr-3.5 flex items-center text-slate-400 hover:text-slate-600"
+                        >
+                          {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                        </button>
+                      </div>
+                    </div>
+                  </>
+                ) : (
+                  <div className="space-y-3">
+                    <div className="p-3 rounded-xl bg-teal-50 border border-teal-200 text-[11px] text-teal-900 flex items-start gap-2">
+                      <ShieldCheck className="w-4 h-4 text-teal-600 shrink-0 mt-0.5" />
+                      <span>
+                        <strong>Read-only Student Portal:</strong> Enter your school-generated Admission Number to view your results, report cards, attendance, and timetable — no password or email required.
+                      </span>
+                    </div>
+                    <div>
+                      <label className="block text-xs font-semibold text-slate-700 mb-1.5">
+                        Student Admission Number
+                      </label>
+                      <div className="relative">
+                        <div className="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none text-slate-400">
+                          <GraduationCap className="w-4 h-4" />
+                        </div>
+                        <input
+                          type="text"
+                          value={identifier}
+                          onChange={(e) => {
+                            setIdentifier(e.target.value);
+                            if (ambiguousSchools.length > 0) setAmbiguousSchools([]);
+                          }}
+                          placeholder="e.g. BMC/2026/0001 or ADM-2025-001"
+                          required
+                          autoComplete="off"
+                          className="w-full pl-10 pr-3.5 py-2.5 text-sm bg-slate-50 focus:bg-white border border-slate-300 focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500 rounded-xl transition"
+                        />
+                      </div>
+                    </div>
                   </div>
                 )}
-
-                <div>
-                  <div className="flex justify-between items-center mb-1.5">
-                    <label className="block text-xs font-semibold text-slate-700">Password</label>
-                    <button
-                      type="button"
-                      onClick={onForgotPassword}
-                      className="text-xs text-emerald-600 hover:text-emerald-700 font-semibold cursor-pointer"
-                    >
-                      Forgot Password?
-                    </button>
-                  </div>
-                  <div className="relative">
-                    <div className="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none text-slate-400">
-                      <Lock className="w-4 h-4" />
-                    </div>
-                    <input
-                      type={showPassword ? 'text' : 'password'}
-                      value={password}
-                      onChange={(e) => setPassword(e.target.value)}
-                      placeholder="••••••••••••"
-                      required
-                      autoComplete="current-password"
-                      className="w-full pl-10 pr-10 py-2.5 text-sm bg-slate-50 focus:bg-white border border-slate-300 focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500 rounded-xl transition"
-                    />
-                    <button
-                      type="button"
-                      onClick={() => setShowPassword(!showPassword)}
-                      className="absolute inset-y-0 right-0 pr-3.5 flex items-center text-slate-400 hover:text-slate-600"
-                    >
-                      {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-                    </button>
-                  </div>
-                </div>
 
                 <button
                   type="submit"
@@ -627,20 +772,44 @@ export const LoginForm: React.FC<LoginFormProps> = ({
                     <span>Signing in...</span>
                   ) : (
                     <>
-                      <span>Sign In</span>
+                      <span>
+                        {signInMode === 'student'
+                          ? 'View Student Portal'
+                          : signInMode === 'parent' && !parentUsePassword
+                          ? 'View Parent Portal'
+                          : 'Sign In'}
+                      </span>
                       <ArrowRight className="w-4 h-4" />
                     </>
                   )}
                 </button>
               </form>
 
-              {(signInMode === 'parent' || signInMode === 'student') && (
-                <div className="mt-4 p-3 rounded-xl bg-slate-50 border border-slate-200 text-[11px] text-slate-600 flex items-center justify-between gap-2">
-                  <span>First time logging in without a password yet?</span>
+              {signInMode === 'parent' && (
+                <div className="mt-3 text-center">
                   <button
                     type="button"
                     onClick={() => {
-                      setActivateMode(signInMode === 'parent' ? 'PARENT' : 'STUDENT');
+                      setParentUsePassword(!parentUsePassword);
+                      setAmbiguousSchools([]);
+                      setError(null);
+                    }}
+                    className="text-[11px] font-semibold text-slate-500 hover:text-emerald-700 underline cursor-pointer"
+                  >
+                    {parentUsePassword
+                      ? "Use Child's Admission Number Only (No Password)"
+                      : 'Have a registered parent email/phone & password? Sign in with password'}
+                  </button>
+                </div>
+              )}
+
+              {signInMode === 'parent' && parentUsePassword && (
+                <div className="mt-3 p-3 rounded-xl bg-slate-50 border border-slate-200 text-[11px] text-slate-600 flex items-center justify-between gap-2">
+                  <span>Need to link an activated email &amp; password?</span>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setActivateMode('PARENT');
                       setMainTab('activate');
                       if (!selectedSchool) setSchoolSearchOpen(true);
                     }}

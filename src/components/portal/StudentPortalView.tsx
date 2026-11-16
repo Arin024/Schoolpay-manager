@@ -297,11 +297,14 @@ export const StudentPortalView: React.FC = () => {
               <p className="text-[11px] uppercase tracking-wider font-bold text-slate-400">Account &amp; School</p>
               <p className="flex items-center gap-1.5 text-slate-600">
                 <Mail className="w-3.5 h-3.5 text-slate-400" />
-                <span>{user?.email || data.student.email || '—'}</span>
+                <span>
+                  {data.student.email ||
+                    (user?.email && !user.email.endsWith('.bursariq.local') ? user.email : 'Not recorded (Admission-number portal)')}
+                </span>
               </p>
               <p className="flex items-center gap-1.5 text-slate-600">
                 <Phone className="w-3.5 h-3.5 text-slate-400" />
-                <span>{data.student.phone || data.student.guardian_phone || 'Not recorded'}</span>
+                <span>{data.student.phone || 'Not recorded'}</span>
               </p>
               <p className="text-slate-600">School: {data.school?.name || '—'}</p>
               <p className="text-slate-600">State: {data.student.state || '—'}</p>

@@ -182,6 +182,19 @@ export const api = {
     });
   },
 
+  async admissionLogin(credentials: {
+    admission_number: string;
+    portal_type: 'STUDENT' | 'PARENT';
+    school_id?: string;
+    school_slug?: string;
+  }) {
+    return safeFetch(`${API_BASE}/public/portal/admission-login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(credentials),
+    });
+  },
+
   // Unauthenticated Public School Portal Directory, Verification & Self-Activation
   async searchPublicSchools(query = ''): Promise<{ success: boolean; schools: PublicSchoolSummary[] }> {
     const params = new URLSearchParams();

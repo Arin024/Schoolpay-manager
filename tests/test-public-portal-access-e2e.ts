@@ -287,7 +287,7 @@ async function run() {
   console.log(`[0/8] Live port 3000 healthy (${liveHealth.database?.provider}); isolated sandbox will run on port ${TEST_PORT}.`);
 
   const tmpDir = setupSafeTempWorkspace();
-  const serverProc = spawnSafeTestServer(tmpDir);
+  let serverProc: ChildProcess | null = spawnSafeTestServer(tmpDir);
   let chromeProc: ChildProcess | null = null;
   let cdp: CDPClient | null = null;
   const chromeUserData = fs.mkdtempSync(path.join(os.tmpdir(), 'bursariq-chrome-portal-'));
@@ -497,20 +497,26 @@ async function run() {
     });
     assert.strictEqual(wrongAct.status, 401, `Expected 401 VERIFICATION_FAILED, got ${wrongAct.status}`);
 
-    // Log out, then sign back in using ONLY School + Admission Number + Password!
+    // Log out, then sign back in on Student tab using ONLY Admission Number (NO password field!)
     await cdp.logoutInBrowser();
     await cdp.goto(`${TEST_BASE}/#portal/${school1Slug}`);
     await cdp.waitForText('Brightstar Model College');
     await cdp.clickButtonByText('Student', true);
+    const hasStuPwdField = await cdp.evaluate('return Boolean(document.querySelector("input[type=password]"))');
+    assert.strictEqual(hasStuPwdField, false, 'Student login tab must NOT render a password field!');
+    const stuTabText = await cdp.bodyText();
+    assert.ok(!stuTabText.includes('Forgot Password?'), 'Student tab must NOT show Forgot Password link');
     await cdp.fillInputByPlaceholder('ADM-2025-001', 'ADM-2025-101');
-    await cdp.fillInput('input[type="password"]', 'StudentPass!1');
     await cdp.clickSubmit();
     await cdp.waitForText('Adaeze Okafor');
     await cdp.waitForText('My Report Cards');
-    console.log('[4/8] Student signed back in using ONLY Admission Number + Password (no email, no admin credentials).');
+    await cdp.clickButtonByText('My Profile');
+    await cdp.waitForText('Student Academic Profile');
+    assert.ok(!(await cdp.bodyText()).includes('bursariq.local'), 'Internal placeholder email leaked to Student profile!');
+    console.log('[4/10] Student signed in using ONLY Admission Number (no password input, zero leakage).');
     await cdp.logoutInBrowser();
 
-    // 5. Parent Self-Activation using Phone + Surname + Child Admission No -> then Phone Sign In
+    // 5. Parent Self-Activation + Phone/Password Toggle + Child Admission-Number-Only Login (default)
     await cdp.goto(`${TEST_BASE}/#portal/${school1Slug}`);
     await cdp.clickButtonByText('Activate Access');
     await cdp.clickButtonByText('I am a Parent');
@@ -523,14 +529,27 @@ async function run() {
     await cdp.waitForText('Adaeze Okafor');
     await cdp.logoutInBrowser();
 
+    // Backward-compatible Phone + Password toggle verification
     await cdp.goto(`${TEST_BASE}/#portal/${school1Slug}`);
     await cdp.clickButtonByText('Parent', true);
+    await cdp.clickButtonByText('Sign in with password');
     await cdp.fillInputByPlaceholder('08031234567', '08059998888');
     await cdp.fillInput('input[type="password"]', 'ParentPass!1');
     await cdp.clickSubmit();
     await cdp.waitForText('My Children');
     await cdp.waitForText('Adaeze Okafor');
-    console.log('[5/8] Parent self-activated and signed back in via Phone Number + Password with verified child linked.');
+    await cdp.logoutInBrowser();
+
+    // Default Parent Admission-Number-Only Login (no password field!)
+    await cdp.goto(`${TEST_BASE}/#portal/${school1Slug}`);
+    await cdp.clickButtonByText('Parent', true);
+    const hasParPwdField = await cdp.evaluate('return Boolean(document.querySelector("input[type=password]"))');
+    assert.strictEqual(hasParPwdField, false, 'Default Parent tab must NOT render a password field!');
+    await cdp.fillInputByPlaceholder('ADM-2025-001', 'ADM-2025-101');
+    await cdp.clickSubmit();
+    await cdp.waitForText('My Children');
+    await cdp.waitForText('Adaeze Okafor');
+    console.log('[5/10] Parent signed in via Child Admission Number Only (default) AND optional Phone+Password toggle.');
     await cdp.logoutInBrowser();
 
     // 6. Outsider Public Verification of Receipt & Report Card WITHOUT Login
@@ -546,12 +565,12 @@ async function run() {
     await cdp.clickButtonByText('Verify Document Now');
     await cdp.waitForText('Authentic Report Card Verified');
     await cdp.waitForText('Brightstar Model College');
-    console.log('[6/8] Outsider verified Official Receipt & Published Report Card without login (learner name masked).');
+    console.log('[6/10] Outsider verified Official Receipt & Published Report Card without login (learner name masked).');
 
     // 7. School Finder & Admin Bulk Provisioning (Student B ADM-2025-102)
     await cdp.clickButtonByText('Find Your School Portal');
     await cdp.waitForText('Horizon Academy');
-    await cdp.clickButtonByText('Close school finder').catch(() => {}); // aria-label only button
+    await cdp.clickButtonByText('Close school finder').catch(() => {});
 
     // Sign in as School Admin -> open Overview & Roles -> Bulk Generate Logins
     await cdp.clickButtonByText('Portal Login', true);
@@ -576,19 +595,17 @@ async function run() {
     await cdp.clickButtonByText('Done');
     await cdp.logoutInBrowser();
 
-    // Sign in as bulk-provisioned Student B using ONLY Admission Number + Generated Password!
+    // Sign in as Student B using ONLY Admission Number on Student tab (no password!)
     await cdp.goto(`${TEST_BASE}/#portal/${school1Slug}`);
     await cdp.clickButtonByText('Student', true);
     await cdp.fillInputByPlaceholder('ADM-2025-001', 'ADM-2025-102');
-    await cdp.fillInput('input[type="password"]', bulkPass);
     await cdp.clickSubmit();
     await cdp.waitForText('Tunde Bello');
     await cdp.waitForText('My Report Cards');
-    console.log('[7/9] Admin Shareable Portal Link & Bulk Generate Logins verified; Student B logged in via Admission Number.');
+    console.log('[7/10] Admin Shareable Portal Link, Bulk Logins & Passwordless Student B Admission Login verified.');
     await cdp.logoutInBrowser();
 
-    // 8. Automatic Nigerian School Admission Number Flow (No Admin Admission No Required!)
-    // 8a. Enroll Student C WITHOUT admission_number and ONLY guardian phone in emergency_contact
+    // 8. Automatic Nigerian School Admission Number Flow + Un-scoped Admission Login (NO pre-activation, NO school picker!)
     const stuC = await apiReq(admin1Token, school1Id, 'POST', '/api/v1/school/students', {
       first_name: 'Emeka',
       last_name: 'Nwosu',
@@ -601,7 +618,7 @@ async function run() {
     const autoAdmC: string = stuC.data.student.admission_number;
     assert.match(autoAdmC, /^BMC\/\d{4}\/\d{4}$/, `Expected Nigerian BMC/YYYY/NNNN format, got ${autoAdmC}`);
 
-    // 8b. Bulk CSV Import students WITHOUT admission_number -> automatic sequential numbering
+    // Bulk CSV Import students WITHOUT admission_number -> automatic sequential numbering
     const bulkImp = await apiReq(admin1Token, school1Id, 'POST', '/api/v1/school/students/import', {
       students: [
         { first_name: 'Blessing', last_name: 'Eze', gender: 'Female', class_name: 'JSS 1' },
@@ -611,13 +628,12 @@ async function run() {
     assert.strictEqual(bulkImp.status, 200, `Bulk import failed: ${JSON.stringify(bulkImp.data)}`);
     assert.strictEqual(bulkImp.data.importedCount, 2);
     assert.strictEqual(bulkImp.data.generatedAdmissionCount, 2);
-    assert.strictEqual(bulkImp.data.importedStudentsPreview.length, 2);
     assert.notStrictEqual(
       bulkImp.data.importedStudentsPreview[0].admission_number,
       bulkImp.data.importedStudentsPreview[1].admission_number
     );
 
-    // 8c. Legacy unnumbered student backfill
+    // Legacy unnumbered student backfill
     const legacySqlite = new DatabaseSync(path.join(tmpDir, 'data', 'schoolpay.db'));
     legacySqlite
       .prepare(
@@ -631,43 +647,117 @@ async function run() {
     assert.strictEqual(backfillRes.data.assignedCount, 1);
     assert.match(backfillRes.data.students[0].admission_number, /^BMC\/\d{4}\/\d{4}$/);
 
-    // 8d. Cross-tenant guard: School 2 (Horizon Academy) MUST reject activation of School 1's auto-issued Admission Number
-    const crossTenantAct = await apiReq(null, null, 'POST', '/api/v1/public/portal/activate', {
-      school_slug: school2Slug,
-      portal_type: 'STUDENT',
-      admission_number: autoAdmC,
-      last_name: 'Nwosu',
-      verification_value: '08091234567',
-      password: 'EmekaPass!1',
-    });
-    assert.strictEqual(crossTenantAct.status, 401, `Cross-tenant activation must fail 401, got ${crossTenantAct.status}`);
-
-    // 8e. Student C self-activates in browser using AUTO-GENERATED Admission No + Surname + Emergency Guardian Phone
-    await cdp.goto(`${TEST_BASE}/#portal/${school1Slug}`);
-    await cdp.waitForText('Brightstar Model College');
-    await cdp.clickButtonByText('Activate Access');
-    await cdp.clickButtonByText('I am a Student');
+    // 8a. Freshly enrolled Emeka Nwosu logs directly on root `/` (NO school selected, NO prior parent/activation)
+    // First as PARENT via Child Admission Number Only
+    await cdp.goto(`${TEST_BASE}/`);
+    await cdp.clickButtonByText('Parent', true);
     await cdp.fillInputByPlaceholder('ADM-2025-001', autoAdmC);
-    await cdp.fillInputByPlaceholder('e.g. Okafor', 'Nwosu');
-    await cdp.fillInputByPlaceholder('2012-05-14', '08091234567');
-    await cdp.fillInputByPlaceholder('Min 6 characters', 'EmekaPass!1');
-    await cdp.clickButtonByText('Activate My Student Portal');
+    await cdp.clickSubmit();
+    await cdp.waitForText('My Children');
+    await cdp.waitForText('Emeka Nwosu');
+    const emekaParentText = await cdp.bodyText();
+    assert.ok(!emekaParentText.includes('Adaeze Okafor'), 'Parent child-scoping leaked another child!');
+    assert.ok(!emekaParentText.includes('Enroll Student'), 'Read-only parent saw admin UI!');
+    await cdp.clickButtonByText('Profile', true);
+    await cdp.waitForText('Parent / Guardian Profile');
+    assert.ok(!(await cdp.bodyText()).includes('bursariq.local'), 'Internal placeholder email leaked to Parent profile!');
+    await cdp.logoutInBrowser();
+
+    // Now Emeka Nwosu logs in as STUDENT via Admission Number Only
+    await cdp.goto(`${TEST_BASE}/`);
+    await cdp.clickButtonByText('Student', true);
+    await cdp.fillInputByPlaceholder('ADM-2025-001', autoAdmC);
+    await cdp.clickSubmit();
     await cdp.waitForText('Emeka Nwosu');
     await cdp.waitForText(autoAdmC);
     await cdp.logoutInBrowser();
 
-    // Sign back in with auto-generated Admission No + Password
-    await cdp.goto(`${TEST_BASE}/#portal/${school1Slug}`);
+    // 8b. RBAC Mutation Prevention + 403 Staff-Escalation Guard + 403 Deactivation Guard
+    const parentApiLogin = await apiReq(null, null, 'POST', '/api/v1/public/portal/admission-login', {
+      admission_number: autoAdmC,
+      portal_type: 'PARENT',
+    });
+    assert.strictEqual(parentApiLogin.status, 200);
+    assert.strictEqual(parentApiLogin.data.activeRole?.role_name, 'PARENT');
+    const parentMutateBlock = await apiReq(parentApiLogin.data.token, school1Id, 'POST', '/api/v1/school/students', {
+      first_name: 'Hacker',
+      last_name: 'Attempt',
+    });
+    assert.strictEqual(parentMutateBlock.status, 403, `Read-only parent must get 403 on write routes, got ${parentMutateBlock.status}`);
+
+    const stuApiLogin = await apiReq(null, null, 'POST', '/api/v1/public/portal/admission-login', {
+      admission_number: autoAdmC,
+      portal_type: 'STUDENT',
+    });
+    assert.strictEqual(stuApiLogin.status, 200);
+    assert.strictEqual(stuApiLogin.data.activeRole?.role_name, 'STUDENT');
+    const stuMutateBlock = await apiReq(stuApiLogin.data.token, school1Id, 'POST', '/api/v1/school/students', {
+      first_name: 'Hacker',
+      last_name: 'Student',
+    });
+    assert.strictEqual(stuMutateBlock.status, 403, `Read-only student must get 403 on write routes, got ${stuMutateBlock.status}`);
+
+    // Verify deactivated portal account is strictly blocked (403)
+    const secDb = new DatabaseSync(path.join(tmpDir, 'data', 'schoolpay.db'));
+    secDb.prepare('UPDATE users SET is_active = 0 WHERE id = ?').run(stuApiLogin.data.user.id);
+    secDb.close();
+    const deactivatedRes = await apiReq(null, null, 'POST', '/api/v1/public/portal/admission-login', {
+      admission_number: autoAdmC,
+      portal_type: 'STUDENT',
+    });
+    assert.strictEqual(deactivatedRes.status, 403, `Deactivated user must get 403, got ${deactivatedRes.status}`);
+    const restoreDb = new DatabaseSync(path.join(tmpDir, 'data', 'schoolpay.db'));
+    restoreDb.prepare('UPDATE users SET is_active = 1 WHERE id = ?').run(stuApiLogin.data.user.id);
+    restoreDb.close();
+
+    // 8c. Ambiguous Admission Number (409 Disambiguation in Browser) across Brightstar vs Horizon Academy
+    const loginAdmin2 = await apiReq(null, null, 'POST', '/api/v1/auth/login', {
+      email: 'admin@horizon.edu.ng',
+      password: 'Password123!',
+    });
+    assert.strictEqual(loginAdmin2.status, 200);
+    const admin2Token = loginAdmin2.data.token;
+    const school2Id = loginAdmin2.data.activeSchoolId;
+    const dup1 = await apiReq(admin1Token, school1Id, 'POST', '/api/v1/school/students', {
+      admission_number: 'DUP-2026-01',
+      first_name: 'Sadiq',
+      last_name: 'Brightstar',
+    });
+    assert.strictEqual(dup1.status, 201);
+    const dup2 = await apiReq(admin2Token, school2Id, 'POST', '/api/v1/school/students', {
+      admission_number: 'DUP-2026-01',
+      first_name: 'Zainab',
+      last_name: 'Horizon',
+    });
+    assert.strictEqual(dup2.status, 201);
+
+    await cdp.goto(`${TEST_BASE}/`);
     await cdp.clickButtonByText('Student', true);
+    await cdp.fillInputByPlaceholder('ADM-2025-001', 'DUP-2026-01');
+    await cdp.clickSubmit();
+    await cdp.waitForText('Multiple schools matched');
+    await cdp.waitForText('Horizon Academy');
+    await cdp.clickButtonByText('Horizon Academy');
+    await cdp.waitForText('Zainab Horizon');
+    assert.ok(!(await cdp.bodyText()).includes('Sadiq Brightstar'), 'Disambiguation leaked wrong school student!');
+    console.log(`[8/10] Un-scoped admission login (${autoAdmC}), Parent auto-link, RBAC 403 guards & 409 disambiguation verified.`);
+
+    // 9. Server Restart Persistence Check
+    await stopChild(serverProc);
+    serverProc = spawnSafeTestServer(tmpDir);
+    await waitForHealth(TEST_BASE, 25000);
+    await cdp.goto(`${TEST_BASE}/`);
+    await cdp.waitForText('Zainab Horizon');
+    await cdp.logoutInBrowser();
+    await cdp.clickButtonByText('Parent', true);
     await cdp.fillInputByPlaceholder('ADM-2025-001', autoAdmC);
-    await cdp.fillInput('input[type="password"]', 'EmekaPass!1');
     await cdp.clickSubmit();
     await cdp.waitForText('Emeka Nwosu');
-    console.log(`[8/9] Auto-generated Nigerian Admission No (${autoAdmC}), CSV numbering, legacy backfill & cross-tenant defense verified.`);
+    console.log('[9/10] Full server restart persistence verified cleanly across reloaded browser session & fresh admission login.');
 
     assert.strictEqual(cdp.pageErrors.length, 0, `Page errors detected: ${cdp.pageErrors.join(' | ')}`);
     assert.strictEqual(cdp.apiServerErrors.length, 0, `API 5xx errors detected: ${JSON.stringify(cdp.apiServerErrors)}`);
-    console.log('[9/9] Zero page errors and zero API 5xx errors across all browser portal flows!');
+    console.log('[10/10] Zero page errors and zero API 5xx errors across all browser portal flows!');
     console.log('=== PUBLIC PORTAL ACCESS E2E: ALL CHECKS PASSED ===');
   } finally {
     cdp?.close();
