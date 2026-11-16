@@ -16,6 +16,7 @@ import {
   Send,
   History,
   Save,
+  Award,
 } from 'lucide-react';
 import { api } from '../../services/api.js';
 import { useAuth } from '../../context/AuthContext.js';
@@ -27,6 +28,8 @@ import {
   PerformanceOverviewData,
   ReportCardItem,
   ScoreCorrectionLogItem,
+  SessionReportCardItem,
+  Student,
   StudentScoreItem,
   SubjectItem,
 } from '../../types/index.js';
@@ -116,8 +119,11 @@ export const SchoolPerformanceView: React.FC<SchoolPerformanceViewProps> = ({ re
   const [correctionSaving, setCorrectionSaving] = useState(false);
 
   // Report Cards state
+  const [reportMode, setReportMode] = useState<'TERM' | 'SESSION'>('TERM');
   const [reportCards, setReportCards] = useState<ReportCardItem[]>([]);
   const [reportsLoading, setReportsLoading] = useState(false);
+  const [sessionReportCards, setSessionReportCards] = useState<SessionReportCardItem[]>([]);
+  const [sessionReportsLoading, setSessionReportsLoading] = useState(false);
   const [rcFilters, setRcFilters] = useState({
     academic_session_id: '',
     term_id: '',
@@ -125,6 +131,7 @@ export const SchoolPerformanceView: React.FC<SchoolPerformanceViewProps> = ({ re
     status: '',
   });
   const [generatingRc, setGeneratingRc] = useState(false);
+  const [generatingSessionRc, setGeneratingSessionRc] = useState(false);
   const [printingRc, setPrintingRc] = useState<ReportCardItem | null>(null);
   const [remarksModalRc, setRemarksModalRc] = useState<ReportCardItem | null>(null);
   const [remarksForm, setRemarksForm] = useState({
@@ -133,6 +140,22 @@ export const SchoolPerformanceView: React.FC<SchoolPerformanceViewProps> = ({ re
     status: 'DRAFT' as 'DRAFT' | 'REVIEW' | 'APPROVED',
   });
   const [remarksSaving, setRemarksSaving] = useState(false);
+  const [sessionRemarksModalRc, setSessionRemarksModalRc] = useState<SessionReportCardItem | null>(null);
+  const [sessionRemarksForm, setSessionRemarksForm] = useState({
+    promotion_status: 'PROMOTED',
+    teacher_remark: '',
+    principal_remark: '',
+    status: 'DRAFT' as 'DRAFT' | 'REVIEW' | 'APPROVED',
+  });
+  const [sessionRemarksSaving, setSessionRemarksSaving] = useState(false);
+
+  // On-demand Report Generator state (used by Read-Only Teachers and Admins for quick previews)
+  const [rosterStudents, setRosterStudents] = useState<Student[]>([]);
+  const [onDemandType, setOnDemandType] = useState<'TERM' | 'SESSION'>('TERM');
+  const [onDemandStudentId, setOnDemandStudentId] = useState('');
+  const [onDemandSessionId, setOnDemandSessionId] = useState('');
+  const [onDemandTermId, setOnDemandTermId] = useState('');
+  const [onDemandGenerating, setOnDemandGenerating] = useState(false);
 
   // Settings edit state
   const [settingsSaving, setSettingsSaving] = useState(false);
@@ -147,12 +170,15 @@ export const SchoolPerformanceView: React.FC<SchoolPerformanceViewProps> = ({ re
 
   const loadBootstrap = async () => {
     try {
-      const [sessRes, clsRes, subRes, setRes, exRes] = await Promise.all([
+      const [sessRes, clsRes, subRes, setRes, exRes, stuRes] = await Promise.all([
         api.getSchoolAcademicSessions().catch(() => ({ sessions: [] })),
         api.getSchoolClasses().catch(() => ({ classes: [] })),
         api.getSubjects().catch(() => ({ subjects: [] })),
         api.getAcademicSettings().catch(() => ({ settings: null })),
         api.getExaminations().catch(() => ({ examinations: [] })),
+        readOnly
+          ? api.getTeacherDashboard().then((d) => ({ students: d.students || [] })).catch(() => ({ students: [] }))
+          : api.getSchoolStudents({ limit: 500 }).catch(() => ({ students: [] })),
       ]);
       const loadedSessions = sessRes.sessions || [];
       setSessions(loadedSessions);
@@ -160,6 +186,11 @@ export const SchoolPerformanceView: React.FC<SchoolPerformanceViewProps> = ({ re
       setSubjects(subRes.subjects || []);
       if (setRes.settings) setSettings(setRes.settings);
       setExams(exRes.examinations || []);
+      const loadedStudents = stuRes.students || [];
+      setRosterStudents(loadedStudents);
+      if (loadedStudents.length > 0) {
+        setOnDemandStudentId((prev) => prev || loadedStudents[0].id);
+      }
 
       const activeSess = loadedSessions.find((s) => s.status === 'ACTIVE') || loadedSessions[0];
       const activeTerm = activeSess?.terms?.find((t) => t.status === 'ACTIVE') || activeSess?.terms?.[0];
@@ -176,6 +207,8 @@ export const SchoolPerformanceView: React.FC<SchoolPerformanceViewProps> = ({ re
           academic_session_id: prev.academic_session_id || activeSess.id,
           term_id: prev.term_id || activeTerm?.id || '',
         }));
+        setOnDemandSessionId((prev) => prev || activeSess.id);
+        setOnDemandTermId((prev) => prev || activeTerm?.id || '');
       }
       if (subRes.subjects?.length) {
         setScoreSubjectId((prev) => prev || subRes.subjects[0].id);
@@ -251,6 +284,22 @@ export const SchoolPerformanceView: React.FC<SchoolPerformanceViewProps> = ({ re
     }
   };
 
+  const loadSessionReportCards = async (f = rcFilters) => {
+    setSessionReportsLoading(true);
+    try {
+      const res = await api.getSessionReportCards({
+        academic_session_id: f.academic_session_id || undefined,
+        class_id: f.class_id || undefined,
+        status: f.status || undefined,
+      });
+      setSessionReportCards(res.sessionReportCards || []);
+    } catch (err: any) {
+      showMsg('err', err?.message || 'Failed to load full-session cumulative report cards');
+    } finally {
+      setSessionReportsLoading(false);
+    }
+  };
+
   useEffect(() => {
     loadBootstrap();
     loadOverview();
@@ -258,8 +307,14 @@ export const SchoolPerformanceView: React.FC<SchoolPerformanceViewProps> = ({ re
 
   useEffect(() => {
     if (subTab === 'exams') loadExams();
-    if (subTab === 'reports') loadReportCards();
-  }, [subTab, examFilterStatus]);
+    if (subTab === 'reports') {
+      if (reportMode === 'SESSION') {
+        loadSessionReportCards();
+      } else {
+        loadReportCards();
+      }
+    }
+  }, [subTab, examFilterStatus, reportMode]);
 
   const selectedSessionObj = sessions.find((s) => s.id === filters.academic_session_id);
   const rcSessionObj = sessions.find((s) => s.id === rcFilters.academic_session_id);
@@ -459,6 +514,111 @@ export const SchoolPerformanceView: React.FC<SchoolPerformanceViewProps> = ({ re
       showMsg('ok', `Published report card for ${rc.student_name}.`);
     } catch (err: any) {
       showMsg('err', err?.message || 'Failed to publish report card');
+    }
+  };
+
+  const handleGenerateSessionReportCards = async () => {
+    if (!rcFilters.academic_session_id) {
+      showMsg('err', 'Select an Academic Session first to compile Full-Session Cumulative Reports.');
+      return;
+    }
+    setGeneratingSessionRc(true);
+    try {
+      const res = await api.generateSessionReportCards({
+        academic_session_id: rcFilters.academic_session_id,
+        class_id: rcFilters.class_id || undefined,
+      });
+      await loadSessionReportCards();
+      showMsg('ok', `Generated ${res.count} Full-Session Cumulative report card(s).`);
+    } catch (err: any) {
+      showMsg('err', err?.message || 'Failed to generate session cumulative report cards');
+    } finally {
+      setGeneratingSessionRc(false);
+    }
+  };
+
+  const handlePublishClassSessionReportCards = async () => {
+    if (!rcFilters.academic_session_id) {
+      showMsg('err', 'Select an Academic Session first.');
+      return;
+    }
+    try {
+      const res = await api.publishClassSessionReportCards({
+        academic_session_id: rcFilters.academic_session_id,
+        class_id: rcFilters.class_id || undefined,
+      });
+      await loadSessionReportCards();
+      showMsg('ok', `Published ${res.publishedCount} Full-Session Cumulative report card(s).`);
+    } catch (err: any) {
+      showMsg('err', err?.message || 'Failed to publish session report cards');
+    }
+  };
+
+  const handleViewPrintSessionReportCard = async (src: SessionReportCardItem) => {
+    try {
+      const res = await api.getSessionReportCardDetail(src.id);
+      setPrintingRc(res.sessionReportCard);
+    } catch (err: any) {
+      showMsg('err', err?.message || 'Failed to load full-session report card details');
+    }
+  };
+
+  const handleSaveSessionRemarks = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!sessionRemarksModalRc) return;
+    setSessionRemarksSaving(true);
+    try {
+      await api.updateSessionReportCardRemarks(sessionRemarksModalRc.id, sessionRemarksForm);
+      setSessionRemarksModalRc(null);
+      await loadSessionReportCards();
+      showMsg('ok', 'Session cumulative report remarks & promotion status saved.');
+    } catch (err: any) {
+      showMsg('err', err?.message || 'Failed to update session report card');
+    } finally {
+      setSessionRemarksSaving(false);
+    }
+  };
+
+  const handlePublishSingleSessionRc = async (src: SessionReportCardItem) => {
+    try {
+      await api.publishSessionReportCard(src.id);
+      await loadSessionReportCards();
+      showMsg('ok', `Published Full-Session report card for ${src.student_name}.`);
+    } catch (err: any) {
+      showMsg('err', err?.message || 'Failed to publish session report card');
+    }
+  };
+
+  const handleOnDemandCompile = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!onDemandStudentId || !onDemandSessionId) {
+      showMsg('err', 'Select a Student and Academic Session first.');
+      return;
+    }
+    if (onDemandType === 'TERM' && !onDemandTermId) {
+      showMsg('err', 'Select a Term for End-of-Term Report Card.');
+      return;
+    }
+    setOnDemandGenerating(true);
+    try {
+      const res = readOnly
+        ? await api.generateTeacherReportCard({
+            student_id: onDemandStudentId,
+            academic_session_id: onDemandSessionId,
+            term_id: onDemandType === 'TERM' ? onDemandTermId : undefined,
+            report_type: onDemandType,
+          })
+        : await api.compileSchoolReportCardPreview({
+            student_id: onDemandStudentId,
+            academic_session_id: onDemandSessionId,
+            term_id: onDemandType === 'TERM' ? onDemandTermId : undefined,
+            report_type: onDemandType,
+          });
+      setPrintingRc(res.reportCard);
+    } catch (err: any) {
+      showMsg('err', err?.message || 'Failed to compile report card');
+    } finally {
+      setOnDemandGenerating(false);
     }
   };
 
@@ -1453,191 +1613,454 @@ export const SchoolPerformanceView: React.FC<SchoolPerformanceViewProps> = ({ re
       )}
 
       {/* ===================================================================== */}
-      {/* SUB-TAB 4: REPORT CARDS */}
+      {/* SUB-TAB 4: REPORT CARDS (END-OF-TERM & FULL-SESSION CUMULATIVE) */}
       {/* ===================================================================== */}
       {subTab === 'reports' && (
-        <div className="bg-white rounded-2xl border border-slate-200 p-6 space-y-5">
-          <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4 pb-4 border-b border-slate-200">
-            <div>
-              <h3 className="text-sm font-bold text-slate-900">Digital Report Cards</h3>
-              <p className="text-xs text-slate-500">
-                Compile term scores, attendance, conduct, and official remarks into verifiable digital report cards.
-              </p>
+        <div className="space-y-6">
+          {/* Instant / On-Demand End-of-Term or Session Report Card Generator (Works for Teachers Read-Only & Admins) */}
+          <form
+            onSubmit={handleOnDemandCompile}
+            className="bg-white rounded-2xl border border-slate-200 p-5 space-y-4 text-xs"
+          >
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-slate-100">
+              <div>
+                <h3 className="text-sm font-bold text-slate-900">
+                  Instant End-of-Term &amp; Full-Session Report Card Generator
+                </h3>
+                <p className="text-slate-500 mt-0.5">
+                  {readOnly
+                    ? 'Compile and print End-of-Term or Full-Session Cumulative results for any student without altering official school records.'
+                    : 'Preview and print any student’s End-of-Term or Full-Session Cumulative performance result on demand.'}
+                </p>
+              </div>
+              <div className="inline-flex p-1 bg-slate-100 rounded-xl shrink-0">
+                <button
+                  type="button"
+                  onClick={() => setOnDemandType('TERM')}
+                  className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition cursor-pointer whitespace-nowrap ${
+                    onDemandType === 'TERM'
+                      ? 'bg-white text-slate-900 shadow-xs'
+                      : 'text-slate-600 hover:text-slate-900'
+                  }`}
+                >
+                  End-of-Term Report
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setOnDemandType('SESSION')}
+                  className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition cursor-pointer whitespace-nowrap ${
+                    onDemandType === 'SESSION'
+                      ? 'bg-white text-slate-900 shadow-xs'
+                      : 'text-slate-600 hover:text-slate-900'
+                  }`}
+                >
+                  Full-Session Cumulative
+                </button>
+              </div>
             </div>
-            {!readOnly && (
-              <div className="flex flex-wrap items-center gap-2">
-                <button
-                  type="button"
-                  disabled={generatingRc}
-                  onClick={handleGenerateReportCards}
-                  className="px-4 py-2 bg-slate-900 hover:bg-slate-800 text-white rounded-xl text-xs font-bold cursor-pointer disabled:opacity-50"
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 items-end">
+              <div>
+                <label className="block font-semibold text-slate-700 mb-1">Student</label>
+                <select
+                  value={onDemandStudentId}
+                  onChange={(e) => setOnDemandStudentId(e.target.value)}
+                  className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl"
                 >
-                  {generatingRc ? 'Generating...' : 'Generate / Recalculate Reports'}
-                </button>
-                <button
-                  type="button"
-                  onClick={handlePublishClassReportCards}
-                  className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold inline-flex items-center gap-1.5 cursor-pointer"
+                  <option value="">Select Student...</option>
+                  {rosterStudents.map((st) => (
+                    <option key={st.id} value={st.id}>
+                      {st.full_name} ({st.admission_number || st.class_name || 'Student'})
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div>
+                <label className="block font-semibold text-slate-700 mb-1">Academic Session</label>
+                <select
+                  value={onDemandSessionId}
+                  onChange={(e) => {
+                    const nextSessId = e.target.value;
+                    setOnDemandSessionId(nextSessId);
+                    const matched = sessions.find((s) => s.id === nextSessId);
+                    setOnDemandTermId(matched?.terms?.[0]?.id || '');
+                  }}
+                  className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl"
                 >
-                  <Send className="w-3.5 h-3.5" />
-                  <span>Publish Filtered Reports</span>
+                  <option value="">Select Session...</option>
+                  {sessions.map((s) => (
+                    <option key={s.id} value={s.id}>
+                      {s.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              {onDemandType === 'TERM' && (
+                <div>
+                  <label className="block font-semibold text-slate-700 mb-1">Term</label>
+                  <select
+                    value={onDemandTermId}
+                    onChange={(e) => setOnDemandTermId(e.target.value)}
+                    className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl"
+                  >
+                    <option value="">Select Term...</option>
+                    {(sessions.find((s) => s.id === onDemandSessionId)?.terms || []).map((t) => (
+                      <option key={t.id} value={t.id}>
+                        {t.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
+
+              <div className={onDemandType === 'SESSION' ? 'lg:col-span-2 flex justify-end' : ''}>
+                <button
+                  type="submit"
+                  disabled={onDemandGenerating || !onDemandStudentId || !onDemandSessionId}
+                  className="w-full sm:w-auto px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl font-bold inline-flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-50 whitespace-nowrap"
+                >
+                  <Printer className="w-3.5 h-3.5" />
+                  <span>{onDemandGenerating ? 'Compiling...' : 'Generate & View Report'}</span>
                 </button>
+              </div>
+            </div>
+          </form>
+
+          {/* Official Report Cards Archive & Batch Publishing */}
+          <div className="bg-white rounded-2xl border border-slate-200 p-6 space-y-5">
+            <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4 pb-4 border-b border-slate-200">
+              <div className="space-y-2">
+                <h3 className="text-sm font-bold text-slate-900">Official Digital Report Cards Registry</h3>
+                <div className="inline-flex p-1 bg-slate-100 rounded-xl">
+                  <button
+                    type="button"
+                    onClick={() => setReportMode('TERM')}
+                    className={`px-3.5 py-1.5 rounded-lg text-xs font-semibold transition cursor-pointer whitespace-nowrap ${
+                      reportMode === 'TERM'
+                        ? 'bg-white text-slate-900 shadow-xs'
+                        : 'text-slate-600 hover:text-slate-900'
+                    }`}
+                  >
+                    End-of-Term Report Cards
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setReportMode('SESSION')}
+                    className={`px-3.5 py-1.5 rounded-lg text-xs font-semibold transition cursor-pointer whitespace-nowrap ${
+                      reportMode === 'SESSION'
+                        ? 'bg-white text-slate-900 shadow-xs'
+                        : 'text-slate-600 hover:text-slate-900'
+                    }`}
+                  >
+                    Full-Session Cumulative Reports
+                  </button>
+                </div>
+              </div>
+
+              {!readOnly && reportMode === 'TERM' && (
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    disabled={generatingRc}
+                    onClick={handleGenerateReportCards}
+                    className="px-4 py-2 bg-slate-900 hover:bg-slate-800 text-white rounded-xl text-xs font-bold cursor-pointer disabled:opacity-50 whitespace-nowrap"
+                  >
+                    {generatingRc ? 'Generating...' : 'Generate / Recalculate Term Reports'}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handlePublishClassReportCards}
+                    className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold inline-flex items-center gap-1.5 cursor-pointer whitespace-nowrap"
+                  >
+                    <Send className="w-3.5 h-3.5" />
+                    <span>Publish Filtered Reports</span>
+                  </button>
+                </div>
+              )}
+
+              {!readOnly && reportMode === 'SESSION' && (
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    disabled={generatingSessionRc}
+                    onClick={handleGenerateSessionReportCards}
+                    className="px-4 py-2 bg-slate-900 hover:bg-slate-800 text-white rounded-xl text-xs font-bold cursor-pointer disabled:opacity-50 whitespace-nowrap"
+                  >
+                    {generatingSessionRc ? 'Compiling Session...' : 'Generate Session Cumulative Reports'}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handlePublishClassSessionReportCards}
+                    className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold inline-flex items-center gap-1.5 cursor-pointer whitespace-nowrap"
+                  >
+                    <Send className="w-3.5 h-3.5" />
+                    <span>Publish Filtered Session Reports</span>
+                  </button>
+                </div>
+              )}
+            </div>
+
+            <div className={`grid grid-cols-1 ${reportMode === 'TERM' ? 'sm:grid-cols-4' : 'sm:grid-cols-3'} gap-3 text-xs`}>
+              <select
+                value={rcFilters.academic_session_id}
+                onChange={(e) => {
+                  const next = { ...rcFilters, academic_session_id: e.target.value, term_id: '' };
+                  setRcFilters(next);
+                  if (reportMode === 'SESSION') loadSessionReportCards(next);
+                  else loadReportCards(next);
+                }}
+                className="px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl"
+              >
+                <option value="">All Sessions</option>
+                {sessions.map((s) => (
+                  <option key={s.id} value={s.id}>
+                    {s.name}
+                  </option>
+                ))}
+              </select>
+
+              {reportMode === 'TERM' && (
+                <select
+                  value={rcFilters.term_id}
+                  onChange={(e) => {
+                    const next = { ...rcFilters, term_id: e.target.value };
+                    setRcFilters(next);
+                    loadReportCards(next);
+                  }}
+                  className="px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl"
+                >
+                  <option value="">All Terms</option>
+                  {(rcSessionObj?.terms || sessions.flatMap((s) => s.terms || [])).map((t) => (
+                    <option key={t.id} value={t.id}>
+                      {t.name}
+                    </option>
+                  ))}
+                </select>
+              )}
+
+              <select
+                value={rcFilters.class_id}
+                onChange={(e) => {
+                  const next = { ...rcFilters, class_id: e.target.value };
+                  setRcFilters(next);
+                  if (reportMode === 'SESSION') loadSessionReportCards(next);
+                  else loadReportCards(next);
+                }}
+                className="px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl"
+              >
+                <option value="">All Classes</option>
+                {classes.map((c) => (
+                  <option key={c.id} value={c.id}>
+                    {c.name}
+                  </option>
+                ))}
+              </select>
+
+              <select
+                value={rcFilters.status}
+                onChange={(e) => {
+                  const next = { ...rcFilters, status: e.target.value };
+                  setRcFilters(next);
+                  if (reportMode === 'SESSION') loadSessionReportCards(next);
+                  else loadReportCards(next);
+                }}
+                className="px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl"
+              >
+                <option value="">All Statuses</option>
+                <option value="DRAFT">Draft</option>
+                <option value="REVIEW">In Review</option>
+                <option value="APPROVED">Approved</option>
+                <option value="PUBLISHED">Published</option>
+              </select>
+            </div>
+
+            {reportMode === 'TERM' ? (
+              reportsLoading ? (
+                <p className="py-10 text-center text-xs text-slate-400">Loading digital report cards...</p>
+              ) : reportCards.length === 0 ? (
+                <p className="py-10 text-center text-xs text-slate-400">
+                  No end-of-term report cards match these filters. Use &ldquo;Generate / Recalculate Term Reports&rdquo; after entering scores.
+                </p>
+              ) : (
+                <div className="overflow-x-auto">
+                  <table className="w-full text-left text-xs">
+                    <thead>
+                      <tr className="border-b border-slate-200 text-slate-500 bg-slate-50/70">
+                        <th className="py-2.5 px-3">Student</th>
+                        <th className="py-2.5 px-3">Class</th>
+                        <th className="py-2.5 px-3">Session / Term</th>
+                        <th className="py-2.5 px-3 text-right">Average</th>
+                        <th className="py-2.5 px-3 text-right">Position</th>
+                        <th className="py-2.5 px-3">Status</th>
+                        <th className="py-2.5 px-3 text-right">Actions</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100">
+                      {reportCards.map((rc) => (
+                        <tr key={rc.id} className="hover:bg-slate-50/60">
+                          <td className="py-2.5 px-3 font-semibold text-slate-900">
+                            {rc.student_name}
+                            <span className="block text-[10px] font-mono text-slate-400">{rc.admission_number}</span>
+                          </td>
+                          <td className="py-2.5 px-3 text-slate-600">{rc.class_name || '—'}</td>
+                          <td className="py-2.5 px-3 text-slate-600">
+                            {rc.session_name} · {rc.term_name}
+                          </td>
+                          <td className="py-2.5 px-3 text-right font-bold tabular-nums text-emerald-700">
+                            {Number(rc.average_score || 0).toFixed(1)}%
+                          </td>
+                          <td className="py-2.5 px-3 text-right tabular-nums text-slate-700">
+                            {rc.class_position ? `${rc.class_position} / ${rc.class_size || '—'}` : '—'}
+                          </td>
+                          <td className="py-2.5 px-3">
+                            <WorkflowStatusBadge status={rc.status} />
+                          </td>
+                          <td className="py-2.5 px-3 text-right">
+                            <div className="flex items-center justify-end gap-1.5">
+                              <button
+                                type="button"
+                                onClick={() => handleViewPrintReportCard(rc)}
+                                className="px-2.5 py-1 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-800 text-[11px] font-semibold inline-flex items-center gap-1 cursor-pointer"
+                              >
+                                <Printer className="w-3 h-3" />
+                                <span>View / Print</span>
+                              </button>
+                              {!readOnly && rc.status !== 'PUBLISHED' && (
+                                <>
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      setRemarksModalRc(rc);
+                                      setRemarksForm({
+                                        teacher_remark: rc.teacher_remark || '',
+                                        principal_remark: rc.principal_remark || '',
+                                        status: (rc.status as any) || 'DRAFT',
+                                      });
+                                    }}
+                                    className="px-2.5 py-1 rounded-lg bg-sky-50 hover:bg-sky-100 text-sky-800 border border-sky-200 text-[11px] font-semibold cursor-pointer"
+                                  >
+                                    Remarks
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => handlePublishSingleRc(rc)}
+                                    className="px-2.5 py-1 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-[11px] font-semibold cursor-pointer"
+                                  >
+                                    Publish
+                                  </button>
+                                </>
+                              )}
+                            </div>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )
+            ) : sessionReportsLoading ? (
+              <p className="py-10 text-center text-xs text-slate-400">
+                Loading full-session cumulative report cards...
+              </p>
+            ) : sessionReportCards.length === 0 ? (
+              <p className="py-10 text-center text-xs text-slate-400">
+                No full-session cumulative report cards match these filters. Select an Academic Session and click &ldquo;Generate Session Cumulative Reports&rdquo;.
+              </p>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-left text-xs">
+                  <thead>
+                    <tr className="border-b border-slate-200 text-slate-500 bg-slate-50/70">
+                      <th className="py-2.5 px-3">Student</th>
+                      <th className="py-2.5 px-3">Class</th>
+                      <th className="py-2.5 px-3">Session / Term Progression</th>
+                      <th className="py-2.5 px-3 text-right">Annual Avg</th>
+                      <th className="py-2.5 px-3 text-right">Position</th>
+                      <th className="py-2.5 px-3">Promotion</th>
+                      <th className="py-2.5 px-3">Status</th>
+                      <th className="py-2.5 px-3 text-right">Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100">
+                    {sessionReportCards.map((src) => (
+                      <tr key={src.id} className="hover:bg-slate-50/60">
+                        <td className="py-2.5 px-3 font-semibold text-slate-900">
+                          {src.student_name}
+                          <span className="block text-[10px] font-mono text-slate-400">{src.admission_number}</span>
+                        </td>
+                        <td className="py-2.5 px-3 text-slate-600">{src.class_name || '—'}</td>
+                        <td className="py-2.5 px-3 text-slate-600">
+                          <span className="font-semibold text-slate-800">{src.session_name}</span>
+                          {src.term_averages && src.term_averages.length > 0 && (
+                            <span className="block text-[10px] text-slate-500 tabular-nums mt-0.5">
+                              {src.term_averages
+                                .map((t) => `${t.term_name}: ${t.subjects_count > 0 ? `${Number(t.average_score).toFixed(1)}%` : '—'}`)
+                                .join(' · ')}
+                            </span>
+                          )}
+                        </td>
+                        <td className="py-2.5 px-3 text-right font-bold tabular-nums text-emerald-700">
+                          {Number(src.average_score || 0).toFixed(1)}%
+                        </td>
+                        <td className="py-2.5 px-3 text-right tabular-nums text-slate-700">
+                          {src.class_position ? `${src.class_position} / ${src.class_size || '—'}` : '—'}
+                        </td>
+                        <td className="py-2.5 px-3">
+                          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded border border-slate-200 bg-slate-50 text-[10px] font-bold text-slate-800">
+                            <Award className="w-3 h-3 text-emerald-600" />
+                            <span>{src.promotion_status || 'PENDING'}</span>
+                          </span>
+                        </td>
+                        <td className="py-2.5 px-3">
+                          <WorkflowStatusBadge status={src.status} />
+                        </td>
+                        <td className="py-2.5 px-3 text-right">
+                          <div className="flex items-center justify-end gap-1.5">
+                            <button
+                              type="button"
+                              onClick={() => handleViewPrintSessionReportCard(src)}
+                              className="px-2.5 py-1 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-800 text-[11px] font-semibold inline-flex items-center gap-1 cursor-pointer"
+                            >
+                              <Printer className="w-3 h-3" />
+                              <span>View / Print</span>
+                            </button>
+                            {!readOnly && src.status !== 'PUBLISHED' && (
+                              <>
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setSessionRemarksModalRc(src);
+                                    setSessionRemarksForm({
+                                      promotion_status: src.promotion_status || 'PROMOTED',
+                                      teacher_remark: src.teacher_remark || '',
+                                      principal_remark: src.principal_remark || '',
+                                      status: (src.status as any) || 'DRAFT',
+                                    });
+                                  }}
+                                  className="px-2.5 py-1 rounded-lg bg-sky-50 hover:bg-sky-100 text-sky-800 border border-sky-200 text-[11px] font-semibold cursor-pointer"
+                                >
+                                  Remarks / Promotion
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => handlePublishSingleSessionRc(src)}
+                                  className="px-2.5 py-1 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-[11px] font-semibold cursor-pointer"
+                                >
+                                  Publish
+                                </button>
+                              </>
+                            )}
+                          </div>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
               </div>
             )}
           </div>
-
-          <div className="grid grid-cols-1 sm:grid-cols-4 gap-3 text-xs">
-            <select
-              value={rcFilters.academic_session_id}
-              onChange={(e) => {
-                const next = { ...rcFilters, academic_session_id: e.target.value, term_id: '' };
-                setRcFilters(next);
-                loadReportCards(next);
-              }}
-              className="px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl"
-            >
-              <option value="">All Sessions</option>
-              {sessions.map((s) => (
-                <option key={s.id} value={s.id}>
-                  {s.name}
-                </option>
-              ))}
-            </select>
-
-            <select
-              value={rcFilters.term_id}
-              onChange={(e) => {
-                const next = { ...rcFilters, term_id: e.target.value };
-                setRcFilters(next);
-                loadReportCards(next);
-              }}
-              className="px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl"
-            >
-              <option value="">All Terms</option>
-              {(rcSessionObj?.terms || sessions.flatMap((s) => s.terms || [])).map((t) => (
-                <option key={t.id} value={t.id}>
-                  {t.name}
-                </option>
-              ))}
-            </select>
-
-            <select
-              value={rcFilters.class_id}
-              onChange={(e) => {
-                const next = { ...rcFilters, class_id: e.target.value };
-                setRcFilters(next);
-                loadReportCards(next);
-              }}
-              className="px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl"
-            >
-              <option value="">All Classes</option>
-              {classes.map((c) => (
-                <option key={c.id} value={c.id}>
-                  {c.name}
-                </option>
-              ))}
-            </select>
-
-            <select
-              value={rcFilters.status}
-              onChange={(e) => {
-                const next = { ...rcFilters, status: e.target.value };
-                setRcFilters(next);
-                loadReportCards(next);
-              }}
-              className="px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl"
-            >
-              <option value="">All Statuses</option>
-              <option value="DRAFT">Draft</option>
-              <option value="REVIEW">In Review</option>
-              <option value="APPROVED">Approved</option>
-              <option value="PUBLISHED">Published</option>
-            </select>
-          </div>
-
-          {reportsLoading ? (
-            <p className="py-10 text-center text-xs text-slate-400">Loading digital report cards...</p>
-          ) : reportCards.length === 0 ? (
-            <p className="py-10 text-center text-xs text-slate-400">
-              No report cards match these filters. Use &ldquo;Generate / Recalculate Reports&rdquo; after entering scores.
-            </p>
-          ) : (
-            <div className="overflow-x-auto">
-              <table className="w-full text-left text-xs">
-                <thead>
-                  <tr className="border-b border-slate-200 text-slate-500 bg-slate-50/70">
-                    <th className="py-2.5 px-3">Student</th>
-                    <th className="py-2.5 px-3">Class</th>
-                    <th className="py-2.5 px-3">Session / Term</th>
-                    <th className="py-2.5 px-3 text-right">Average</th>
-                    <th className="py-2.5 px-3 text-right">Position</th>
-                    <th className="py-2.5 px-3">Status</th>
-                    <th className="py-2.5 px-3 text-right">Actions</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-100">
-                  {reportCards.map((rc) => (
-                    <tr key={rc.id} className="hover:bg-slate-50/60">
-                      <td className="py-2.5 px-3 font-semibold text-slate-900">
-                        {rc.student_name}
-                        <span className="block text-[10px] font-mono text-slate-400">{rc.admission_number}</span>
-                      </td>
-                      <td className="py-2.5 px-3 text-slate-600">{rc.class_name || '—'}</td>
-                      <td className="py-2.5 px-3 text-slate-600">
-                        {rc.session_name} · {rc.term_name}
-                      </td>
-                      <td className="py-2.5 px-3 text-right font-bold tabular-nums text-emerald-700">
-                        {Number(rc.average_score || 0).toFixed(1)}%
-                      </td>
-                      <td className="py-2.5 px-3 text-right tabular-nums text-slate-700">
-                        {rc.class_position ? `${rc.class_position} / ${rc.class_size || '—'}` : '—'}
-                      </td>
-                      <td className="py-2.5 px-3">
-                        <WorkflowStatusBadge status={rc.status} />
-                      </td>
-                      <td className="py-2.5 px-3 text-right">
-                        <div className="flex items-center justify-end gap-1.5">
-                          <button
-                            type="button"
-                            onClick={() => handleViewPrintReportCard(rc)}
-                            className="px-2.5 py-1 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-800 text-[11px] font-semibold inline-flex items-center gap-1 cursor-pointer"
-                          >
-                            <Printer className="w-3 h-3" />
-                            <span>View / Print</span>
-                          </button>
-                          {!readOnly && rc.status !== 'PUBLISHED' && (
-                            <>
-                              <button
-                                type="button"
-                                onClick={() => {
-                                  setRemarksModalRc(rc);
-                                  setRemarksForm({
-                                    teacher_remark: rc.teacher_remark || '',
-                                    principal_remark: rc.principal_remark || '',
-                                    status: (rc.status as any) || 'DRAFT',
-                                  });
-                                }}
-                                className="px-2.5 py-1 rounded-lg bg-sky-50 hover:bg-sky-100 text-sky-800 border border-sky-200 text-[11px] font-semibold cursor-pointer"
-                              >
-                                Remarks
-                              </button>
-                              <button
-                                type="button"
-                                onClick={() => handlePublishSingleRc(rc)}
-                                className="px-2.5 py-1 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-[11px] font-semibold cursor-pointer"
-                              >
-                                Publish
-                              </button>
-                            </>
-                          )}
-                        </div>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
         </div>
       )}
 
@@ -2079,6 +2502,98 @@ export const SchoolPerformanceView: React.FC<SchoolPerformanceViewProps> = ({ re
                   className="px-5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl font-bold"
                 >
                   {remarksSaving ? 'Saving...' : 'Save Remarks'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* SESSION CUMULATIVE REPORT CARD REMARKS & PROMOTION MODAL */}
+      {sessionRemarksModalRc && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-xs p-4">
+          <div className="bg-white rounded-2xl max-w-lg w-full shadow-2xl border border-slate-200 overflow-hidden">
+            <div className="bg-slate-900 px-5 py-4 text-white flex items-center justify-between">
+              <h3 className="font-bold text-sm">
+                Annual Cumulative Remarks &amp; Promotion · {sessionRemarksModalRc.student_name}
+              </h3>
+              <button
+                type="button"
+                onClick={() => setSessionRemarksModalRc(null)}
+                className="text-slate-400 hover:text-white"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <form onSubmit={handleSaveSessionRemarks} className="p-5 space-y-3 text-xs">
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block font-semibold text-slate-700 mb-1">Promotion Decision</label>
+                  <select
+                    value={sessionRemarksForm.promotion_status}
+                    onChange={(e) =>
+                      setSessionRemarksForm({ ...sessionRemarksForm, promotion_status: e.target.value })
+                    }
+                    className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl"
+                  >
+                    <option value="PROMOTED">Promoted to Next Class</option>
+                    <option value="PROBATION">Promoted on Trial / Probation</option>
+                    <option value="RETAINED">Retained in Current Class</option>
+                    <option value="GRADUATED">Graduated</option>
+                    <option value="PENDING">Pending Decision</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="block font-semibold text-slate-700 mb-1">Workflow Status</label>
+                  <select
+                    value={sessionRemarksForm.status}
+                    onChange={(e) =>
+                      setSessionRemarksForm({ ...sessionRemarksForm, status: e.target.value as any })
+                    }
+                    className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl"
+                  >
+                    <option value="DRAFT">Draft</option>
+                    <option value="REVIEW">In Review</option>
+                    <option value="APPROVED">Approved (Ready to Publish)</option>
+                  </select>
+                </div>
+              </div>
+              <div>
+                <label className="block font-semibold text-slate-700 mb-1">Annual Class Teacher Remark</label>
+                <textarea
+                  rows={2}
+                  value={sessionRemarksForm.teacher_remark}
+                  onChange={(e) =>
+                    setSessionRemarksForm({ ...sessionRemarksForm, teacher_remark: e.target.value })
+                  }
+                  className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl"
+                />
+              </div>
+              <div>
+                <label className="block font-semibold text-slate-700 mb-1">Principal Annual Remark</label>
+                <textarea
+                  rows={2}
+                  value={sessionRemarksForm.principal_remark}
+                  onChange={(e) =>
+                    setSessionRemarksForm({ ...sessionRemarksForm, principal_remark: e.target.value })
+                  }
+                  className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl"
+                />
+              </div>
+              <div className="pt-3 border-t border-slate-200 flex justify-end gap-2">
+                <button
+                  type="button"
+                  onClick={() => setSessionRemarksModalRc(null)}
+                  className="px-4 py-2 border border-slate-300 rounded-xl text-slate-700"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={sessionRemarksSaving}
+                  className="px-5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl font-bold"
+                >
+                  {sessionRemarksSaving ? 'Saving...' : 'Save Annual Remarks'}
                 </button>
               </div>
             </form>

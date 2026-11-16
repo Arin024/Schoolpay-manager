@@ -832,9 +832,9 @@ async function runBrowserAcceptance() {
 
     // Navigate Report Cards & open printable Report Card modal
     await cdp.clickButtonByText('Report Cards', true);
-    await cdp.waitForText('Published Digital Report Cards');
+    await cdp.waitForText('Published End-of-Term Report Cards');
     await cdp.clickButtonByText('Open & Print');
-    await cdp.waitForText('Official Digital Report Card');
+    await cdp.waitForText('Official End-of-Term Report Card');
     await cdp.waitForText('Print / Save PDF');
     await cdp.evaluate(`document.querySelector('button[aria-label="Close report card"]')?.click()`);
     await cdp.waitFor(() => cdp!.evaluate(`return !document.body.innerText.includes('Print / Save PDF')`));

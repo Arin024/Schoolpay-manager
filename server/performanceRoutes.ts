@@ -21,6 +21,10 @@ import {
   newId,
   normalizeGradingScale,
 } from './accessControl.ts';
+import {
+  compileSessionReportCard,
+  compileTermReportCard,
+} from './reportCardService.ts';
 
 export const performanceRouter = Router();
 
@@ -1614,6 +1618,7 @@ async function buildLiveReportCardBreakdown(schoolId: string, rc: any) {
     class_position: settings.show_class_position ? rc.class_position : null,
     class_size: settings.show_class_position ? rc.class_size : null,
     overall_grade: computeGrade(Number(rc.average_score || 0), 100, settings.grading_scale),
+    gradingScale: normalizeGradingScale(settings.grading_scale),
     subjects: scores.map((s) => ({
       subject_id: s.subject_id,
       subject_name: s.subject_name,
@@ -2110,6 +2115,573 @@ performanceRouter.post(
         `Report Card Available: ${breakdown.termName}`,
         `Your official digital report card for ${breakdown.termName} is now published.`,
         { eventType: 'REPORT_CARD_AVAILABLE', reportCardId: rc.id }
+      );
+      publishedCount++;
+    }
+
+    return res.json({ success: true, publishedCount });
+  }
+);
+
+// On-demand Report Card Compiler for School Staff / Admin / SuperAdmin (Term or Full-Session Cumulative)
+performanceRouter.post(
+  '/report-cards/compile-preview',
+  requireAuth,
+  requireTenant,
+  requireRole(ACADEMIC_READ_ROLES),
+  async (req: AuthenticatedRequest, res) => {
+    const schoolId = req.targetSchoolId!;
+    const { student_id, report_type = 'TERM', academic_session_id, term_id, examination_id } = req.body || {};
+
+    if (!student_id || !academic_session_id) {
+      return res.status(400).json({
+        error: 'MISSING_FIELDS',
+        message: 'student_id and academic_session_id are required.',
+      });
+    }
+
+    if (report_type === 'SESSION') {
+      const compiled = await compileSessionReportCard(schoolId, student_id, academic_session_id, {
+        onlyPublished: false,
+        visibilityRole: 'ADMIN',
+        forceLive: true,
+      });
+      if (!compiled) {
+        return res.status(404).json({ error: 'NOT_FOUND', message: 'Student or session record not found.' });
+      }
+      return res.json({ success: true, source: compiled.source, reportCard: compiled.reportCard });
+    }
+
+    if (!term_id) {
+      return res.status(400).json({ error: 'MISSING_TERM', message: 'term_id is required for an End-of-Term report card.' });
+    }
+    const compiled = await compileTermReportCard(schoolId, student_id, academic_session_id, term_id, {
+      onlyPublished: false,
+      visibilityRole: 'ADMIN',
+      examinationId: examination_id || null,
+      forceLive: true,
+    });
+    if (!compiled) {
+      return res.status(404).json({ error: 'NOT_FOUND', message: 'Student record not found.' });
+    }
+    return res.json({ success: true, source: compiled.source, reportCard: compiled.reportCard });
+  }
+);
+
+// ==============================================================================
+// 6B. FULL-SESSION CUMULATIVE ANNUAL REPORT CARDS (Admin / SuperAdmin Workflow)
+// ==============================================================================
+
+performanceRouter.get(
+  '/session-report-cards',
+  requireAuth,
+  requireTenant,
+  requireRole(ACADEMIC_READ_ROLES),
+  async (req: AuthenticatedRequest, res) => {
+    const schoolId = req.targetSchoolId!;
+    const { academic_session_id, class_id, status, student_id } = req.query as Record<string, string>;
+
+    let pgSql = `
+      SELECT src.*, s.full_name as student_name, s.admission_number, COALESCE(c.name, s.class_name) as class_name,
+             ses.name as session_name
+      FROM session_report_cards src
+      JOIN students s ON src.student_id = s.id
+      LEFT JOIN classes c ON COALESCE(src.class_id, s.class_id) = c.id
+      LEFT JOIN academic_sessions ses ON src.academic_session_id = ses.id
+      WHERE src.school_id = $1
+    `;
+    let sqSql = `
+      SELECT src.*, s.full_name as student_name, s.admission_number, COALESCE(c.name, s.class_name) as class_name,
+             ses.name as session_name
+      FROM session_report_cards src
+      JOIN students s ON src.student_id = s.id
+      LEFT JOIN classes c ON COALESCE(src.class_id, s.class_id) = c.id
+      LEFT JOIN academic_sessions ses ON src.academic_session_id = ses.id
+      WHERE src.school_id = ?
+    `;
+    const params: any[] = [schoolId];
+    let idx = 2;
+    if (academic_session_id) {
+      pgSql += ` AND src.academic_session_id = $${idx++}`;
+      sqSql += ` AND src.academic_session_id = ?`;
+      params.push(academic_session_id);
+    }
+    if (class_id) {
+      pgSql += ` AND COALESCE(src.class_id, s.class_id) = $${idx++}`;
+      sqSql += ` AND COALESCE(src.class_id, s.class_id) = ?`;
+      params.push(class_id);
+    }
+    if (status) {
+      pgSql += ` AND src.status = $${idx++}`;
+      sqSql += ` AND src.status = ?`;
+      params.push(status);
+    }
+    if (student_id) {
+      pgSql += ` AND src.student_id = $${idx++}`;
+      sqSql += ` AND src.student_id = ?`;
+      params.push(student_id);
+    }
+
+    pgSql += ' ORDER BY src.average_score DESC, s.full_name ASC';
+    sqSql += ' ORDER BY src.average_score DESC, s.full_name ASC';
+
+    const rows = await dbAll(pgSql, sqSql, params);
+    const sessionReportCards = rows.map((r: any) => {
+      let term_averages = [];
+      try {
+        term_averages = r.term_averages_json ? JSON.parse(r.term_averages_json) : [];
+      } catch {}
+      return { ...r, report_type: 'SESSION', term_averages };
+    });
+
+    return res.json({ success: true, count: sessionReportCards.length, sessionReportCards });
+  }
+);
+
+performanceRouter.get(
+  '/session-report-cards/:id',
+  requireAuth,
+  requireTenant,
+  requireRole(ACADEMIC_READ_ROLES),
+  async (req: AuthenticatedRequest, res) => {
+    const schoolId = req.targetSchoolId!;
+    const { id } = req.params;
+    const src = await dbGet(
+      `SELECT src.*, s.full_name as student_name, s.admission_number, COALESCE(c.name, s.class_name) as class_name,
+              ses.name as session_name
+       FROM session_report_cards src
+       JOIN students s ON src.student_id = s.id
+       LEFT JOIN classes c ON COALESCE(src.class_id, s.class_id) = c.id
+       LEFT JOIN academic_sessions ses ON src.academic_session_id = ses.id
+       WHERE src.id = $1 AND src.school_id = $2`,
+      `SELECT src.*, s.full_name as student_name, s.admission_number, COALESCE(c.name, s.class_name) as class_name,
+              ses.name as session_name
+       FROM session_report_cards src
+       JOIN students s ON src.student_id = s.id
+       LEFT JOIN classes c ON COALESCE(src.class_id, s.class_id) = c.id
+       LEFT JOIN academic_sessions ses ON src.academic_session_id = ses.id
+       WHERE src.id = ? AND src.school_id = ?`,
+      [id, schoolId]
+    );
+    if (!src) return res.status(404).json({ error: 'NOT_FOUND', message: 'Session report card not found.' });
+
+    let breakdown: any = null;
+    if (src.status === 'PUBLISHED' && src.snapshot_json) {
+      try { breakdown = JSON.parse(src.snapshot_json); } catch {}
+    }
+    if (!breakdown) {
+      const compiled = await compileSessionReportCard(schoolId, src.student_id, src.academic_session_id, {
+        onlyPublished: false,
+        visibilityRole: 'ADMIN',
+        forceLive: true,
+      });
+      breakdown = compiled?.reportCard?.breakdown || null;
+    }
+
+    return res.json({
+      success: true,
+      sessionReportCard: {
+        ...src,
+        report_type: 'SESSION',
+        breakdown,
+      },
+    });
+  }
+);
+
+performanceRouter.post(
+  '/session-report-cards/generate',
+  requireAuth,
+  requireTenant,
+  requireRole(ADMIN_ONLY_ROLES),
+  async (req: AuthenticatedRequest, res) => {
+    const schoolId = req.targetSchoolId!;
+    const { academic_session_id, class_id, student_id } = req.body || {};
+
+    if (!academic_session_id) {
+      return res.status(400).json({ error: 'MISSING_FIELDS', message: 'academic_session_id is required.' });
+    }
+
+    const stuParams: any[] = [schoolId];
+    let stuPg = `SELECT * FROM students WHERE school_id = $1 AND (is_deleted = 0 OR is_deleted IS NULL)`;
+    let stuSq = `SELECT * FROM students WHERE school_id = ? AND (is_deleted = 0 OR is_deleted IS NULL)`;
+    if (student_id) {
+      stuPg += ' AND id = $2';
+      stuSq += ' AND id = ?';
+      stuParams.push(student_id);
+    } else if (class_id) {
+      stuPg += ' AND class_id = $2';
+      stuSq += ' AND class_id = ?';
+      stuParams.push(class_id);
+    }
+    const students = await dbAll(stuPg, stuSq, stuParams);
+    if (students.length === 0) {
+      return res.status(404).json({ error: 'NO_STUDENTS', message: 'No matching active students found.' });
+    }
+
+    const generated: any[] = [];
+    for (const stu of students) {
+      const compiled = await compileSessionReportCard(schoolId, stu.id, academic_session_id, {
+        onlyPublished: false,
+        visibilityRole: 'ADMIN',
+        forceLive: true,
+      });
+      if (!compiled) continue;
+      const bd = compiled.reportCard.breakdown;
+      const srcId = newId('src');
+      const verCode = `SRC-${crypto.randomBytes(3).toString('hex').toUpperCase()}`;
+
+      await execWrite(
+        `INSERT INTO session_report_cards (
+           id, school_id, student_id, class_id, academic_session_id,
+           status, total_score, average_score, subjects_count, terms_count,
+           class_position, class_size, promotion_status, term_averages_json,
+           attendance_summary_json, behaviour_summary_json, teacher_remark, verification_code,
+           created_by, created_at, updated_at
+         ) VALUES ($1, $2, $3, $4, $5, 'DRAFT', $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+         ON CONFLICT (school_id, student_id, academic_session_id) DO UPDATE SET
+           class_id = EXCLUDED.class_id,
+           total_score = CASE WHEN session_report_cards.status = 'PUBLISHED' THEN session_report_cards.total_score ELSE EXCLUDED.total_score END,
+           average_score = CASE WHEN session_report_cards.status = 'PUBLISHED' THEN session_report_cards.average_score ELSE EXCLUDED.average_score END,
+           subjects_count = CASE WHEN session_report_cards.status = 'PUBLISHED' THEN session_report_cards.subjects_count ELSE EXCLUDED.subjects_count END,
+           terms_count = CASE WHEN session_report_cards.status = 'PUBLISHED' THEN session_report_cards.terms_count ELSE EXCLUDED.terms_count END,
+           class_position = CASE WHEN session_report_cards.status = 'PUBLISHED' THEN session_report_cards.class_position ELSE EXCLUDED.class_position END,
+           class_size = CASE WHEN session_report_cards.status = 'PUBLISHED' THEN session_report_cards.class_size ELSE EXCLUDED.class_size END,
+           promotion_status = CASE WHEN session_report_cards.status = 'PUBLISHED' OR (session_report_cards.promotion_status IS NOT NULL AND session_report_cards.promotion_status != 'PENDING') THEN session_report_cards.promotion_status ELSE EXCLUDED.promotion_status END,
+           term_averages_json = CASE WHEN session_report_cards.status = 'PUBLISHED' THEN session_report_cards.term_averages_json ELSE EXCLUDED.term_averages_json END,
+           teacher_remark = COALESCE(session_report_cards.teacher_remark, EXCLUDED.teacher_remark),
+           updated_at = CURRENT_TIMESTAMP`,
+        `INSERT INTO session_report_cards (
+           id, school_id, student_id, class_id, academic_session_id,
+           status, total_score, average_score, subjects_count, terms_count,
+           class_position, class_size, promotion_status, term_averages_json,
+           attendance_summary_json, behaviour_summary_json, teacher_remark, verification_code,
+           created_by, created_at, updated_at
+         ) VALUES (?, ?, ?, ?, ?, 'DRAFT', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+         ON CONFLICT(school_id, student_id, academic_session_id) DO UPDATE SET
+           class_id = excluded.class_id,
+           total_score = CASE WHEN session_report_cards.status = 'PUBLISHED' THEN session_report_cards.total_score ELSE excluded.total_score END,
+           average_score = CASE WHEN session_report_cards.status = 'PUBLISHED' THEN session_report_cards.average_score ELSE excluded.average_score END,
+           subjects_count = CASE WHEN session_report_cards.status = 'PUBLISHED' THEN session_report_cards.subjects_count ELSE excluded.subjects_count END,
+           terms_count = CASE WHEN session_report_cards.status = 'PUBLISHED' THEN session_report_cards.terms_count ELSE excluded.terms_count END,
+           class_position = CASE WHEN session_report_cards.status = 'PUBLISHED' THEN session_report_cards.class_position ELSE excluded.class_position END,
+           class_size = CASE WHEN session_report_cards.status = 'PUBLISHED' THEN session_report_cards.class_size ELSE excluded.class_size END,
+           promotion_status = CASE WHEN session_report_cards.status = 'PUBLISHED' OR (session_report_cards.promotion_status IS NOT NULL AND session_report_cards.promotion_status != 'PENDING') THEN session_report_cards.promotion_status ELSE excluded.promotion_status END,
+           term_averages_json = CASE WHEN session_report_cards.status = 'PUBLISHED' THEN session_report_cards.term_averages_json ELSE excluded.term_averages_json END,
+           teacher_remark = COALESCE(session_report_cards.teacher_remark, excluded.teacher_remark),
+           updated_at = CURRENT_TIMESTAMP`,
+        [
+          srcId,
+          schoolId,
+          stu.id,
+          stu.class_id || null,
+          academic_session_id,
+          bd.total_score,
+          bd.average_score,
+          bd.subjects_count,
+          bd.terms_count,
+          bd.class_position,
+          bd.class_size,
+          bd.promotion_status || 'PENDING',
+          JSON.stringify(bd.term_averages || []),
+          JSON.stringify(bd.attendance_summary || {}),
+          JSON.stringify(bd.behaviour_summary || {}),
+          bd.teacher_remark || null,
+          verCode,
+          req.user!.id,
+        ]
+      );
+
+      const row = await dbGet(
+        `SELECT * FROM session_report_cards WHERE school_id = $1 AND student_id = $2 AND academic_session_id = $3`,
+        `SELECT * FROM session_report_cards WHERE school_id = ? AND student_id = ? AND academic_session_id = ?`,
+        [schoolId, stu.id, academic_session_id]
+      );
+      if (row) generated.push({ ...row, report_type: 'SESSION' });
+    }
+
+    logAudit({
+      actorId: req.user!.id,
+      actorEmail: req.user!.email,
+      schoolId,
+      action: 'GENERATE_SESSION_REPORT_CARDS',
+      entity: 'SESSION_REPORT_CARD',
+      metadata: { count: generated.length, class_id, academic_session_id },
+    });
+
+    return res.json({ success: true, count: generated.length, sessionReportCards: generated });
+  }
+);
+
+performanceRouter.put(
+  '/session-report-cards/:id/remarks',
+  requireAuth,
+  requireTenant,
+  requireRole(ADMIN_ONLY_ROLES),
+  async (req: AuthenticatedRequest, res) => {
+    const schoolId = req.targetSchoolId!;
+    const { id } = req.params;
+    const { teacher_remark, principal_remark, status, promotion_status } = req.body || {};
+
+    const src = await dbGet(
+      `SELECT * FROM session_report_cards WHERE id = $1 AND school_id = $2`,
+      `SELECT * FROM session_report_cards WHERE id = ? AND school_id = ?`,
+      [id, schoolId]
+    );
+    if (!src) return res.status(404).json({ error: 'NOT_FOUND', message: 'Session report card not found.' });
+
+    const nextStatus =
+      status && ['DRAFT', 'REVIEW', 'APPROVED'].includes(status) && src.status !== 'PUBLISHED' ? status : src.status;
+    const nextPromotion =
+      promotion_status && ['PROMOTED', 'RETAINED', 'PROBATION', 'GRADUATED', 'PENDING'].includes(promotion_status)
+        ? promotion_status
+        : null;
+
+    if (nextStatus === 'APPROVED') {
+      await execWrite(
+        `UPDATE session_report_cards
+         SET teacher_remark = COALESCE($1, teacher_remark),
+             principal_remark = COALESCE($2, principal_remark),
+             promotion_status = COALESCE($3, promotion_status),
+             status = $4,
+             approved_by = $5,
+             approved_at = CURRENT_TIMESTAMP,
+             updated_at = CURRENT_TIMESTAMP
+         WHERE id = $6 AND school_id = $7`,
+        `UPDATE session_report_cards
+         SET teacher_remark = COALESCE(?, teacher_remark),
+             principal_remark = COALESCE(?, principal_remark),
+             promotion_status = COALESCE(?, promotion_status),
+             status = ?,
+             approved_by = ?,
+             approved_at = CURRENT_TIMESTAMP,
+             updated_at = CURRENT_TIMESTAMP
+         WHERE id = ? AND school_id = ?`,
+        [teacher_remark ?? null, principal_remark ?? null, nextPromotion, nextStatus, req.user!.id, id, schoolId]
+      );
+    } else {
+      await execWrite(
+        `UPDATE session_report_cards
+         SET teacher_remark = COALESCE($1, teacher_remark),
+             principal_remark = COALESCE($2, principal_remark),
+             promotion_status = COALESCE($3, promotion_status),
+             status = $4,
+             updated_at = CURRENT_TIMESTAMP
+         WHERE id = $5 AND school_id = $6`,
+        `UPDATE session_report_cards
+         SET teacher_remark = COALESCE(?, teacher_remark),
+             principal_remark = COALESCE(?, principal_remark),
+             promotion_status = COALESCE(?, promotion_status),
+             status = ?,
+             updated_at = CURRENT_TIMESTAMP
+         WHERE id = ? AND school_id = ?`,
+        [teacher_remark ?? null, principal_remark ?? null, nextPromotion, nextStatus, id, schoolId]
+      );
+    }
+
+    const updated = await dbGet(
+      `SELECT * FROM session_report_cards WHERE id = $1`,
+      `SELECT * FROM session_report_cards WHERE id = ?`,
+      [id]
+    );
+    return res.json({ success: true, sessionReportCard: { ...updated, report_type: 'SESSION' } });
+  }
+);
+
+performanceRouter.post(
+  '/session-report-cards/:id/publish',
+  requireAuth,
+  requireTenant,
+  requireRole(ADMIN_ONLY_ROLES),
+  async (req: AuthenticatedRequest, res) => {
+    const schoolId = req.targetSchoolId!;
+    const { id } = req.params;
+    const src = await dbGet(
+      `SELECT * FROM session_report_cards WHERE id = $1 AND school_id = $2`,
+      `SELECT * FROM session_report_cards WHERE id = ? AND school_id = ?`,
+      [id, schoolId]
+    );
+    if (!src) return res.status(404).json({ error: 'NOT_FOUND', message: 'Session report card not found.' });
+
+    const compiled = await compileSessionReportCard(schoolId, src.student_id, src.academic_session_id, {
+      onlyPublished: false,
+      visibilityRole: 'ADMIN',
+      forceLive: true,
+    });
+    if (!compiled) {
+      return res.status(404).json({ error: 'NOT_FOUND', message: 'Unable to compile session breakdown.' });
+    }
+    const breakdown = {
+      ...compiled.reportCard.breakdown,
+      reportCardId: id,
+      verificationCode: src.verification_code || compiled.reportCard.breakdown.verificationCode,
+      teacher_remark: src.teacher_remark || compiled.reportCard.breakdown.teacher_remark,
+      principal_remark: src.principal_remark || compiled.reportCard.breakdown.principal_remark,
+      promotion_status: src.promotion_status || compiled.reportCard.breakdown.promotion_status,
+    };
+
+    await execWrite(
+      `UPDATE session_report_cards
+       SET status = 'PUBLISHED',
+           total_score = $1,
+           average_score = $2,
+           subjects_count = $3,
+           terms_count = $4,
+           term_averages_json = $5,
+           snapshot_json = $6,
+           attendance_summary_json = $7,
+           behaviour_summary_json = $8,
+           published_by = $9,
+           published_at = CURRENT_TIMESTAMP,
+           updated_at = CURRENT_TIMESTAMP
+       WHERE id = $10 AND school_id = $11`,
+      `UPDATE session_report_cards
+       SET status = 'PUBLISHED',
+           total_score = ?,
+           average_score = ?,
+           subjects_count = ?,
+           terms_count = ?,
+           term_averages_json = ?,
+           snapshot_json = ?,
+           attendance_summary_json = ?,
+           behaviour_summary_json = ?,
+           published_by = ?,
+           published_at = CURRENT_TIMESTAMP,
+           updated_at = CURRENT_TIMESTAMP
+       WHERE id = ? AND school_id = ?`,
+      [
+        breakdown.total_score,
+        breakdown.average_score,
+        breakdown.subjects_count,
+        breakdown.terms_count,
+        JSON.stringify(breakdown.term_averages || []),
+        JSON.stringify(breakdown),
+        JSON.stringify(breakdown.attendance_summary || {}),
+        JSON.stringify(breakdown.behaviour_summary || {}),
+        req.user!.id,
+        id,
+        schoolId,
+      ]
+    );
+
+    notificationService.notifyParentsOfStudent(
+      schoolId,
+      src.student_id,
+      'SYSTEM',
+      `Annual Session Report Card Published: ${breakdown.sessionName}`,
+      `The full-session cumulative report card for ${breakdown.student?.full_name || 'your ward'} (${breakdown.sessionName}) is now published.`,
+      { eventType: 'SESSION_REPORT_CARD_AVAILABLE', sessionReportCardId: id }
+    );
+    notificationService.notifyStudent(
+      schoolId,
+      src.student_id,
+      'SYSTEM',
+      `Annual Session Report Card Published: ${breakdown.sessionName}`,
+      `Your full-session cumulative report card for ${breakdown.sessionName} has been published.`,
+      { eventType: 'SESSION_REPORT_CARD_AVAILABLE', sessionReportCardId: id }
+    );
+
+    logAudit({
+      actorId: req.user!.id,
+      actorEmail: req.user!.email,
+      schoolId,
+      action: 'PUBLISH_SESSION_REPORT_CARD',
+      entity: 'SESSION_REPORT_CARD',
+      entityId: id,
+      metadata: { studentId: src.student_id, sessionId: src.academic_session_id },
+    });
+
+    const published = await dbGet(
+      `SELECT * FROM session_report_cards WHERE id = $1`,
+      `SELECT * FROM session_report_cards WHERE id = ?`,
+      [id]
+    );
+    return res.json({
+      success: true,
+      message: 'Session cumulative report card published.',
+      sessionReportCard: { ...published, report_type: 'SESSION', breakdown },
+    });
+  }
+);
+
+performanceRouter.post(
+  '/session-report-cards/publish-class',
+  requireAuth,
+  requireTenant,
+  requireRole(ADMIN_ONLY_ROLES),
+  async (req: AuthenticatedRequest, res) => {
+    const schoolId = req.targetSchoolId!;
+    const { class_id, academic_session_id } = req.body || {};
+    if (!academic_session_id) {
+      return res.status(400).json({ error: 'MISSING_FIELDS', message: 'academic_session_id is required.' });
+    }
+
+    const cards = await dbAll(
+      `SELECT * FROM session_report_cards
+       WHERE school_id = $1 AND academic_session_id = $2
+         ${class_id ? 'AND class_id = $3' : ''}`,
+      `SELECT * FROM session_report_cards
+       WHERE school_id = ? AND academic_session_id = ?
+         ${class_id ? 'AND class_id = ?' : ''}`,
+      class_id ? [schoolId, academic_session_id, class_id] : [schoolId, academic_session_id]
+    );
+
+    let publishedCount = 0;
+    for (const src of cards) {
+      const compiled = await compileSessionReportCard(schoolId, src.student_id, src.academic_session_id, {
+        onlyPublished: false,
+        visibilityRole: 'ADMIN',
+        forceLive: true,
+      });
+      if (!compiled) continue;
+      const breakdown = {
+        ...compiled.reportCard.breakdown,
+        reportCardId: src.id,
+        verificationCode: src.verification_code || compiled.reportCard.breakdown.verificationCode,
+        teacher_remark: src.teacher_remark || compiled.reportCard.breakdown.teacher_remark,
+        principal_remark: src.principal_remark || compiled.reportCard.breakdown.principal_remark,
+        promotion_status: src.promotion_status || compiled.reportCard.breakdown.promotion_status,
+      };
+      await execWrite(
+        `UPDATE session_report_cards
+         SET status = 'PUBLISHED', total_score = $1, average_score = $2, subjects_count = $3, terms_count = $4,
+             term_averages_json = $5, snapshot_json = $6, attendance_summary_json = $7, behaviour_summary_json = $8,
+             published_by = $9, published_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+         WHERE id = $10 AND school_id = $11`,
+        `UPDATE session_report_cards
+         SET status = 'PUBLISHED', total_score = ?, average_score = ?, subjects_count = ?, terms_count = ?,
+             term_averages_json = ?, snapshot_json = ?, attendance_summary_json = ?, behaviour_summary_json = ?,
+             published_by = ?, published_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+         WHERE id = ? AND school_id = ?`,
+        [
+          breakdown.total_score,
+          breakdown.average_score,
+          breakdown.subjects_count,
+          breakdown.terms_count,
+          JSON.stringify(breakdown.term_averages || []),
+          JSON.stringify(breakdown),
+          JSON.stringify(breakdown.attendance_summary || {}),
+          JSON.stringify(breakdown.behaviour_summary || {}),
+          req.user!.id,
+          src.id,
+          schoolId,
+        ]
+      );
+      notificationService.notifyParentsOfStudent(
+        schoolId,
+        src.student_id,
+        'SYSTEM',
+        `Annual Session Report Card Published: ${breakdown.sessionName}`,
+        `The full-session cumulative report card for ${breakdown.student?.full_name || 'your ward'} is now published.`,
+        { eventType: 'SESSION_REPORT_CARD_AVAILABLE', sessionReportCardId: src.id }
+      );
+      notificationService.notifyStudent(
+        schoolId,
+        src.student_id,
+        'SYSTEM',
+        `Annual Session Report Card Published: ${breakdown.sessionName}`,
+        `Your full-session cumulative report card for ${breakdown.sessionName} is now published.`,
+        { eventType: 'SESSION_REPORT_CARD_AVAILABLE', sessionReportCardId: src.id }
       );
       publishedCount++;
     }

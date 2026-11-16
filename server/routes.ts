@@ -1229,6 +1229,47 @@ apiRouter.post('/v1/auth/switch-school', requireAuth, async (req: AuthenticatedR
   });
 });
 
+// POST /api/v1/auth/exit-school (Clear active school workspace for Platform Super Admin returning to console)
+apiRouter.post('/v1/auth/exit-school', requireAuth, async (req: AuthenticatedRequest, res) => {
+  const user = req.user!;
+  if (user.is_platform_admin !== 1) {
+    return res.status(403).json({
+      error: 'FORBIDDEN',
+      message: 'Only Platform Super Admins can exit school scope to the Platform Console.',
+    });
+  }
+
+  const authHeader = req.headers.authorization;
+  let token: string | undefined;
+  if (authHeader && authHeader.startsWith('Bearer ')) {
+    token = authHeader.substring(7);
+  } else if (req.headers['x-session-token']) {
+    token = req.headers['x-session-token'] as string;
+  }
+
+  const pool = getPgPool();
+  if (pool && token) {
+    try {
+      await queryPg('UPDATE sessions SET school_id = NULL WHERE token = $1 AND user_id = $2', [token, user.id]);
+    } catch (e: any) {
+      console.warn('[exit-school PG Notice]', e?.message);
+    }
+  }
+  if (token) {
+    try {
+      cacheDb.prepare('UPDATE sessions SET school_id = NULL WHERE token = ? AND user_id = ?').run(token, user.id);
+    } catch {}
+  }
+
+  return res.json({
+    success: true,
+    activeSchoolId: null,
+    activeRole: null,
+    activeSchool: null,
+    activeSettings: null,
+  });
+});
+
 // POST /api/v1/auth/forgot-password
 apiRouter.post('/v1/auth/forgot-password', async (req, res) => {
   const { email } = req.body;

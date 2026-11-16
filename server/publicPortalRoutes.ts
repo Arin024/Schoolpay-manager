@@ -404,6 +404,60 @@ publicPortalRouter.post('/verify-document', async (req, res) => {
   }
 
   if (!card) {
+    // Also check Full-Session Cumulative Annual Report Cards (SRC-...)
+    if (getPgPool()) {
+      try {
+        const pgSessionRes = await queryPg(
+          `SELECT src.id, src.verification_code, src.status, src.average_score, src.subjects_count, src.published_at,
+                  s.id AS school_id, s.name AS school_name, s.slug AS school_slug, s.state AS school_state, s.lga AS school_lga,
+                  st.first_name, st.middle_name, st.last_name,
+                  c.name AS class_name,
+                  sess.name AS session_name,
+                  'Full Academic Session' AS term_name
+           FROM session_report_cards src
+           JOIN schools s ON s.id = src.school_id
+           JOIN students st ON st.id = src.student_id
+           LEFT JOIN classes c ON c.id = src.class_id
+           LEFT JOIN academic_sessions sess ON sess.id = src.academic_session_id
+           WHERE UPPER(TRIM(src.verification_code)) = UPPER($1)
+             AND src.status = 'PUBLISHED'
+             AND (s.is_deleted = 0 OR s.is_deleted IS NULL)
+             ${scopedSchoolId ? 'AND src.school_id = $2' : ''}
+           LIMIT 1`,
+          scopedSchoolId ? [cleanCode, scopedSchoolId] : [cleanCode]
+        );
+        card = pgSessionRes.rows[0] || null;
+      } catch (err: any) {
+        console.warn('[Public Verify Session Report Card PG Notice]', err?.message);
+      }
+    }
+    if (!card) {
+      try {
+        card = cacheDb
+          .prepare(
+            `SELECT src.id, src.verification_code, src.status, src.average_score, src.subjects_count, src.published_at,
+                    s.id AS school_id, s.name AS school_name, s.slug AS school_slug, s.state AS school_state, s.lga AS school_lga,
+                    st.first_name, st.middle_name, st.last_name,
+                    c.name AS class_name,
+                    sess.name AS session_name,
+                    'Full Academic Session' AS term_name
+             FROM session_report_cards src
+             JOIN schools s ON s.id = src.school_id
+             JOIN students st ON st.id = src.student_id
+             LEFT JOIN classes c ON c.id = src.class_id
+             LEFT JOIN academic_sessions sess ON sess.id = src.academic_session_id
+             WHERE UPPER(TRIM(src.verification_code)) = UPPER(?)
+               AND src.status = 'PUBLISHED'
+               AND UPPER(COALESCE(s.status, 'TRIAL')) != 'CANCELLED'
+               ${scopedSchoolId ? 'AND src.school_id = ?' : ''}
+             LIMIT 1`
+          )
+          .get(...(scopedSchoolId ? [cleanCode, scopedSchoolId] : [cleanCode])) as any;
+      } catch {}
+    }
+  }
+
+  if (!card) {
     return res.status(404).json({
       valid: false,
       error: 'DOCUMENT_NOT_FOUND',

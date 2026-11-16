@@ -27,6 +27,7 @@ export interface SchoolAcademicSettingsRecord {
   students_can_view_fees: number;
   teachers_can_view_fees: number;
   require_review_before_approve: number;
+  pass_mark?: number;
   updated_by?: string | null;
   updated_at?: string;
 }

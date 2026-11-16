@@ -350,6 +350,14 @@ export async function initDatabase() {
             await client.query(mig005Sql);
             console.log('[Neon PostgreSQL] Verified/applied migration 005_performance_parent_portal.sql');
           }
+
+          // Execute idempotent 006_session_report_cards.sql migration on Neon PostgreSQL before hydration
+          const mig006Path = path.resolve(process.cwd(), 'migrations/006_session_report_cards.sql');
+          if (fs.existsSync(mig006Path)) {
+            const mig006Sql = fs.readFileSync(mig006Path, 'utf8');
+            await client.query(mig006Sql);
+            console.log('[Neon PostgreSQL] Verified/applied migration 006_session_report_cards.sql');
+          }
         } finally {
           client.release();
         }

@@ -46,6 +46,11 @@ export const StudentPortalView: React.FC = () => {
 
   const [viewingRc, setViewingRc] = useState<ReportCardItem | null>(null);
   const [viewingReceipt, setViewingReceipt] = useState<ReceiptItem | null>(null);
+  const [genReportType, setGenReportType] = useState<'TERM' | 'SESSION'>('TERM');
+  const [genSessionId, setGenSessionId] = useState('');
+  const [genTermId, setGenTermId] = useState('');
+  const [generatingReport, setGeneratingReport] = useState(false);
+  const [reportGenError, setReportGenError] = useState<string | null>(null);
 
   const loadDashboard = async (sessionId = selectedSessionId, termId = selectedTermId) => {
     setLoading(true);
@@ -58,6 +63,12 @@ export const StudentPortalView: React.FC = () => {
       setData(res);
       if (res.sessions) {
         setSessions(res.sessions);
+        const activeSess = res.sessions.find((s) => s.status === 'ACTIVE') || res.sessions[0];
+        const activeTerm = activeSess?.terms?.find((t) => t.status === 'ACTIVE') || activeSess?.terms?.[0];
+        if (activeSess) {
+          setGenSessionId((prev) => prev || activeSess.id);
+          setGenTermId((prev) => prev || activeTerm?.id || '');
+        }
       }
     } catch (err: any) {
       setError(err?.message || 'Failed to load student portal');
@@ -76,6 +87,41 @@ export const StudentPortalView: React.FC = () => {
       setViewingRc(res.reportCard);
     } catch (err: any) {
       setError(err?.message || 'Failed to open report card');
+    }
+  };
+
+  const handleOpenSessionReportCard = async (id: string) => {
+    try {
+      const res = await api.getStudentSessionReportCard(id);
+      setViewingRc(res.reportCard);
+    } catch (err: any) {
+      setReportGenError(err?.message || 'Failed to open full-session cumulative report card');
+    }
+  };
+
+  const handleGenerateStudentReport = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!genSessionId) {
+      setReportGenError('Select an Academic Session first.');
+      return;
+    }
+    if (genReportType === 'TERM' && !genTermId) {
+      setReportGenError('Select a Term for the End-of-Term report card.');
+      return;
+    }
+    setGeneratingReport(true);
+    setReportGenError(null);
+    try {
+      const res = await api.generateStudentReportCard({
+        academic_session_id: genSessionId,
+        term_id: genReportType === 'TERM' ? genTermId : undefined,
+        report_type: genReportType,
+      });
+      setViewingRc(res.reportCard);
+    } catch (err: any) {
+      setReportGenError(err?.message || 'No published examination results available for this selection yet.');
+    } finally {
+      setGeneratingReport(false);
     }
   };
 
@@ -342,76 +388,302 @@ export const StudentPortalView: React.FC = () => {
 
       {/* RESULTS */}
       {tab === 'results' && (
-        <div className="bg-white rounded-2xl border border-slate-200 p-6 space-y-4">
-          <h3 className="text-sm font-bold text-slate-900">Published Examination Results</h3>
-          {data.results.length === 0 ? (
-            <p className="py-10 text-center text-xs text-slate-400">No published examination scores yet.</p>
-          ) : (
-            <div className="overflow-x-auto">
-              <table className="w-full text-left text-xs">
-                <thead>
-                  <tr className="border-b border-slate-200 text-slate-500 bg-slate-50/70">
-                    <th className="py-2.5 px-3">Examination</th>
-                    <th className="py-2.5 px-3">Subject</th>
-                    <th className="py-2.5 px-3 text-right">CA</th>
-                    <th className="py-2.5 px-3 text-right">Exam</th>
-                    <th className="py-2.5 px-3 text-right">Total</th>
-                    <th className="py-2.5 px-3 text-center">Grade</th>
-                    <th className="py-2.5 px-3">Remark</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-100">
-                  {data.results.map((r) => (
-                    <tr key={r.id}>
-                      <td className="py-2.5 px-3 text-slate-700">{r.exam_title}</td>
-                      <td className="py-2.5 px-3 font-semibold text-slate-900">{r.subject_name}</td>
-                      <td className="py-2.5 px-3 text-right tabular-nums">{r.ca_score ?? '—'}</td>
-                      <td className="py-2.5 px-3 text-right tabular-nums">{r.exam_score ?? '—'}</td>
-                      <td className="py-2.5 px-3 text-right font-bold tabular-nums">{r.total_score ?? '—'}</td>
-                      <td className="py-2.5 px-3 text-center font-bold text-emerald-700">{r.grade || '—'}</td>
-                      <td className="py-2.5 px-3 text-slate-600">{r.subject_remark || r.grade_remark || '—'}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
+        <div className="space-y-6">
+          <form
+            onSubmit={handleGenerateStudentReport}
+            className="bg-white rounded-2xl border border-slate-200 p-5 space-y-4 text-xs"
+          >
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-slate-100">
+              <div>
+                <h3 className="text-sm font-bold text-slate-900">
+                  Generate Performance Result / Report Card
+                </h3>
+                <p className="text-slate-500 mt-0.5">
+                  Compile your published End-of-Term or Full-Session Cumulative results to view or download as PDF.
+                </p>
+              </div>
+              <div className="inline-flex p-1 bg-slate-100 rounded-xl shrink-0">
+                <button
+                  type="button"
+                  onClick={() => setGenReportType('TERM')}
+                  className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition cursor-pointer whitespace-nowrap ${
+                    genReportType === 'TERM' ? 'bg-white text-slate-900 shadow-xs' : 'text-slate-600'
+                  }`}
+                >
+                  End-of-Term Report
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setGenReportType('SESSION')}
+                  className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition cursor-pointer whitespace-nowrap ${
+                    genReportType === 'SESSION' ? 'bg-white text-slate-900 shadow-xs' : 'text-slate-600'
+                  }`}
+                >
+                  Full-Session Cumulative
+                </button>
+              </div>
             </div>
-          )}
+
+            {reportGenError && (
+              <div className="p-3 rounded-xl bg-rose-50 border border-rose-200 text-rose-800">
+                {reportGenError}
+              </div>
+            )}
+
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 items-end">
+              <div>
+                <label className="block font-semibold text-slate-700 mb-1">Academic Session</label>
+                <select
+                  value={genSessionId}
+                  onChange={(e) => {
+                    const nextSess = e.target.value;
+                    setGenSessionId(nextSess);
+                    const matched = sessions.find((s) => s.id === nextSess);
+                    setGenTermId(matched?.terms?.[0]?.id || '');
+                  }}
+                  className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl"
+                >
+                  <option value="">Select Session...</option>
+                  {sessions.map((s) => (
+                    <option key={s.id} value={s.id}>
+                      {s.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              {genReportType === 'TERM' && (
+                <div>
+                  <label className="block font-semibold text-slate-700 mb-1">Term</label>
+                  <select
+                    value={genTermId}
+                    onChange={(e) => setGenTermId(e.target.value)}
+                    className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl"
+                  >
+                    <option value="">Select Term...</option>
+                    {(sessions.find((s) => s.id === genSessionId)?.terms || []).map((t) => (
+                      <option key={t.id} value={t.id}>
+                        {t.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
+              <div className={genReportType === 'SESSION' ? 'sm:col-span-2 flex justify-end' : ''}>
+                <button
+                  type="submit"
+                  disabled={generatingReport || !genSessionId}
+                  className="w-full sm:w-auto px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl font-bold inline-flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-50 whitespace-nowrap"
+                >
+                  <Printer className="w-3.5 h-3.5" />
+                  <span>{generatingReport ? 'Compiling...' : 'Generate & View Report Card'}</span>
+                </button>
+              </div>
+            </div>
+          </form>
+
+          <div className="bg-white rounded-2xl border border-slate-200 p-6 space-y-4">
+            <h3 className="text-sm font-bold text-slate-900">Published Examination Results</h3>
+            {data.results.length === 0 ? (
+              <p className="py-10 text-center text-xs text-slate-400">No published examination scores yet.</p>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-left text-xs">
+                  <thead>
+                    <tr className="border-b border-slate-200 text-slate-500 bg-slate-50/70">
+                      <th className="py-2.5 px-3">Examination</th>
+                      <th className="py-2.5 px-3">Subject</th>
+                      <th className="py-2.5 px-3 text-right">CA</th>
+                      <th className="py-2.5 px-3 text-right">Exam</th>
+                      <th className="py-2.5 px-3 text-right">Total</th>
+                      <th className="py-2.5 px-3 text-center">Grade</th>
+                      <th className="py-2.5 px-3">Remark</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100">
+                    {data.results.map((r) => (
+                      <tr key={r.id}>
+                        <td className="py-2.5 px-3 text-slate-700">{r.exam_title}</td>
+                        <td className="py-2.5 px-3 font-semibold text-slate-900">{r.subject_name}</td>
+                        <td className="py-2.5 px-3 text-right tabular-nums">{r.ca_score ?? '—'}</td>
+                        <td className="py-2.5 px-3 text-right tabular-nums">{r.exam_score ?? '—'}</td>
+                        <td className="py-2.5 px-3 text-right font-bold tabular-nums">{r.total_score ?? '—'}</td>
+                        <td className="py-2.5 px-3 text-center font-bold text-emerald-700">{r.grade || '—'}</td>
+                        <td className="py-2.5 px-3 text-slate-600">{r.subject_remark || r.grade_remark || '—'}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
         </div>
       )}
 
       {/* REPORT CARDS */}
       {tab === 'reports' && (
-        <div className="bg-white rounded-2xl border border-slate-200 p-6 space-y-4">
-          <h3 className="text-sm font-bold text-slate-900">Published Report Cards</h3>
-          {data.reportCards.length === 0 ? (
-            <p className="py-10 text-center text-xs text-slate-400">No published report cards available yet.</p>
-          ) : (
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs">
-              {data.reportCards.map((rc) => (
-                <div key={rc.id} className="p-4 rounded-xl border border-slate-200 flex items-center justify-between gap-4">
-                  <div className="space-y-1">
-                    <div className="flex items-center gap-2">
-                      <p className="font-bold text-slate-900 text-sm">
-                        {rc.session_name} · {rc.term_name}
-                      </p>
-                      <WorkflowStatusBadge status={rc.status} />
-                    </div>
-                    <p className="text-slate-600 tabular-nums">
-                      Average: <strong>{Number(rc.average_score || 0).toFixed(1)}%</strong>
-                    </p>
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() => handleOpenReportCard(rc.id)}
-                    className="px-3.5 py-2 bg-slate-900 hover:bg-slate-800 text-white rounded-xl font-semibold inline-flex items-center gap-1.5 cursor-pointer"
-                  >
-                    <Printer className="w-3.5 h-3.5" />
-                    <span>Open &amp; Print</span>
-                  </button>
-                </div>
-              ))}
+        <div className="space-y-6">
+          <form
+            onSubmit={handleGenerateStudentReport}
+            className="bg-white rounded-2xl border border-slate-200 p-5 space-y-4 text-xs"
+          >
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-slate-100">
+              <div>
+                <h3 className="text-sm font-bold text-slate-900">
+                  Generate End-of-Term or Session Report Card
+                </h3>
+                <p className="text-slate-500 mt-0.5">
+                  Compile published results for any term or an entire academic session to print or save as PDF.
+                </p>
+              </div>
+              <div className="inline-flex p-1 bg-slate-100 rounded-xl shrink-0">
+                <button
+                  type="button"
+                  onClick={() => setGenReportType('TERM')}
+                  className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition cursor-pointer whitespace-nowrap ${
+                    genReportType === 'TERM' ? 'bg-white text-slate-900 shadow-xs' : 'text-slate-600'
+                  }`}
+                >
+                  End-of-Term Report
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setGenReportType('SESSION')}
+                  className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition cursor-pointer whitespace-nowrap ${
+                    genReportType === 'SESSION' ? 'bg-white text-slate-900 shadow-xs' : 'text-slate-600'
+                  }`}
+                >
+                  Full-Session Cumulative
+                </button>
+              </div>
             </div>
-          )}
+
+            {reportGenError && (
+              <div className="p-3 rounded-xl bg-rose-50 border border-rose-200 text-rose-800">
+                {reportGenError}
+              </div>
+            )}
+
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 items-end">
+              <div>
+                <label className="block font-semibold text-slate-700 mb-1">Academic Session</label>
+                <select
+                  value={genSessionId}
+                  onChange={(e) => {
+                    const nextSess = e.target.value;
+                    setGenSessionId(nextSess);
+                    const matched = sessions.find((s) => s.id === nextSess);
+                    setGenTermId(matched?.terms?.[0]?.id || '');
+                  }}
+                  className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl"
+                >
+                  <option value="">Select Session...</option>
+                  {sessions.map((s) => (
+                    <option key={s.id} value={s.id}>
+                      {s.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              {genReportType === 'TERM' && (
+                <div>
+                  <label className="block font-semibold text-slate-700 mb-1">Term</label>
+                  <select
+                    value={genTermId}
+                    onChange={(e) => setGenTermId(e.target.value)}
+                    className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl"
+                  >
+                    <option value="">Select Term...</option>
+                    {(sessions.find((s) => s.id === genSessionId)?.terms || []).map((t) => (
+                      <option key={t.id} value={t.id}>
+                        {t.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
+              <div className={genReportType === 'SESSION' ? 'sm:col-span-2 flex justify-end' : ''}>
+                <button
+                  type="submit"
+                  disabled={generatingReport || !genSessionId}
+                  className="w-full sm:w-auto px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl font-bold inline-flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-50 whitespace-nowrap"
+                >
+                  <Printer className="w-3.5 h-3.5" />
+                  <span>{generatingReport ? 'Compiling...' : 'Generate & View Report Card'}</span>
+                </button>
+              </div>
+            </div>
+          </form>
+
+          <div className="bg-white rounded-2xl border border-slate-200 p-6 space-y-4">
+            <h3 className="text-sm font-bold text-slate-900">Published End-of-Term Report Cards</h3>
+            {data.reportCards.length === 0 ? (
+              <p className="py-8 text-center text-xs text-slate-400">
+                No official published end-of-term report cards archived yet. Use the generator above when scores are published.
+              </p>
+            ) : (
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs">
+                {data.reportCards.map((rc) => (
+                  <div key={rc.id} className="p-4 rounded-xl border border-slate-200 flex items-center justify-between gap-4">
+                    <div className="space-y-1">
+                      <div className="flex items-center gap-2">
+                        <p className="font-bold text-slate-900 text-sm">
+                          {rc.session_name} · {rc.term_name}
+                        </p>
+                        <WorkflowStatusBadge status={rc.status} />
+                      </div>
+                      <p className="text-slate-600 tabular-nums">
+                        Average: <strong>{Number(rc.average_score || 0).toFixed(1)}%</strong>
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => handleOpenReportCard(rc.id)}
+                      className="px-3.5 py-2 bg-slate-900 hover:bg-slate-800 text-white rounded-xl font-semibold inline-flex items-center gap-1.5 cursor-pointer"
+                    >
+                      <Printer className="w-3.5 h-3.5" />
+                      <span>Open &amp; Print</span>
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          <div className="bg-white rounded-2xl border border-slate-200 p-6 space-y-4">
+            <h3 className="text-sm font-bold text-slate-900">Published Full-Session Cumulative Report Cards</h3>
+            {(!data.sessionReportCards || data.sessionReportCards.length === 0) ? (
+              <p className="py-8 text-center text-xs text-slate-400">
+                No published full-session cumulative report cards yet.
+              </p>
+            ) : (
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs">
+                {data.sessionReportCards.map((src) => (
+                  <div key={src.id} className="p-4 rounded-xl border border-slate-200 flex items-center justify-between gap-4">
+                    <div className="space-y-1">
+                      <div className="flex items-center gap-2">
+                        <p className="font-bold text-slate-900 text-sm">
+                          {src.session_name} · Annual Cumulative
+                        </p>
+                        <WorkflowStatusBadge status={src.status} />
+                      </div>
+                      <p className="text-slate-600 tabular-nums">
+                        Annual Avg: <strong>{Number(src.average_score || 0).toFixed(1)}%</strong>
+                        {src.promotion_status ? ` · ${src.promotion_status}` : ''}
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => handleOpenSessionReportCard(src.id)}
+                      className="px-3.5 py-2 bg-slate-900 hover:bg-slate-800 text-white rounded-xl font-semibold inline-flex items-center gap-1.5 cursor-pointer"
+                    >
+                      <Printer className="w-3.5 h-3.5" />
+                      <span>Open &amp; Print</span>
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
         </div>
       )}
 

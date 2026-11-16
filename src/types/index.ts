@@ -854,8 +854,10 @@ export interface ScoreCorrectionLogItem {
 }
 
 export interface ReportCardBreakdown {
+  report_type?: 'TERM' | 'SESSION';
   reportCardId: string;
   verificationCode: string;
+  isLiveGenerated?: boolean;
   school?: Partial<School>;
   student?: Partial<Student>;
   sessionName: string;
@@ -864,18 +866,43 @@ export interface ReportCardBreakdown {
   total_score: number;
   average_score: number;
   subjects_count: number;
+  terms_count?: number;
   class_position: number | null;
   class_size: number | null;
+  promotion_status?: string | null;
+  passMark?: number;
+  gradingScale?: GradingScaleBand[];
   overall_grade?: { grade: string; remark: string };
+  terms?: Array<{ id: string; name: string }>;
+  term_averages?: Array<{
+    term_id: string;
+    term_name: string;
+    subjects_count: number;
+    total_score: number;
+    average_score: number;
+    grade: string;
+  }>;
   subjects: Array<{
     subject_id: string;
     subject_name: string;
     subject_code?: string;
-    ca_score: number | null;
-    exam_score: number | null;
+    ca_score?: number | null;
+    exam_score?: number | null;
     ca_max_score?: number;
     exam_max_score?: number;
     total_score: number | null;
+    cumulative_total?: number;
+    cumulative_average?: number;
+    terms_taken?: number;
+    term_scores?: Array<{
+      term_id: string;
+      term_name: string;
+      ca_score: number | null;
+      exam_score: number | null;
+      total_score: number | null;
+      percentage: number | null;
+      grade: string | null;
+    }>;
     grade?: string | null;
     grade_remark?: string | null;
     subject_remark?: string | null;
@@ -902,6 +929,7 @@ export interface ReportCardBreakdown {
 
 export interface ReportCardItem {
   id: string;
+  report_type?: 'TERM' | 'SESSION';
   school_id: string;
   student_id: string;
   student_name?: string;
@@ -910,15 +938,18 @@ export interface ReportCardItem {
   class_name?: string | null;
   academic_session_id: string;
   session_name?: string;
-  term_id: string;
+  term_id?: string;
   term_name?: string;
   examination_id?: string | null;
   status: ExamWorkflowStatus;
   total_score: number;
   average_score: number;
   subjects_count: number;
+  terms_count?: number;
   class_position: number | null;
   class_size: number | null;
+  promotion_status?: string | null;
+  term_averages?: ReportCardBreakdown['term_averages'];
   teacher_remark?: string | null;
   principal_remark?: string | null;
   verification_code?: string | null;
@@ -926,6 +957,8 @@ export interface ReportCardItem {
   overall_grade?: { grade: string; remark: string };
   breakdown?: ReportCardBreakdown | null;
 }
+
+export type SessionReportCardItem = ReportCardItem;
 
 export interface AttendanceRecordItem {
   id: string;
@@ -1117,6 +1150,7 @@ export interface ParentDashboardData {
   results: StudentScoreItem[];
   termTrend: Array<{ key: string; label: string; averagePct: number; subjectsCount: number }>;
   reportCards: ReportCardItem[];
+  sessionReportCards?: SessionReportCardItem[];
   attendance: {
     summary: {
       totalDays: number;
@@ -1156,6 +1190,7 @@ export interface StudentDashboardData {
   results: StudentScoreItem[];
   termTrend: Array<{ key: string; label: string; averagePct: number; subjectsCount: number }>;
   reportCards: ReportCardItem[];
+  sessionReportCards?: SessionReportCardItem[];
   attendance: {
     summary: {
       totalDays: number;

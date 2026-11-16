@@ -23,6 +23,8 @@ interface AuthContextType {
   registerSchoolSuccess: (data: any) => void;
   logout: () => Promise<void>;
   switchSchool: (schoolId: string) => Promise<void>;
+  enterSchoolAsSuperAdmin: (schoolId: string) => Promise<void>;
+  exitSchoolWorkspace: () => Promise<void>;
   refreshMe: () => Promise<void>;
   startImpersonation: (token: string, schoolId: string) => Promise<void>;
   stopImpersonation: () => Promise<void>;
@@ -218,7 +220,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       const switched = await api.switchActiveSchool(schoolId);
       if (switched.activeSchool) setActiveSchool(switched.activeSchool);
       if (switched.activeSettings) setActiveSettings(switched.activeSettings);
-      if (switched.activeRole) setActiveRole(switched.activeRole);
+      if (switched.activeRole !== undefined) setActiveRole(switched.activeRole);
     } catch {
       try {
         const details = await api.getSchoolProfile(schoolId);
@@ -227,6 +229,42 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       } catch (e) {
         console.error('Failed to switch school profile:', e);
       }
+    }
+  };
+
+  const enterSchoolAsSuperAdmin = async (schoolId: string) => {
+    if (!user || user.is_platform_admin !== 1) return;
+    localStorage.setItem('bursariq_active_school', schoolId);
+    localStorage.setItem('schoolpay_active_school', schoolId);
+    setActiveSchoolId(schoolId);
+    setActiveRole(null);
+
+    try {
+      const switched = await api.switchActiveSchool(schoolId);
+      if (switched.activeSchool) setActiveSchool(switched.activeSchool);
+      if (switched.activeSettings) setActiveSettings(switched.activeSettings);
+    } catch {
+      try {
+        const details = await api.getSchoolProfile(schoolId);
+        setActiveSchool(details.school);
+        setActiveSettings(details.settings);
+      } catch (e) {
+        console.error('Failed to enter school workspace as Super Admin:', e);
+      }
+    }
+  };
+
+  const exitSchoolWorkspace = async () => {
+    localStorage.removeItem('bursariq_active_school');
+    localStorage.removeItem('schoolpay_active_school');
+    setActiveSchoolId(null);
+    setActiveSchool(null);
+    setActiveSettings(null);
+    setActiveRole(null);
+    try {
+      await api.exitActiveSchool();
+    } catch {
+      // non-fatal cleanup
     }
   };
 
@@ -305,6 +343,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         registerSchoolSuccess,
         logout,
         switchSchool,
+        enterSchoolAsSuperAdmin,
+        exitSchoolWorkspace,
         refreshMe,
         startImpersonation,
         stopImpersonation,

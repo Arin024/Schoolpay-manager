@@ -131,8 +131,9 @@ export const Header: React.FC<HeaderProps> = ({
                 {/* If Super Admin, show platform switch button */}
                 {isSuperAdmin && (
                   <button
-                    onClick={() => setActiveView(activeView === 'superadmin' ? 'school' : 'superadmin')}
-                    className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold border transition ${
+                    type="button"
+                    onClick={() => setActiveView(activeView === 'superadmin' ? (activeSchool ? 'school' : 'superadmin') : 'superadmin')}
+                    className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold border transition cursor-pointer whitespace-nowrap shrink-0 ${
                       activeView === 'superadmin'
                         ? 'bg-purple-600 text-white border-purple-500 shadow-sm'
                         : 'bg-purple-950/50 hover:bg-purple-900/60 text-purple-300 border-purple-800'

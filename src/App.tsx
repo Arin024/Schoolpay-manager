@@ -1,6 +1,7 @@
 import { PWAUpdateNotification } from './components/common/PWAUpdateNotification.tsx';
 import React, { useState, useEffect, useCallback } from 'react';
 import { AuthProvider, useAuth } from './context/AuthContext.js';
+import { api } from './services/api.js';
 import { Header } from './components/common/Header.js';
 import { Footer } from './components/common/Footer.js';
 import { LoginForm } from './components/auth/LoginForm.js';
@@ -143,9 +144,23 @@ function parsePortalSlugFromLocation(): string | null {
 }
 
 const AppContent: React.FC = () => {
-  const { user, isSuperAdmin, isLoading, activeSchool, activeSettings, activeRole, logout } = useAuth();
+  const {
+    user,
+    isSuperAdmin,
+    isLoading,
+    activeSchool,
+    activeSchoolId,
+    activeSettings,
+    activeRole,
+    impersonatedBy,
+    enterSchoolAsSuperAdmin,
+    exitSchoolWorkspace,
+    logout,
+  } = useAuth();
   const [activeView, setActiveView] = useState<AppView>('school');
   const [schoolTab, setSchoolTab] = useState<SchoolTab>('overview');
+  const [adminSchoolsList, setAdminSchoolsList] = useState<Array<{ id: string; name: string; state?: string }>>([]);
+  const [switchingTargetSchool, setSwitchingTargetSchool] = useState(false);
   const [portalSlug, setPortalSlug] = useState<string | null>(() => parsePortalSlugFromLocation());
   const [registeredSchoolName, setRegisteredSchoolName] = useState<string | undefined>(undefined);
   const [openEnrollOnStudentTab, setOpenEnrollOnStudentTab] = useState(false);
@@ -154,6 +169,22 @@ const AppContent: React.FC = () => {
   const [isForgotModalOpen, setIsForgotModalOpen] = useState(false);
   const [isSecurityModalOpen, setIsSecurityModalOpen] = useState(false);
   const [recoveryTicketFromUrl, setRecoveryTicketFromUrl] = useState<string>('');
+
+  // Load school selector list for SuperAdmin quick workspace switching
+  useEffect(() => {
+    if (!isSuperAdmin || !user) {
+      setAdminSchoolsList([]);
+      return;
+    }
+    api
+      .getAdminSchools()
+      .then((res) => {
+        if (res?.schools) setAdminSchoolsList(res.schools);
+      })
+      .catch(() => {
+        // non-fatal
+      });
+  }, [isSuperAdmin, user?.id]);
 
   // Auto-detect password recovery links from email or admin sharing (?recovery_ticket=... or ?token=...)
   useEffect(() => {
@@ -257,6 +288,10 @@ const AppContent: React.FC = () => {
       const nextTab: SchoolTab = isTabAllowedForRole(requestedTab, activeRole?.role_name, isSuperAdmin)
         ? requestedTab
         : 'overview';
+      if (tab && tab !== 'students') {
+        setOpenEnrollOnStudentTab(false);
+        setOpenImportOnStudentTab(false);
+      }
       setActiveView(safeView);
       if (tab || nextTab !== schoolTab) {
         setSchoolTab(nextTab);
@@ -283,6 +318,31 @@ const AppContent: React.FC = () => {
     },
     [schoolTab, activeSchool, activeRole?.role_name, isSuperAdmin, user, updatePageSeo]
   );
+
+  const handleSuperAdminEnterSchool = useCallback(
+    async (schoolId: string, initialTab = 'overview', action?: 'enroll' | 'import') => {
+      setSwitchingTargetSchool(true);
+      try {
+        await enterSchoolAsSuperAdmin(schoolId);
+        setOpenEnrollOnStudentTab(action === 'enroll');
+        setOpenImportOnStudentTab(action === 'import');
+        const nextTab: SchoolTab = ALL_SCHOOL_TABS.includes(initialTab as SchoolTab)
+          ? (initialTab as SchoolTab)
+          : 'overview';
+        navigateTo('school', nextTab);
+      } finally {
+        setSwitchingTargetSchool(false);
+      }
+    },
+    [enterSchoolAsSuperAdmin, navigateTo]
+  );
+
+  const handleExitSuperAdminSchool = useCallback(async () => {
+    setOpenEnrollOnStudentTab(false);
+    setOpenImportOnStudentTab(false);
+    await exitSchoolWorkspace();
+    navigateTo('superadmin');
+  }, [exitSchoolWorkspace, navigateTo]);
 
   // Enforce allowed tab whenever user, role, or school switches
   useEffect(() => {
@@ -747,10 +807,66 @@ const AppContent: React.FC = () => {
           </div>
         ) : isSuperAdmin && (activeView === 'superadmin' || !activeSchool) ? (
           /* Super Admin Platform View */
-          <SuperAdminDashboard />
+          <SuperAdminDashboard onEnterSchool={handleSuperAdminEnterSchool} />
         ) : (
           /* Dedicated School Environment */
           <div className="space-y-6">
+            {/* Platform SuperAdmin Assisted School Workspace Bar */}
+            {isSuperAdmin && activeSchool && !impersonatedBy && (
+              <div className="bg-slate-900 text-white rounded-2xl border border-slate-800 px-5 py-3.5 flex flex-col lg:flex-row lg:items-center justify-between gap-3">
+                <div className="space-y-0.5">
+                  <p className="text-xs font-bold text-emerald-400">
+                    Platform SuperAdmin · Assisted School Data Entry Mode
+                  </p>
+                  <p className="text-xs text-slate-300">
+                    Entering and managing records for <strong className="text-white">{activeSchool.name}</strong> without affecting other tenants.
+                  </p>
+                </div>
+                <div className="flex flex-wrap items-center gap-2">
+                  {adminSchoolsList.length > 0 && (
+                    <select
+                      aria-label="Switch target school workspace"
+                      disabled={switchingTargetSchool}
+                      value={activeSchoolId || activeSchool.id}
+                      onChange={(e) => {
+                        if (e.target.value && e.target.value !== activeSchool.id) {
+                          handleSuperAdminEnterSchool(e.target.value, schoolTab);
+                        }
+                      }}
+                      className="px-3 py-1.5 bg-slate-800 border border-slate-700 rounded-xl text-xs text-white cursor-pointer max-w-[240px] truncate"
+                    >
+                      {adminSchoolsList.map((s) => (
+                        <option key={s.id} value={s.id}>
+                          {s.name}{s.state ? ` (${s.state})` : ''}
+                        </option>
+                      ))}
+                    </select>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => navigateTo('school', 'students')}
+                    className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 border border-slate-700 text-xs font-semibold rounded-xl cursor-pointer whitespace-nowrap"
+                  >
+                    Students
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => navigateTo('school', 'performance')}
+                    className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 border border-slate-700 text-xs font-semibold rounded-xl cursor-pointer whitespace-nowrap"
+                  >
+                    Exams &amp; Report Cards
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleExitSuperAdminSchool}
+                    className="px-3.5 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold rounded-xl cursor-pointer whitespace-nowrap"
+                  >
+                    Return to Platform Console
+                  </button>
+                </div>
+              </div>
+            )}
+
             {/* School Hero Greeting Banner */}
             {activeSchool && (
               <div className="bg-white rounded-2xl border border-slate-200/90 shadow-sm p-6 relative overflow-hidden">
@@ -1133,6 +1249,7 @@ const AppContent: React.FC = () => {
             {schoolTab === 'subscription' && <SchoolSubscriptionView />}
             {schoolTab === 'students' && (
               <SchoolStudentsView
+                key={`students-${activeSchool?.id || 'none'}-${openEnrollOnStudentTab ? 'enroll' : openImportOnStudentTab ? 'import' : 'list'}`}
                 initialOpenEnroll={openEnrollOnStudentTab}
                 initialOpenImport={openImportOnStudentTab}
               />

@@ -15,6 +15,7 @@ import {
 } from './accessControl.ts';
 import { toNaira } from './financeUtils.ts';
 import { paymentService } from './paymentService.ts';
+import { compileSessionReportCard, compileTermReportCard } from './reportCardService.ts';
 
 export const portalRouter = Router();
 
@@ -145,9 +146,50 @@ async function fetchStudentPublishedReportCards(
     const breakdown = sanitizeBreakdownForPortal(rc.snapshot_json, rc, showClassPosition);
     return {
       ...rc,
+      report_type: 'TERM',
       class_position: showClassPosition ? rc.class_position : null,
       class_size: showClassPosition ? rc.class_size : null,
       overall_grade: computeGrade(Number(rc.average_score || 0), 100, gradingScale),
+      breakdown,
+    };
+  });
+}
+
+async function fetchStudentPublishedSessionReportCards(
+  schoolId: string,
+  studentId: string,
+  showClassPosition: boolean,
+  gradingScale: any[]
+) {
+  const rows = await dbAll(
+    `SELECT src.*, ses.name as session_name, c.name as class_name
+     FROM session_report_cards src
+     LEFT JOIN academic_sessions ses ON src.academic_session_id = ses.id
+     LEFT JOIN classes c ON src.class_id = c.id
+     WHERE src.school_id = $1 AND src.student_id = $2 AND src.status = 'PUBLISHED'
+     ORDER BY src.published_at DESC, src.created_at DESC`,
+    `SELECT src.*, ses.name as session_name, c.name as class_name
+     FROM session_report_cards src
+     LEFT JOIN academic_sessions ses ON src.academic_session_id = ses.id
+     LEFT JOIN classes c ON src.class_id = c.id
+     WHERE src.school_id = ? AND src.student_id = ? AND src.status = 'PUBLISHED'
+     ORDER BY src.published_at DESC, src.created_at DESC`,
+    [schoolId, studentId]
+  );
+
+  return rows.map((src) => {
+    const breakdown = sanitizeBreakdownForPortal(src.snapshot_json, src, showClassPosition);
+    let termAverages = [];
+    try {
+      termAverages = src.term_averages_json ? JSON.parse(src.term_averages_json) : [];
+    } catch {}
+    return {
+      ...src,
+      report_type: 'SESSION',
+      term_averages: termAverages,
+      class_position: showClassPosition ? src.class_position : null,
+      class_size: showClassPosition ? src.class_size : null,
+      overall_grade: computeGrade(Number(src.average_score || 0), 100, gradingScale),
       breakdown,
     };
   });
@@ -514,9 +556,10 @@ portalRouter.get(
       });
     }
 
-    const [results, reportCards, attendance, behaviour, teacherRemarks, fees, announcements] = await Promise.all([
+    const [results, reportCards, sessionReportCards, attendance, behaviour, teacherRemarks, fees, announcements] = await Promise.all([
       fetchStudentPublishedScores(schoolId, selectedChild.id, academic_session_id, term_id),
       fetchStudentPublishedReportCards(schoolId, selectedChild.id, Boolean(settings.show_class_position), settings.grading_scale),
+      fetchStudentPublishedSessionReportCards(schoolId, selectedChild.id, Boolean(settings.show_class_position), settings.grading_scale),
       fetchStudentPublishedAttendance(schoolId, selectedChild.id, academic_session_id, term_id),
       dbAll(
         `SELECT br.*, ses.name as session_name, t.name as term_name
@@ -582,6 +625,7 @@ portalRouter.get(
       results,
       termTrend: buildTermPerformanceTrend(results),
       reportCards,
+      sessionReportCards,
       attendance,
       behaviour,
       teacherRemarks,
@@ -646,11 +690,128 @@ portalRouter.get(
       success: true,
       reportCard: {
         ...rc,
+        report_type: 'TERM',
         class_position: settings.show_class_position ? rc.class_position : null,
         class_size: settings.show_class_position ? rc.class_size : null,
         breakdown,
       },
     });
+  }
+);
+
+portalRouter.get(
+  '/parent/session-report-cards/:id',
+  requireAuth,
+  requireTenant,
+  requireRole(PARENT_PORTAL_ROLES),
+  async (req: AuthenticatedRequest, res) => {
+    const schoolId = req.targetSchoolId!;
+    const { id } = req.params;
+
+    const src = await dbGet(
+      `SELECT src.*, s.full_name as student_name, s.admission_number, COALESCE(c.name, s.class_name) as class_name,
+              ses.name as session_name
+       FROM session_report_cards src
+       JOIN students s ON src.student_id = s.id
+       LEFT JOIN classes c ON COALESCE(src.class_id, s.class_id) = c.id
+       LEFT JOIN academic_sessions ses ON src.academic_session_id = ses.id
+       WHERE src.id = $1 AND src.school_id = $2`,
+      `SELECT src.*, s.full_name as student_name, s.admission_number, COALESCE(c.name, s.class_name) as class_name,
+              ses.name as session_name
+       FROM session_report_cards src
+       JOIN students s ON src.student_id = s.id
+       LEFT JOIN classes c ON COALESCE(src.class_id, s.class_id) = c.id
+       LEFT JOIN academic_sessions ses ON src.academic_session_id = ses.id
+       WHERE src.id = ? AND src.school_id = ?`,
+      [id, schoolId]
+    );
+
+    if (!src || src.status !== 'PUBLISHED') {
+      return res.status(404).json({
+        error: 'SESSION_REPORT_CARD_UNAVAILABLE',
+        message: 'Published session report card not found.',
+      });
+    }
+
+    if (!(await canAccessStudent(req, src.student_id))) {
+      return res.status(403).json({
+        error: 'UNAUTHORIZED_STUDENT_ACCESS',
+        message: 'You are not authorized to view this student session report card.',
+      });
+    }
+
+    const settings = await getSchoolAcademicSettings(schoolId);
+    const breakdown = sanitizeBreakdownForPortal(src.snapshot_json, src, Boolean(settings.show_class_position));
+
+    return res.json({
+      success: true,
+      reportCard: {
+        ...src,
+        report_type: 'SESSION',
+        class_position: settings.show_class_position ? src.class_position : null,
+        class_size: settings.show_class_position ? src.class_size : null,
+        breakdown,
+      },
+    });
+  }
+);
+
+// Parent on-demand End-of-Term or Full-Session Report Card / Performance Result generation (published records only)
+portalRouter.post(
+  '/parent/report-cards/generate',
+  requireAuth,
+  requireTenant,
+  requireRole(PARENT_PORTAL_ROLES),
+  async (req: AuthenticatedRequest, res) => {
+    const schoolId = req.targetSchoolId!;
+    const { student_id, report_type = 'TERM', academic_session_id, term_id } = req.body || {};
+
+    if (!student_id || !academic_session_id) {
+      return res.status(400).json({
+        error: 'MISSING_FIELDS',
+        message: 'student_id and academic_session_id are required.',
+      });
+    }
+
+    if (!(await canAccessStudent(req, student_id))) {
+      return res.status(403).json({
+        error: 'UNAUTHORIZED_STUDENT_ACCESS',
+        message: 'You are not authorized to generate report cards for this student.',
+      });
+    }
+
+    if (report_type === 'SESSION') {
+      const compiled = await compileSessionReportCard(schoolId, student_id, academic_session_id, {
+        onlyPublished: true,
+        visibilityRole: 'PARENT',
+      });
+      if (!compiled) {
+        return res.status(404).json({
+          error: 'NO_PUBLISHED_RESULTS',
+          message: 'No published examination results or session report cards are available for this session yet.',
+        });
+      }
+      return res.json({ success: true, source: compiled.source, reportCard: compiled.reportCard });
+    }
+
+    if (!term_id) {
+      return res.status(400).json({
+        error: 'MISSING_TERM',
+        message: 'term_id is required when generating an End-of-Term report card.',
+      });
+    }
+
+    const compiled = await compileTermReportCard(schoolId, student_id, academic_session_id, term_id, {
+      onlyPublished: true,
+      visibilityRole: 'PARENT',
+    });
+    if (!compiled) {
+      return res.status(404).json({
+        error: 'NO_PUBLISHED_RESULTS',
+        message: 'No published examination results or report card are available for the selected term yet.',
+      });
+    }
+    return res.json({ success: true, source: compiled.source, reportCard: compiled.reportCard });
   }
 );
 
@@ -725,6 +886,7 @@ portalRouter.get(
         results: [],
         termTrend: [],
         reportCards: [],
+        sessionReportCards: [],
         attendance: { summary: { totalDays: 0, present: 0, absent: 0, late: 0, excused: 0, attendanceRatePct: 0 }, records: [] },
         behaviour: [],
         teacherRemarks: [],
@@ -739,9 +901,10 @@ portalRouter.get(
     }
 
     const feesAllowed = Boolean(settings.students_can_view_fees);
-    const [results, reportCards, attendance, behaviour, teacherRemarks, fees, announcements] = await Promise.all([
+    const [results, reportCards, sessionReportCards, attendance, behaviour, teacherRemarks, fees, announcements] = await Promise.all([
       fetchStudentPublishedScores(schoolId, student.id, academic_session_id, term_id),
       fetchStudentPublishedReportCards(schoolId, student.id, Boolean(settings.show_class_position), settings.grading_scale),
+      fetchStudentPublishedSessionReportCards(schoolId, student.id, Boolean(settings.show_class_position), settings.grading_scale),
       fetchStudentPublishedAttendance(schoolId, student.id, academic_session_id, term_id),
       dbAll(
         `SELECT br.*, ses.name as session_name, t.name as term_name
@@ -807,6 +970,7 @@ portalRouter.get(
       results,
       termTrend: buildTermPerformanceTrend(results),
       reportCards,
+      sessionReportCards,
       attendance,
       behaviour,
       teacherRemarks,
@@ -871,11 +1035,141 @@ portalRouter.get(
       success: true,
       reportCard: {
         ...rc,
+        report_type: 'TERM',
         class_position: settings.show_class_position ? rc.class_position : null,
         class_size: settings.show_class_position ? rc.class_size : null,
         breakdown,
       },
     });
+  }
+);
+
+portalRouter.get(
+  '/student/session-report-cards/:id',
+  requireAuth,
+  requireTenant,
+  requireRole(STUDENT_PORTAL_ROLES),
+  async (req: AuthenticatedRequest, res) => {
+    const schoolId = req.targetSchoolId!;
+    const { id } = req.params;
+
+    const src = await dbGet(
+      `SELECT src.*, s.full_name as student_name, s.admission_number, COALESCE(c.name, s.class_name) as class_name,
+              ses.name as session_name
+       FROM session_report_cards src
+       JOIN students s ON src.student_id = s.id
+       LEFT JOIN classes c ON COALESCE(src.class_id, s.class_id) = c.id
+       LEFT JOIN academic_sessions ses ON src.academic_session_id = ses.id
+       WHERE src.id = $1 AND src.school_id = $2`,
+      `SELECT src.*, s.full_name as student_name, s.admission_number, COALESCE(c.name, s.class_name) as class_name,
+              ses.name as session_name
+       FROM session_report_cards src
+       JOIN students s ON src.student_id = s.id
+       LEFT JOIN classes c ON COALESCE(src.class_id, s.class_id) = c.id
+       LEFT JOIN academic_sessions ses ON src.academic_session_id = ses.id
+       WHERE src.id = ? AND src.school_id = ?`,
+      [id, schoolId]
+    );
+
+    if (!src || src.status !== 'PUBLISHED') {
+      return res.status(404).json({
+        error: 'SESSION_REPORT_CARD_UNAVAILABLE',
+        message: 'Published session report card not found.',
+      });
+    }
+
+    if (!(await canAccessStudent(req, src.student_id))) {
+      return res.status(403).json({
+        error: 'UNAUTHORIZED_STUDENT_ACCESS',
+        message: 'You are not authorized to view this session report card.',
+      });
+    }
+
+    const settings = await getSchoolAcademicSettings(schoolId);
+    const breakdown = sanitizeBreakdownForPortal(src.snapshot_json, src, Boolean(settings.show_class_position));
+
+    return res.json({
+      success: true,
+      reportCard: {
+        ...src,
+        report_type: 'SESSION',
+        class_position: settings.show_class_position ? src.class_position : null,
+        class_size: settings.show_class_position ? src.class_size : null,
+        breakdown,
+      },
+    });
+  }
+);
+
+// Student on-demand End-of-Term or Full-Session Report Card generation (self-only & published records only)
+portalRouter.post(
+  '/student/report-cards/generate',
+  requireAuth,
+  requireTenant,
+  requireRole(STUDENT_PORTAL_ROLES),
+  async (req: AuthenticatedRequest, res) => {
+    const schoolId = req.targetSchoolId!;
+    const userId = req.user!.id;
+    const roleName = getEffectiveRoleName(req);
+    const { student_id, report_type = 'TERM', academic_session_id, term_id } = req.body || {};
+
+    if (!academic_session_id) {
+      return res.status(400).json({ error: 'MISSING_FIELDS', message: 'academic_session_id is required.' });
+    }
+
+    let targetStudentId = student_id;
+    if (roleName === 'STUDENT') {
+      const selfStudent = await dbGet(
+        `SELECT id FROM students WHERE user_id = $1 AND school_id = $2 AND (is_deleted = 0 OR is_deleted IS NULL) LIMIT 1`,
+        `SELECT id FROM students WHERE user_id = ? AND school_id = ? AND (is_deleted = 0 OR is_deleted IS NULL) LIMIT 1`,
+        [userId, schoolId]
+      );
+      if (!selfStudent) {
+        return res.status(404).json({ error: 'STUDENT_NOT_BOUND', message: 'Your student profile is not bound yet.' });
+      }
+      if (student_id && student_id !== selfStudent.id) {
+        return res.status(403).json({
+          error: 'UNAUTHORIZED_STUDENT_ACCESS',
+          message: 'You may only generate report cards for your own student record.',
+        });
+      }
+      targetStudentId = selfStudent.id;
+    } else if (!targetStudentId) {
+      return res.status(400).json({ error: 'MISSING_STUDENT', message: 'student_id is required.' });
+    }
+
+    if (report_type === 'SESSION') {
+      const compiled = await compileSessionReportCard(schoolId, targetStudentId, academic_session_id, {
+        onlyPublished: true,
+        visibilityRole: 'STUDENT',
+      });
+      if (!compiled) {
+        return res.status(404).json({
+          error: 'NO_PUBLISHED_RESULTS',
+          message: 'No published examination results or session report cards are available for this session yet.',
+        });
+      }
+      return res.json({ success: true, source: compiled.source, reportCard: compiled.reportCard });
+    }
+
+    if (!term_id) {
+      return res.status(400).json({
+        error: 'MISSING_TERM',
+        message: 'term_id is required when generating an End-of-Term report card.',
+      });
+    }
+
+    const compiled = await compileTermReportCard(schoolId, targetStudentId, academic_session_id, term_id, {
+      onlyPublished: true,
+      visibilityRole: 'STUDENT',
+    });
+    if (!compiled) {
+      return res.status(404).json({
+        error: 'NO_PUBLISHED_RESULTS',
+        message: 'No published examination results or report card are available for the selected term yet.',
+      });
+    }
+    return res.json({ success: true, source: compiled.source, reportCard: compiled.reportCard });
   }
 );
 
@@ -1051,5 +1345,58 @@ portalRouter.get(
         unreadNotificationsCount: notifications.filter((n) => !n.read_at).length,
       },
     });
+  }
+);
+
+// Teacher Read-Only On-Demand Report Card / Performance Result Compilation (never mutates DB records)
+portalRouter.post(
+  '/teacher/report-cards/generate',
+  requireAuth,
+  requireTenant,
+  requireRole(TEACHER_PORTAL_ROLES),
+  async (req: AuthenticatedRequest, res) => {
+    const schoolId = req.targetSchoolId!;
+    const { student_id, report_type = 'TERM', academic_session_id, term_id } = req.body || {};
+
+    if (!student_id || !academic_session_id) {
+      return res.status(400).json({
+        error: 'MISSING_FIELDS',
+        message: 'student_id and academic_session_id are required.',
+      });
+    }
+
+    if (!(await canAccessStudent(req, student_id))) {
+      return res.status(403).json({
+        error: 'UNAUTHORIZED_STUDENT_ACCESS',
+        message: 'You are not authorized to access this student record.',
+      });
+    }
+
+    if (report_type === 'SESSION') {
+      const compiled = await compileSessionReportCard(schoolId, student_id, academic_session_id, {
+        onlyPublished: false,
+        visibilityRole: 'TEACHER',
+      });
+      if (!compiled) {
+        return res.status(404).json({ error: 'NOT_FOUND', message: 'Student or session record not found.' });
+      }
+      return res.json({ success: true, source: compiled.source, reportCard: compiled.reportCard });
+    }
+
+    if (!term_id) {
+      return res.status(400).json({
+        error: 'MISSING_TERM',
+        message: 'term_id is required for an End-of-Term report card.',
+      });
+    }
+
+    const compiled = await compileTermReportCard(schoolId, student_id, academic_session_id, term_id, {
+      onlyPublished: false,
+      visibilityRole: 'TEACHER',
+    });
+    if (!compiled) {
+      return res.status(404).json({ error: 'NOT_FOUND', message: 'Student record not found.' });
+    }
+    return res.json({ success: true, source: compiled.source, reportCard: compiled.reportCard });
   }
 );

@@ -134,6 +134,7 @@ export const ALL_44_TABLES_ORDER = [
   'student_scores',
   'score_correction_logs',
   'report_cards',
+  'session_report_cards',
   'attendance_records',
   'attendance_publications',
   'behaviour_records',

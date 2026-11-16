@@ -15,14 +15,19 @@ import {
   Mail,
   Phone,
   Briefcase,
+  Printer,
+  X,
+  FileText,
+  AlertCircle,
 } from 'lucide-react';
 import { api } from '../../services/api.js';
 import { useAuth } from '../../context/AuthContext.js';
-import { InvoiceDef, PaymentItem, TeacherDashboardData } from '../../types/index.js';
+import { InvoiceDef, PaymentItem, ReportCardItem, Student, TeacherDashboardData } from '../../types/index.js';
 import { SchoolPerformanceView } from '../performance/SchoolPerformanceView.js';
 import { SchoolAttendanceView } from '../performance/SchoolAttendanceView.js';
 import { SchoolBehaviourView } from '../performance/SchoolBehaviourView.js';
 import { SchoolAnnouncementsView } from '../performance/SchoolAnnouncementsView.js';
+import { PrintableReportCardModal } from '../performance/PrintableReportCardModal.js';
 
 type TeacherTab =
   | 'overview'
@@ -49,16 +54,71 @@ export const TeacherPortalView: React.FC = () => {
   const [payments, setPayments] = useState<PaymentItem[]>([]);
   const [feesLoading, setFeesLoading] = useState(false);
 
+  // Teacher read-only report card generator state
+  const [reportTargetStudent, setReportTargetStudent] = useState<Student | null>(null);
+  const [reportGenType, setReportGenType] = useState<'TERM' | 'SESSION'>('TERM');
+  const [reportGenSessionId, setReportGenSessionId] = useState('');
+  const [reportGenTermId, setReportGenTermId] = useState('');
+  const [reportGenerating, setReportGenerating] = useState(false);
+  const [reportGenError, setReportGenError] = useState<string | null>(null);
+  const [viewingRc, setViewingRc] = useState<ReportCardItem | null>(null);
+
   const loadDashboard = async () => {
     setLoading(true);
     setError(null);
     try {
       const res = await api.getTeacherDashboard();
       setDashboard(res);
+      const sessList = res.sessions || [];
+      const activeSess = sessList.find((s) => s.status === 'ACTIVE') || sessList[0];
+      const activeTerm = activeSess?.terms?.find((t) => t.status === 'ACTIVE') || activeSess?.terms?.[0];
+      if (activeSess) {
+        setReportGenSessionId((prev) => prev || activeSess.id);
+        setReportGenTermId((prev) => prev || activeTerm?.id || '');
+      }
     } catch (err: any) {
       setError(err?.message || 'Failed to load Educator Workspace');
     } finally {
       setLoading(false);
+    }
+  };
+
+  const handleOpenTeacherReportGenerator = (stu: Student) => {
+    setReportTargetStudent(stu);
+    setReportGenError(null);
+    const sessList = dashboard?.sessions || [];
+    const activeSess = sessList.find((s) => s.status === 'ACTIVE') || sessList[0];
+    const activeTerm = activeSess?.terms?.find((t) => t.status === 'ACTIVE') || activeSess?.terms?.[0];
+    if (activeSess && !reportGenSessionId) {
+      setReportGenSessionId(activeSess.id);
+    }
+    if (activeTerm && !reportGenTermId) {
+      setReportGenTermId(activeTerm.id);
+    }
+  };
+
+  const handleGenerateTeacherReport = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!reportTargetStudent || !reportGenSessionId) return;
+    if (reportGenType === 'TERM' && !reportGenTermId) {
+      setReportGenError('Select a Term for the End-of-Term Report Card.');
+      return;
+    }
+    setReportGenerating(true);
+    setReportGenError(null);
+    try {
+      const res = await api.generateTeacherReportCard({
+        student_id: reportTargetStudent.id,
+        academic_session_id: reportGenSessionId,
+        term_id: reportGenType === 'TERM' ? reportGenTermId : undefined,
+        report_type: reportGenType,
+      });
+      setReportTargetStudent(null);
+      setViewingRc(res.reportCard);
+    } catch (err: any) {
+      setReportGenError(err?.message || 'Unable to generate report card for this selection.');
+    } finally {
+      setReportGenerating(false);
     }
   };
 
@@ -415,35 +475,46 @@ export const TeacherPortalView: React.FC = () => {
             <div className="overflow-x-auto">
               <table className="w-full text-left text-xs">
                 <thead>
-                  <tr className="border-b border-slate-200 text-slate-500 bg-slate-50/70">
-                    <th className="py-2.5 px-3">Admission #</th>
-                    <th className="py-2.5 px-3">Student Name</th>
-                    <th className="py-2.5 px-3">Class &amp; Arm</th>
-                    <th className="py-2.5 px-3">Gender</th>
-                    <th className="py-2.5 px-3">Status</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-100">
-                  {filteredStudents.map((st) => (
-                    <tr key={st.id} className="hover:bg-slate-50/60">
-                      <td className="py-2.5 px-3 font-mono font-semibold text-slate-700">{st.admission_number}</td>
-                      <td className="py-2.5 px-3 font-semibold text-slate-900">{st.full_name}</td>
-                      <td className="py-2.5 px-3 text-slate-600">
-                        {st.class_name || 'Unassigned'}
-                        {st.class_arm_name ? ` · ${st.class_arm_name}` : ''}
-                      </td>
-                      <td className="py-2.5 px-3 text-slate-600">{st.gender || '—'}</td>
-                      <td className="py-2.5 px-3">
-                        <span className="px-2 py-0.5 rounded bg-emerald-50 text-emerald-700 border border-emerald-200 text-[10px] font-semibold">
-                          {st.student_status || st.status || 'ACTIVE'}
-                        </span>
-                      </td>
+                    <tr className="border-b border-slate-200 text-slate-500 bg-slate-50/70">
+                      <th className="py-2.5 px-3">Admission #</th>
+                      <th className="py-2.5 px-3">Student Name</th>
+                      <th className="py-2.5 px-3">Class &amp; Arm</th>
+                      <th className="py-2.5 px-3">Gender</th>
+                      <th className="py-2.5 px-3">Status</th>
+                      <th className="py-2.5 px-3 text-right">Report Card</th>
                     </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
+                  </thead>
+                  <tbody className="divide-y divide-slate-100">
+                    {filteredStudents.map((st) => (
+                      <tr key={st.id} className="hover:bg-slate-50/60">
+                        <td className="py-2.5 px-3 font-mono font-semibold text-slate-700">{st.admission_number}</td>
+                        <td className="py-2.5 px-3 font-semibold text-slate-900">{st.full_name}</td>
+                        <td className="py-2.5 px-3 text-slate-600">
+                          {st.class_name || 'Unassigned'}
+                          {st.class_arm_name ? ` · ${st.class_arm_name}` : ''}
+                        </td>
+                        <td className="py-2.5 px-3 text-slate-600">{st.gender || '—'}</td>
+                        <td className="py-2.5 px-3">
+                          <span className="px-2 py-0.5 rounded bg-emerald-50 text-emerald-700 border border-emerald-200 text-[10px] font-semibold">
+                            {st.student_status || st.status || 'ACTIVE'}
+                          </span>
+                        </td>
+                        <td className="py-2.5 px-3 text-right">
+                          <button
+                            type="button"
+                            onClick={() => handleOpenTeacherReportGenerator(st)}
+                            className="px-2.5 py-1 rounded-lg bg-slate-900 hover:bg-slate-800 text-white text-[11px] font-semibold inline-flex items-center gap-1 cursor-pointer whitespace-nowrap"
+                          >
+                            <FileText className="w-3 h-3" />
+                            <span>Term / Session Report</span>
+                          </button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
         </div>
       )}
 
@@ -568,6 +639,127 @@ export const TeacherPortalView: React.FC = () => {
           )}
         </div>
       )}
+
+      {/* Teacher Read-Only Report Card Generator Modal */}
+      {reportTargetStudent && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-xs p-4">
+          <div className="bg-white rounded-2xl max-w-md w-full shadow-2xl border border-slate-200 overflow-hidden">
+            <div className="bg-slate-900 px-5 py-4 text-white flex items-center justify-between">
+              <div>
+                <h3 className="font-bold text-sm">Generate Student Report Card</h3>
+                <p className="text-[11px] text-slate-300">
+                  {reportTargetStudent.full_name} ({reportTargetStudent.admission_number})
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setReportTargetStudent(null)}
+                className="text-slate-400 hover:text-white cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <form onSubmit={handleGenerateTeacherReport} className="p-5 space-y-4 text-xs">
+              <div>
+                <label className="block font-semibold text-slate-700 mb-1.5">Report Card Type</label>
+                <div className="grid grid-cols-2 gap-2 p-1 bg-slate-100 rounded-xl">
+                  <button
+                    type="button"
+                    onClick={() => setReportGenType('TERM')}
+                    className={`py-2 px-3 rounded-lg font-semibold transition cursor-pointer ${
+                      reportGenType === 'TERM' ? 'bg-white text-slate-900 shadow-xs' : 'text-slate-600'
+                    }`}
+                  >
+                    End-of-Term
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setReportGenType('SESSION')}
+                    className={`py-2 px-3 rounded-lg font-semibold transition cursor-pointer ${
+                      reportGenType === 'SESSION' ? 'bg-white text-slate-900 shadow-xs' : 'text-slate-600'
+                    }`}
+                  >
+                    Full-Session Cumulative
+                  </button>
+                </div>
+              </div>
+
+              <div>
+                <label className="block font-semibold text-slate-700 mb-1">Academic Session</label>
+                <select
+                  required
+                  value={reportGenSessionId}
+                  onChange={(e) => {
+                    const nextSessId = e.target.value;
+                    setReportGenSessionId(nextSessId);
+                    const matched = (dashboard?.sessions || []).find((s) => s.id === nextSessId);
+                    setReportGenTermId(matched?.terms?.[0]?.id || '');
+                  }}
+                  className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl"
+                >
+                  <option value="">Select Session...</option>
+                  {(dashboard?.sessions || []).map((s) => (
+                    <option key={s.id} value={s.id}>
+                      {s.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              {reportGenType === 'TERM' && (
+                <div>
+                  <label className="block font-semibold text-slate-700 mb-1">Term</label>
+                  <select
+                    required
+                    value={reportGenTermId}
+                    onChange={(e) => setReportGenTermId(e.target.value)}
+                    className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl"
+                  >
+                    <option value="">Select Term...</option>
+                    {((dashboard?.sessions || []).find((s) => s.id === reportGenSessionId)?.terms || []).map((t) => (
+                      <option key={t.id} value={t.id}>
+                        {t.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
+
+              {reportGenError && (
+                <div className="p-3 rounded-xl bg-rose-50 border border-rose-200 text-rose-800 flex items-start gap-2">
+                  <AlertCircle className="w-4 h-4 shrink-0 mt-0.5 text-rose-600" />
+                  <span>{reportGenError}</span>
+                </div>
+              )}
+
+              <div className="pt-3 border-t border-slate-200 flex justify-end gap-2">
+                <button
+                  type="button"
+                  onClick={() => setReportTargetStudent(null)}
+                  className="px-4 py-2 border border-slate-300 rounded-xl text-slate-700 cursor-pointer"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={reportGenerating}
+                  className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl font-bold inline-flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
+                >
+                  <Printer className="w-3.5 h-3.5" />
+                  <span>{reportGenerating ? 'Compiling...' : 'Compile & Print'}</span>
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      <PrintableReportCardModal
+        reportCard={viewingRc}
+        isOpen={Boolean(viewingRc)}
+        onClose={() => setViewingRc(null)}
+      />
     </div>
   );
 };

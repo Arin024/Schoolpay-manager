@@ -36,6 +36,7 @@ import {
   StudentScoreItem,
   ScoreCorrectionLogItem,
   ReportCardItem,
+  SessionReportCardItem,
   AttendanceRecordItem,
   AttendancePublicationItem,
   BehaviourRecordItem,
@@ -1677,6 +1678,13 @@ export const api = {
     });
   },
 
+  async exitActiveSchool(): Promise<{ success: boolean }> {
+    return safeFetch(`${API_BASE}/auth/exit-school`, {
+      method: 'POST',
+      headers: getAuthHeaders(),
+    });
+  },
+
   // Academic & Portal Policy Settings
   async getAcademicSettings(): Promise<{ success: boolean; settings: AcademicSettings }> {
     return safeFetch(`${API_BASE}/school/performance/settings`, {
@@ -1924,6 +1932,90 @@ export const api = {
     term_id: string;
   }): Promise<{ success: boolean; publishedCount: number }> {
     return safeFetch(`${API_BASE}/school/report-cards/publish-class`, {
+      method: 'POST',
+      headers: getAuthHeaders(),
+      body: JSON.stringify(data),
+    });
+  },
+
+  async compileSchoolReportCardPreview(data: {
+    student_id: string;
+    report_type: 'TERM' | 'SESSION';
+    academic_session_id: string;
+    term_id?: string;
+    examination_id?: string;
+  }): Promise<{ success: boolean; source: string; reportCard: ReportCardItem }> {
+    return safeFetch(`${API_BASE}/school/report-cards/compile-preview`, {
+      method: 'POST',
+      headers: getAuthHeaders(),
+      body: JSON.stringify(data),
+    });
+  },
+
+  // Full-Session Cumulative Annual Report Cards
+  async getSessionReportCards(params?: {
+    academic_session_id?: string;
+    class_id?: string;
+    status?: string;
+    student_id?: string;
+  }): Promise<{ success: boolean; count: number; sessionReportCards: SessionReportCardItem[] }> {
+    const query = new URLSearchParams();
+    if (params) {
+      Object.entries(params).forEach(([k, v]) => {
+        if (v) query.set(k, v);
+      });
+    }
+    return safeFetch(`${API_BASE}/school/session-report-cards?${query.toString()}`, {
+      headers: getAuthHeaders(),
+    });
+  },
+
+  async getSessionReportCardDetail(id: string): Promise<{ success: boolean; sessionReportCard: SessionReportCardItem }> {
+    return safeFetch(`${API_BASE}/school/session-report-cards/${id}`, {
+      headers: getAuthHeaders(),
+    });
+  },
+
+  async generateSessionReportCards(data: {
+    academic_session_id: string;
+    class_id?: string;
+    student_id?: string;
+  }): Promise<{ success: boolean; count: number; sessionReportCards: SessionReportCardItem[] }> {
+    return safeFetch(`${API_BASE}/school/session-report-cards/generate`, {
+      method: 'POST',
+      headers: getAuthHeaders(),
+      body: JSON.stringify(data),
+    });
+  },
+
+  async updateSessionReportCardRemarks(
+    id: string,
+    data: {
+      teacher_remark?: string;
+      principal_remark?: string;
+      promotion_status?: string;
+      status?: 'DRAFT' | 'REVIEW' | 'APPROVED';
+    }
+  ): Promise<{ success: boolean; sessionReportCard: SessionReportCardItem }> {
+    return safeFetch(`${API_BASE}/school/session-report-cards/${id}/remarks`, {
+      method: 'PUT',
+      headers: getAuthHeaders(),
+      body: JSON.stringify(data),
+    });
+  },
+
+  async publishSessionReportCard(id: string): Promise<{ success: boolean; message: string; sessionReportCard: SessionReportCardItem }> {
+    return safeFetch(`${API_BASE}/school/session-report-cards/${id}/publish`, {
+      method: 'POST',
+      headers: getAuthHeaders(),
+    });
+  },
+
+  async publishClassSessionReportCards(data: {
+    class_id?: string;
+    academic_session_id: string;
+  }): Promise<{ success: boolean; publishedCount: number }> {
+    return safeFetch(`${API_BASE}/school/session-report-cards/publish-class`, {
       method: 'POST',
       headers: getAuthHeaders(),
       body: JSON.stringify(data),
@@ -2196,6 +2288,19 @@ export const api = {
     });
   },
 
+  async generateTeacherReportCard(data: {
+    student_id: string;
+    report_type: 'TERM' | 'SESSION';
+    academic_session_id: string;
+    term_id?: string;
+  }): Promise<{ success: boolean; source: string; reportCard: ReportCardItem }> {
+    return safeFetch(`${API_BASE}/portal/teacher/report-cards/generate`, {
+      method: 'POST',
+      headers: getAuthHeaders(),
+      body: JSON.stringify(data),
+    });
+  },
+
   // Parent & Student Read-Only Portals
   async getParentDashboard(params?: {
     student_id?: string;
@@ -2217,6 +2322,25 @@ export const api = {
     });
   },
 
+  async getParentSessionReportCard(id: string): Promise<{ success: boolean; reportCard: SessionReportCardItem }> {
+    return safeFetch(`${API_BASE}/portal/parent/session-report-cards/${id}`, {
+      headers: getAuthHeaders(),
+    });
+  },
+
+  async generateParentReportCard(data: {
+    student_id: string;
+    report_type: 'TERM' | 'SESSION';
+    academic_session_id: string;
+    term_id?: string;
+  }): Promise<{ success: boolean; source: string; reportCard: ReportCardItem }> {
+    return safeFetch(`${API_BASE}/portal/parent/report-cards/generate`, {
+      method: 'POST',
+      headers: getAuthHeaders(),
+      body: JSON.stringify(data),
+    });
+  },
+
   async getStudentDashboard(params?: {
     student_id?: string;
     academic_session_id?: string;
@@ -2234,6 +2358,25 @@ export const api = {
   async getStudentReportCard(id: string): Promise<{ success: boolean; reportCard: ReportCardItem }> {
     return safeFetch(`${API_BASE}/portal/student/report-cards/${id}`, {
       headers: getAuthHeaders(),
+    });
+  },
+
+  async getStudentSessionReportCard(id: string): Promise<{ success: boolean; reportCard: SessionReportCardItem }> {
+    return safeFetch(`${API_BASE}/portal/student/session-report-cards/${id}`, {
+      headers: getAuthHeaders(),
+    });
+  },
+
+  async generateStudentReportCard(data: {
+    student_id?: string;
+    report_type: 'TERM' | 'SESSION';
+    academic_session_id: string;
+    term_id?: string;
+  }): Promise<{ success: boolean; source: string; reportCard: ReportCardItem }> {
+    return safeFetch(`${API_BASE}/portal/student/report-cards/generate`, {
+      method: 'POST',
+      headers: getAuthHeaders(),
+      body: JSON.stringify(data),
     });
   },
 };
