@@ -20,6 +20,7 @@ import {
   Mail,
   Phone,
   Lock,
+  Calendar,
 } from 'lucide-react';
 import { api } from '../../services/api.js';
 import { useAuth } from '../../context/AuthContext.js';
@@ -40,6 +41,7 @@ type ParentTab =
   | 'reports'
   | 'attendance'
   | 'behaviour'
+  | 'timetable'
   | 'fees'
   | 'payments'
   | 'receipts'
@@ -363,6 +365,7 @@ export const ParentPortalView: React.FC = () => {
               { key: 'reports', label: 'Report Cards', icon: FileText },
               { key: 'attendance', label: 'Attendance History', icon: CalendarCheck },
               { key: 'behaviour', label: 'Behaviour & Remarks', icon: MessageSquare },
+              { key: 'timetable', label: 'Timetable & Calendar', icon: Calendar },
               { key: 'fees', label: 'Fee Status', icon: CreditCard },
               { key: 'payments', label: 'Payment History', icon: History },
               { key: 'receipts', label: 'Receipts', icon: Receipt },
@@ -1187,6 +1190,66 @@ export const ParentPortalView: React.FC = () => {
               ))}
             </div>
           )}
+        </div>
+      )}
+
+      {/* TAB: TIMETABLE & PUBLIC CALENDAR */}
+      {tab === 'timetable' && (
+        <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 text-xs">
+          <div className="lg:col-span-7 bg-white rounded-2xl border border-slate-200 p-6 space-y-4">
+            <h3 className="text-sm font-bold text-slate-900">
+              Class Timetable · {data.selectedChild?.class_name || 'School Schedule'} ({(data.timetable || []).length})
+            </h3>
+            {!data.timetable || data.timetable.length === 0 ? (
+              <p className="py-10 text-center text-slate-400">No timetable slots published for this class yet.</p>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-left text-xs">
+                  <thead>
+                    <tr className="border-b border-slate-200 text-slate-500 bg-slate-50/70">
+                      <th className="py-2.5 px-3">Day</th>
+                      <th className="py-2.5 px-3">Time</th>
+                      <th className="py-2.5 px-3">Subject</th>
+                      <th className="py-2.5 px-3">Teacher</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100">
+                    {data.timetable.map((slot) => (
+                      <tr key={slot.id}>
+                        <td className="py-2.5 px-3 font-semibold text-slate-900">{slot.day_of_week}</td>
+                        <td className="py-2.5 px-3 font-mono tabular-nums text-slate-600">
+                          {slot.start_time} – {slot.end_time}
+                        </td>
+                        <td className="py-2.5 px-3 font-semibold text-emerald-700">{slot.subject_name}</td>
+                        <td className="py-2.5 px-3 text-slate-600">{slot.teacher_name || '—'}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+
+          <div className="lg:col-span-5 bg-white rounded-2xl border border-slate-200 p-6 space-y-4">
+            <h3 className="text-sm font-bold text-slate-900">
+              Upcoming School Events ({(data.events || []).length})
+            </h3>
+            {!data.events || data.events.length === 0 ? (
+              <p className="py-10 text-center text-slate-400">No upcoming public school events scheduled.</p>
+            ) : (
+              <div className="divide-y divide-slate-100">
+                {data.events.map((ev) => (
+                  <div key={ev.id} className="py-3 first:pt-0 last:pb-0 space-y-1">
+                    <p className="font-mono text-[11px] text-emerald-700 font-semibold tabular-nums">
+                      {ev.event_date}{ev.location ? ` · ${ev.location}` : ''}
+                    </p>
+                    <p className="font-bold text-slate-900">{ev.title}</p>
+                    {ev.description && <p className="text-slate-600">{ev.description}</p>}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
         </div>
       )}
 

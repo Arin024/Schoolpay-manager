@@ -109,6 +109,15 @@ export const MIGRATION_ORDER = [
   'behaviour_records',
   'teacher_remarks',
   'school_announcements',
+  'school_website_profiles',
+  'school_website_posts',
+  'school_website_gallery',
+  'school_calendar_events',
+  'school_admission_inquiries',
+  'lesson_notes',
+  'school_timetable_slots',
+  'staff_requests',
+  'staff_announcement_reads',
 ];
 
 /**

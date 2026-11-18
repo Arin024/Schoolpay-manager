@@ -744,7 +744,7 @@ export type ExamWorkflowStatus = 'DRAFT' | 'REVIEW' | 'APPROVED' | 'PUBLISHED';
 export type AttendanceStatus = 'PRESENT' | 'ABSENT' | 'LATE' | 'EXCUSED';
 export type BehaviourCategory = 'POSITIVE' | 'COMMENDATION' | 'DISCIPLINE' | 'INCIDENT' | 'OBSERVATION';
 export type BehaviourSeverity = 'LOW' | 'MEDIUM' | 'HIGH';
-export type AnnouncementAudience = 'ALL' | 'PARENTS' | 'STUDENTS' | 'TEACHERS' | 'CLASS';
+export type AnnouncementAudience = 'ALL' | 'PARENTS' | 'STUDENTS' | 'TEACHERS' | 'CLASS' | 'STAFF_ONLY';
 export type AnnouncementPriority = 'NORMAL' | 'IMPORTANT' | 'URGENT';
 
 export interface GradingScaleBand {
@@ -1043,6 +1043,7 @@ export interface SchoolAnnouncementItem {
   target_class_id?: string | null;
   target_class_name?: string | null;
   priority: AnnouncementPriority;
+  is_confidential?: number;
   is_published: number;
   published_at?: string | null;
   created_by_name?: string | null;
@@ -1179,6 +1180,8 @@ export interface ParentDashboardData {
   receipts: ReceiptItem[];
   gateways: GatewayStatus[];
   announcements: SchoolAnnouncementItem[];
+  timetable?: TimetableSlotItem[];
+  events?: SchoolCalendarEvent[];
   notifications: NotificationItem[];
 }
 
@@ -1210,6 +1213,8 @@ export interface StudentDashboardData {
   payments: PaymentItem[];
   receipts: ReceiptItem[];
   announcements: SchoolAnnouncementItem[];
+  timetable?: TimetableSlotItem[];
+  events?: SchoolCalendarEvent[];
   notifications: NotificationItem[];
 }
 
@@ -1230,12 +1235,15 @@ export interface TeacherDashboardData {
   };
   assignedClasses: Array<{
     id: string;
+    arm_id?: string;
     class_id: string;
     class_name: string;
     level: string;
+    class_level?: string;
     arm_name: string;
     capacity: number;
     total_students: number;
+    students_count?: number;
   }>;
   hasAssignedClasses: boolean;
   allClasses: Array<{
@@ -1249,12 +1257,19 @@ export interface TeacherDashboardData {
   announcements: SchoolAnnouncementItem[];
   notifications: NotificationItem[];
   stats: {
-    studentsCount: number;
-    classesCount: number;
-    subjectsCount: number;
-    announcementsCount: number;
+    studentsCount?: number;
+    classesCount?: number;
+    subjectsCount?: number;
+    announcementsCount?: number;
+    assignedClassesCount?: number;
+    authorizedStudentsCount?: number;
     publishedExamsCount: number;
-    teachersCanViewFees: boolean;
+    reportCardsPublishedCount?: number;
+    attendanceLogsCount?: number;
+    lessonNotesCount?: number;
+    confidentialNoticesCount?: number;
+    unreadNotificationsCount?: number;
+    teachersCanViewFees?: boolean;
   };
 }
 
@@ -1271,6 +1286,7 @@ export interface PublicSchoolSummary {
   email?: string | null;
   website?: string | null;
   logo_url?: string | null;
+  portal_subdomain?: string | null;
 }
 
 export interface PublicDocumentVerificationResult {
@@ -1293,3 +1309,189 @@ export interface BulkProvisionCredential {
   aliasIdentifier: string | null;
   temporaryPassword: string;
 }
+
+export type WebsiteThemeAccent = 'emerald' | 'navy' | 'indigo' | 'burgundy' | 'teal';
+
+export interface SchoolWebsiteProfile {
+  id: string;
+  school_id: string;
+  tagline?: string | null;
+  hero_title?: string | null;
+  hero_subtitle?: string | null;
+  hero_image_url?: string | null;
+  theme_accent: WebsiteThemeAccent;
+  about_title?: string | null;
+  about_body?: string | null;
+  vision?: string | null;
+  mission?: string | null;
+  core_values?: string | null;
+  principal_name?: string | null;
+  principal_title?: string | null;
+  principal_message?: string | null;
+  principal_photo_url?: string | null;
+  admissions_open: number;
+  admissions_summary?: string | null;
+  established_year?: string | null;
+  facilities_text?: string | null;
+  social_whatsapp?: string | null;
+  social_facebook?: string | null;
+  social_instagram?: string | null;
+  is_published: number;
+  updated_at?: string;
+}
+
+export interface SchoolWebsiteUrls {
+  portal_subdomain: string;
+  subdomainUrl: string;
+  portalHashUrl: string;
+  sitePathUrl: string;
+}
+
+export interface SchoolWebsitePost {
+  id: string;
+  school_id: string;
+  title: string;
+  slug: string;
+  category: string;
+  excerpt?: string | null;
+  content: string;
+  cover_image_url?: string | null;
+  author_name?: string | null;
+  author_role?: string | null;
+  is_published: number;
+  is_featured: number;
+  published_at?: string | null;
+  created_at?: string;
+}
+
+export interface SchoolWebsiteGalleryItem {
+  id: string;
+  school_id: string;
+  title: string;
+  caption?: string | null;
+  album: string;
+  image_url: string;
+  is_published: number;
+  display_order: number;
+  created_at?: string;
+}
+
+export interface SchoolCalendarEvent {
+  id: string;
+  school_id?: string;
+  title: string;
+  event_date: string;
+  end_date?: string | null;
+  location?: string | null;
+  description?: string | null;
+  visibility: 'PUBLIC' | 'STAFF_ONLY';
+  created_at?: string;
+}
+
+export interface SchoolAdmissionInquiry {
+  id: string;
+  school_id: string;
+  student_name: string;
+  target_class?: string | null;
+  parent_name: string;
+  parent_phone: string;
+  parent_email?: string | null;
+  message?: string | null;
+  status: 'NEW' | 'CONTACTED' | 'ENROLLED' | 'ARCHIVED';
+  admin_notes?: string | null;
+  created_at?: string;
+}
+
+export interface PublicSchoolWebsiteData {
+  school: PublicSchoolSummary;
+  settings: {
+    portal_subdomain: string;
+    current_academic_session: string;
+    current_term: string;
+  };
+  urls: SchoolWebsiteUrls;
+  website: SchoolWebsiteProfile;
+  posts: SchoolWebsitePost[];
+  gallery: SchoolWebsiteGalleryItem[];
+  events: SchoolCalendarEvent[];
+  classes: Array<{ id: string; name: string; level?: string | null }>;
+  stats: {
+    studentsCount: number;
+    classesCount: number;
+    staffCount: number;
+  };
+}
+
+export type LessonNoteStatus = 'DRAFT' | 'SUBMITTED' | 'APPROVED' | 'REVISION_REQUESTED';
+
+export interface LessonNoteItem {
+  id: string;
+  school_id: string;
+  teacher_user_id?: string | null;
+  teacher_name?: string | null;
+  subject_id?: string | null;
+  subject_name: string;
+  class_id?: string | null;
+  class_name: string;
+  academic_session_id?: string | null;
+  term_name?: string | null;
+  week_number: number;
+  duration_minutes: number;
+  topic: string;
+  sub_topic?: string | null;
+  behavioural_objectives?: string | null;
+  previous_knowledge?: string | null;
+  instructional_materials?: string | null;
+  introduction_step?: string | null;
+  presentation_steps?: string | null;
+  evaluation_questions?: string | null;
+  assignment_text?: string | null;
+  teacher_notes?: string | null;
+  status: LessonNoteStatus;
+  admin_feedback?: string | null;
+  reviewed_by?: string | null;
+  reviewed_at?: string | null;
+  created_at?: string;
+  updated_at?: string;
+}
+
+export interface TimetableSlotItem {
+  id: string;
+  school_id: string;
+  class_id?: string | null;
+  class_name: string;
+  arm_name?: string | null;
+  day_of_week: string;
+  period_label?: string | null;
+  start_time: string;
+  end_time: string;
+  subject_name: string;
+  teacher_user_id?: string | null;
+  teacher_name?: string | null;
+  room_label?: string | null;
+}
+
+export interface StaffRequestItem {
+  id: string;
+  school_id: string;
+  user_id: string;
+  staff_name: string;
+  request_type: 'LEAVE' | 'RESOURCES' | 'MAINTENANCE' | 'GENERAL';
+  subject: string;
+  details: string;
+  start_date?: string | null;
+  end_date?: string | null;
+  status: 'PENDING' | 'APPROVED' | 'DECLINED';
+  admin_response?: string | null;
+  reviewed_by?: string | null;
+  reviewed_at?: string | null;
+  created_at?: string;
+}
+
+export interface ConfidentialNoticeItem extends SchoolAnnouncementItem {
+  my_read_at?: string | null;
+  acknowledged_count?: number;
+  is_acknowledged?: boolean;
+  is_staff_confidential?: boolean;
+}
+

@@ -257,6 +257,7 @@ export async function initDatabase() {
     migrateStep5Columns();
     migrateRecoveryColumns();
     migrateNullableDirectoryColumnsSqlite();
+    migrateWebsiteAndStaffWorkspaceSqlite();
   } finally {
     setInitialSeedingState(false);
   }
@@ -368,6 +369,14 @@ export async function initDatabase() {
             await client.query(mig006Sql);
             console.log('[Neon PostgreSQL] Verified/applied migration 006_session_report_cards.sql');
           }
+
+          // Execute idempotent 007_school_website_and_staff_workspace.sql migration on Neon PostgreSQL before hydration
+          const mig007Path = path.resolve(process.cwd(), 'migrations/007_school_website_and_staff_workspace.sql');
+          if (fs.existsSync(mig007Path)) {
+            const mig007Sql = fs.readFileSync(mig007Path, 'utf8');
+            await client.query(mig007Sql);
+            console.log('[Neon PostgreSQL] Verified/applied migration 007_school_website_and_staff_workspace.sql');
+          }
         } finally {
           client.release();
         }
@@ -416,6 +425,9 @@ export async function initDatabase() {
   } finally {
     setInitialSeedingState(false);
   }
+
+  // 12b. Non-destructive backfill of unique portal subdomains & default website profiles for existing schools
+  await backfillSchoolSubdomainsAndWebsiteProfiles();
 
   // 13. Start automated daily backup scheduler
   startAutomaticBackupScheduler();
@@ -1260,6 +1272,166 @@ function migrateRecoveryColumns() {
         } catch (e) {}
       }
     }
+  }
+}
+
+function migrateWebsiteAndStaffWorkspaceSqlite() {
+  try {
+    const annTable = rawDb
+      .prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='school_announcements'")
+      .get() as { sql: string } | undefined;
+
+    if (annTable) {
+      const annCols = (rawDb.prepare('PRAGMA table_info(school_announcements)').all() as any[]).map((c) => c.name);
+      if (!annCols.includes('is_confidential')) {
+        try {
+          rawDb.exec('ALTER TABLE school_announcements ADD COLUMN is_confidential INTEGER NOT NULL DEFAULT 0;');
+        } catch {}
+      }
+      if (!annTable.sql.includes('STAFF_ONLY')) {
+        rawDb.exec(`
+          PRAGMA foreign_keys = OFF;
+          CREATE TABLE school_announcements_mig (
+            id TEXT PRIMARY KEY,
+            school_id TEXT NOT NULL REFERENCES schools(id) ON DELETE CASCADE,
+            title TEXT NOT NULL,
+            content TEXT NOT NULL,
+            audience TEXT NOT NULL DEFAULT 'ALL' CHECK(audience IN ('ALL', 'PARENTS', 'STUDENTS', 'TEACHERS', 'CLASS', 'STAFF_ONLY')),
+            target_class_id TEXT REFERENCES classes(id) ON DELETE SET NULL,
+            priority TEXT NOT NULL DEFAULT 'NORMAL' CHECK(priority IN ('NORMAL', 'IMPORTANT', 'URGENT')),
+            is_confidential INTEGER NOT NULL DEFAULT 0,
+            is_published INTEGER NOT NULL DEFAULT 1,
+            published_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            created_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+            created_by_name TEXT,
+            is_deleted INTEGER NOT NULL DEFAULT 0,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+          );
+        `);
+        const curCols = (rawDb.prepare('PRAGMA table_info(school_announcements)').all() as any[]).map((c) => c.name);
+        const migCols = (rawDb.prepare('PRAGMA table_info(school_announcements_mig)').all() as any[]).map((c) => c.name);
+        const common = curCols.filter((c) => migCols.includes(c)).map((c) => `"${c}"`).join(', ');
+        rawDb.exec(`INSERT INTO school_announcements_mig (${common}) SELECT ${common} FROM school_announcements;`);
+        rawDb.exec(`
+          DROP TABLE school_announcements;
+          ALTER TABLE school_announcements_mig RENAME TO school_announcements;
+          CREATE INDEX IF NOT EXISTS idx_announcements_school ON school_announcements(school_id, is_published, is_deleted);
+          PRAGMA foreign_keys = ON;
+        `);
+      }
+    }
+  } catch (e: any) {
+    try { rawDb.exec('PRAGMA foreign_keys = ON;'); } catch {}
+    console.warn('[SQLite Website/Staff Migration Notice]', e?.message);
+  }
+}
+
+export function normalizeSubdomainSlug(raw: string): string {
+  const cleaned = String(raw || '')
+    .toLowerCase()
+    .trim()
+    .replace(/[^a-z0-9-]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .replace(/-{2,}/g, '-')
+    .slice(0, 42);
+  return cleaned || 'school';
+}
+
+async function backfillSchoolSubdomainsAndWebsiteProfiles() {
+  try {
+    const schools = rawDb
+      .prepare('SELECT id, name, slug, type, state, lga, email, phone, address, created_at FROM schools ORDER BY created_at ASC')
+      .all() as any[];
+    if (!schools.length) return;
+
+    const usedSubdomains = new Set<string>(['www', 'app', 'api', 'admin', 'mail', 'smtp', 'portal', 'bursariq']);
+    const existingSettings = rawDb.prepare('SELECT school_id, portal_subdomain FROM school_settings').all() as any[];
+    const settingsBySchool = new Map<string, string | null>();
+    for (const st of existingSettings) {
+      const sub = st.portal_subdomain ? normalizeSubdomainSlug(st.portal_subdomain) : null;
+      settingsBySchool.set(st.school_id, sub);
+      if (sub) usedSubdomains.add(sub);
+    }
+
+    for (const sch of schools) {
+      let sub = settingsBySchool.get(sch.id);
+      if (!sub) {
+        const base = normalizeSubdomainSlug(sch.slug || sch.name);
+        let candidate = base;
+        let suffix = 2;
+        while (usedSubdomains.has(candidate)) {
+          candidate = `${base.slice(0, 36)}-${suffix}`;
+          suffix++;
+        }
+        usedSubdomains.add(candidate);
+        sub = candidate;
+
+        const hasRow = settingsBySchool.has(sch.id);
+        if (hasRow) {
+          rawDb
+            .prepare("UPDATE school_settings SET portal_subdomain = ? WHERE school_id = ? AND (portal_subdomain IS NULL OR portal_subdomain = '')")
+            .run(sub, sch.id);
+        } else {
+          rawDb
+            .prepare(
+              `INSERT OR IGNORE INTO school_settings (id, school_id, currency, currency_symbol, current_academic_session, current_term, portal_subdomain)
+               VALUES (?, ?, 'NGN', '₦', '2025/2026', '1st Term', ?)`
+            )
+            .run(`set_${sch.id}`, sch.id, sub);
+        }
+
+        if (pgPool && pgConnected) {
+          try {
+            await queryPg(
+              `UPDATE school_settings SET portal_subdomain = $1 WHERE school_id = $2 AND (portal_subdomain IS NULL OR portal_subdomain = '')`,
+              [sub, sch.id]
+            );
+          } catch {}
+        }
+      }
+
+      // Ensure non-destructive default school_website_profiles row exists for every existing school
+      const hasProfile = rawDb.prepare('SELECT id FROM school_website_profiles WHERE school_id = ?').get(sch.id);
+      if (!hasProfile) {
+        const profId = `web_${sch.id}`;
+        const tagline = `Excellence in Nigerian ${sch.type || 'K-12'} Education`;
+        const heroTitle = `Welcome to ${sch.name}`;
+        const heroSubtitle = `Preparing confident, disciplined, and academically distinguished learners in ${sch.lga || ''}${sch.lga && sch.state ? ', ' : ''}${sch.state || 'Nigeria'}.`;
+        const aboutTitle = `About ${sch.name}`;
+        const aboutBody = `${sch.name} is committed to strong academic standards, moral character, structured continuous assessment, and transparent family partnerships across Nigeria.`;
+        const vision = `To raise globally competitive, morally grounded students equipped for lifelong excellence.`;
+        const mission = `To deliver structured NERDC-aligned instruction supported by dedicated staff and transparent digital school records.`;
+        const coreValues = `Integrity · Academic Rigour · Discipline · Innovation · Community`;
+        const admissionsSummary = `Admissions are open across eligible classes. Prospective families can submit an inquiry below or visit the Admissions Office (${sch.phone || sch.email || 'Campus Desk'}).`;
+
+        rawDb
+          .prepare(
+            `INSERT OR IGNORE INTO school_website_profiles (
+              id, school_id, tagline, hero_title, hero_subtitle, theme_accent,
+              about_title, about_body, vision, mission, core_values,
+              admissions_open, admissions_summary, is_published
+            ) VALUES (?, ?, ?, ?, ?, 'emerald', ?, ?, ?, ?, ?, 1, ?, 1)`
+          )
+          .run(profId, sch.id, tagline, heroTitle, heroSubtitle, aboutTitle, aboutBody, vision, mission, coreValues, admissionsSummary);
+
+        if (pgPool && pgConnected) {
+          try {
+            await queryPg(
+              `INSERT INTO school_website_profiles (
+                id, school_id, tagline, hero_title, hero_subtitle, theme_accent,
+                about_title, about_body, vision, mission, core_values,
+                admissions_open, admissions_summary, is_published
+              ) VALUES ($1, $2, $3, $4, $5, 'emerald', $6, $7, $8, $9, $10, 1, $11, 1)
+              ON CONFLICT (school_id) DO NOTHING`,
+              [profId, sch.id, tagline, heroTitle, heroSubtitle, aboutTitle, aboutBody, vision, mission, coreValues, admissionsSummary]
+            );
+          } catch {}
+        }
+      }
+    }
+  } catch (e: any) {
+    console.warn('[Backfill Subdomain/Website Notice]', e?.message);
   }
 }
 

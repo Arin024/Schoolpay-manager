@@ -12,6 +12,7 @@ import {
   ensurePgConnected,
   getPgEndpointHostPrefix,
   markPgConnected,
+  normalizeSubdomainSlug,
 } from './db.ts';
 import {
   hashPassword,
@@ -41,6 +42,8 @@ import { dataProtectionRouter } from './dataProtectionRoutes.ts';
 import { performanceRouter } from './performanceRoutes.ts';
 import { portalRouter } from './portalRoutes.ts';
 import { publicPortalRouter, normalizePhoneDigits } from './publicPortalRoutes.ts';
+import { publicWebsiteRouter, schoolWebsiteRouter } from './schoolWebsiteRoutes.ts';
+import { staffWorkspaceRouter } from './staffWorkspaceRoutes.ts';
 import {
   getCurrentNigerianCalendar,
   generateNextAdmissionNumber,
@@ -133,6 +136,13 @@ apiRouter.use('/v1/portal', portalRouter);
 
 // Mount Unauthenticated Public School Portal Directory, Verification & Self-Activation
 apiRouter.use('/v1/public', publicPortalRouter);
+apiRouter.use('/v1/public', publicWebsiteRouter);
+
+// Mount School Website CMS & Timetable Manager
+apiRouter.use('/v1/school/website', schoolWebsiteRouter);
+
+// Mount Dedicated Staff-Only Workspace (Lesson Notes, Confidential Notices, Requests)
+apiRouter.use('/v1/staff-workspace', staffWorkspaceRouter);
 
 // Public Webhook receiver for payment gateways (Bachs, Paystack, Flutterwave, Sandbox)
 apiRouter.post('/v1/webhooks/payments/:provider', handlePaymentWebhook);
@@ -270,6 +280,35 @@ apiRouter.post(['/v1/auth/register-school', '/v1/auth/register'], async (req, re
   const baseSlug = slugify(schoolName);
   const slug = `${baseSlug}-${crypto.randomBytes(3).toString('hex')}`;
 
+  // Guarantee globally unique portal_subdomain for the new school's website
+  let portalSubdomain = normalizeSubdomainSlug(baseSlug);
+  const reservedSubs = new Set(['www', 'app', 'api', 'admin', 'superadmin', 'mail', 'smtp', 'portal', 'bursariq']);
+  if (reservedSubs.has(portalSubdomain) || portalSubdomain.length < 3) {
+    portalSubdomain = `${portalSubdomain}-sch`;
+  }
+  try {
+    let suffix = 2;
+    while (true) {
+      let exists = false;
+      if (pool) {
+        const subCheck = await queryPg(
+          'SELECT school_id FROM school_settings WHERE LOWER(portal_subdomain) = LOWER($1) LIMIT 1',
+          [portalSubdomain]
+        );
+        exists = subCheck.rows.length > 0;
+      } else {
+        exists = Boolean(
+          cacheDb
+            .prepare('SELECT school_id FROM school_settings WHERE LOWER(portal_subdomain) = LOWER(?) LIMIT 1')
+            .get(portalSubdomain)
+        );
+      }
+      if (!exists && !reservedSubs.has(portalSubdomain)) break;
+      portalSubdomain = `${normalizeSubdomainSlug(baseSlug).slice(0, 35)}-${suffix}`;
+      suffix++;
+    }
+  } catch {}
+
   const salt = generateSalt();
   const passwordHash = hashPassword(password, salt);
 
@@ -313,7 +352,30 @@ apiRouter.post(['/v1/auth/register-school', '/v1/auth/register'], async (req, re
         `INSERT INTO school_settings (id, school_id, currency, currency_symbol, current_academic_session, current_term, payment_notification_email, payment_notification_sms, portal_subdomain)
           VALUES ($1, $2, 'NGN', '₦', $3, $4, $5, 0, $6)
           ON CONFLICT (id) DO NOTHING`,
-        [settingsId, schoolId, nigeriaCal.sessionName, nigeriaCal.termShort, schoolEmail.toLowerCase(), baseSlug]
+        [settingsId, schoolId, nigeriaCal.sessionName, nigeriaCal.termShort, schoolEmail.toLowerCase(), portalSubdomain]
+      );
+
+      // 2b. Default Branded School Website Profile
+      await pgClient.query(
+        `INSERT INTO school_website_profiles (
+           id, school_id, tagline, hero_title, hero_subtitle, theme_accent,
+           about_title, about_body, vision, mission, core_values,
+           admissions_open, admissions_summary, is_published
+         ) VALUES ($1, $2, $3, $4, $5, 'emerald', $6, $7, $8, $9, $10, 1, $11, 1)
+         ON CONFLICT (school_id) DO NOTHING`,
+        [
+          `web_${schoolId}`,
+          schoolId,
+          `Excellence in Nigerian ${schoolType} Education`,
+          `Welcome to ${schoolName.trim()}`,
+          `Preparing confident, disciplined, and academically distinguished learners in ${lga ? `${lga}, ` : ''}${state}.`,
+          `About ${schoolName.trim()}`,
+          `${schoolName.trim()} is committed to strong academic standards, moral character, structured continuous assessment, and transparent family partnerships.`,
+          `To raise globally competitive, morally grounded students equipped for lifelong excellence.`,
+          `To deliver structured NERDC-aligned instruction supported by dedicated staff and transparent digital school records.`,
+          `Integrity · Academic Rigour · Discipline · Innovation · Community`,
+          `Admissions are open across eligible classes. Submit an inquiry below or visit our Admissions Office.`,
+        ]
       );
 
       // 3. User & Owner Profile
@@ -425,7 +487,26 @@ apiRouter.post(['/v1/auth/register-school', '/v1/auth/register'], async (req, re
         current_term = excluded.current_term,
         payment_notification_email = excluded.payment_notification_email,
         portal_subdomain = excluded.portal_subdomain
-    `).run(settingsId, schoolId, localNigeriaCal.sessionName, localNigeriaCal.termShort, schoolEmail.toLowerCase(), baseSlug);
+    `).run(settingsId, schoolId, localNigeriaCal.sessionName, localNigeriaCal.termShort, schoolEmail.toLowerCase(), portalSubdomain);
+    cacheDb.prepare(`
+      INSERT OR IGNORE INTO school_website_profiles (
+        id, school_id, tagline, hero_title, hero_subtitle, theme_accent,
+        about_title, about_body, vision, mission, core_values,
+        admissions_open, admissions_summary, is_published
+      ) VALUES (?, ?, ?, ?, ?, 'emerald', ?, ?, ?, ?, ?, 1, ?, 1)
+    `).run(
+      `web_${schoolId}`,
+      schoolId,
+      `Excellence in Nigerian ${schoolType} Education`,
+      `Welcome to ${schoolName.trim()}`,
+      `Preparing confident, disciplined, and academically distinguished learners in ${lga ? `${lga}, ` : ''}${state}.`,
+      `About ${schoolName.trim()}`,
+      `${schoolName.trim()} is committed to strong academic standards, moral character, structured continuous assessment, and transparent family partnerships.`,
+      `To raise globally competitive, morally grounded students equipped for lifelong excellence.`,
+      `To deliver structured NERDC-aligned instruction supported by dedicated staff and transparent digital school records.`,
+      `Integrity · Academic Rigour · Discipline · Innovation · Community`,
+      `Admissions are open across eligible classes. Submit an inquiry below or visit our Admissions Office.`
+    );
     cacheDb.prepare(`
       INSERT INTO users (
         id, email, password_hash, salt, full_name, phone,
@@ -5024,11 +5105,11 @@ apiRouter.post(
       student_id = null,
     } = req.body || {};
 
-    const allowedRoles = ['SCHOOL_ADMIN', 'BURSAR', 'TEACHER', 'PARENT', 'STUDENT'];
+    const allowedRoles = ['SCHOOL_ADMIN', 'BURSAR', 'TEACHER', 'STAFF', 'PARENT', 'STUDENT'];
     if (!email || !full_name || !role_name || !allowedRoles.includes(role_name)) {
       return res.status(400).json({
         error: 'INVALID_PAYLOAD',
-        message: 'Valid email, full_name, and role_name (SCHOOL_ADMIN, BURSAR, TEACHER, PARENT, STUDENT) are required.',
+        message: 'Valid email, full_name, and role_name (SCHOOL_ADMIN, BURSAR, TEACHER, STAFF, PARENT, STUDENT) are required.',
       });
     }
 

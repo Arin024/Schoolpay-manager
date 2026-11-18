@@ -49,6 +49,17 @@ import {
   PublicSchoolSummary,
   PublicDocumentVerificationResult,
   BulkProvisionCredential,
+  PublicSchoolWebsiteData,
+  SchoolWebsiteProfile,
+  SchoolWebsiteUrls,
+  SchoolWebsitePost,
+  SchoolWebsiteGalleryItem,
+  SchoolCalendarEvent,
+  SchoolAdmissionInquiry,
+  LessonNoteItem,
+  TimetableSlotItem,
+  StaffRequestItem,
+  ConfidentialNoticeItem,
 } from '../types/index.js';
 
 const API_BASE = '/api/v1';
@@ -2303,7 +2314,7 @@ export const api = {
     full_name: string;
     phone?: string;
     password?: string;
-    role_name: 'SCHOOL_ADMIN' | 'BURSAR' | 'TEACHER' | 'PARENT' | 'STUDENT';
+    role_name: 'SCHOOL_ADMIN' | 'BURSAR' | 'TEACHER' | 'STAFF' | 'PARENT' | 'STUDENT';
     parent_id?: string | null;
     create_parent_profile?: boolean;
     student_ids?: string[];
@@ -2471,5 +2482,346 @@ export const api = {
       body: JSON.stringify(data),
     });
   },
+
+  // ============================================================================
+  // PUBLIC SCHOOL WEBSITE & SUBDOMAIN PORTAL RESOLUTION
+  // ============================================================================
+  async getPublicPortalContext(hostOverride?: string): Promise<{
+    success: boolean;
+    matched: boolean;
+    slug: string | null;
+    school: PublicSchoolSummary | null;
+    urls?: SchoolWebsiteUrls;
+  }> {
+    const query = hostOverride ? `?host=${encodeURIComponent(hostOverride)}` : '';
+    return safeFetch(`${API_BASE}/public/portal-context${query}`);
+  },
+
+  async getPublicSchoolWebsite(slug: string): Promise<{ success: boolean } & PublicSchoolWebsiteData> {
+    return safeFetch(`${API_BASE}/public/schools/${encodeURIComponent(slug)}/website`);
+  },
+
+  async submitAdmissionInquiry(
+    slug: string,
+    data: {
+      student_name: string;
+      target_class?: string;
+      parent_name: string;
+      parent_phone: string;
+      parent_email?: string;
+      message?: string;
+    }
+  ): Promise<{ success: boolean; inquiry: SchoolAdmissionInquiry; message: string }> {
+    return safeFetch(`${API_BASE}/public/schools/${encodeURIComponent(slug)}/inquiries`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(data),
+    });
+  },
+
+  // ============================================================================
+  // ADMIN SCHOOL WEBSITE CMS, GALLERY, EVENTS, INQUIRIES & TIMETABLE
+  // ============================================================================
+  async getSchoolWebsiteAdminProfile(): Promise<{
+    success: boolean;
+    website: SchoolWebsiteProfile;
+    urls: SchoolWebsiteUrls;
+  }> {
+    return safeFetch(`${API_BASE}/school/website/profile`, {
+      headers: getAuthHeaders(),
+    });
+  },
+
+  async updateSchoolWebsiteAdminProfile(
+    data: Partial<SchoolWebsiteProfile> & { portal_subdomain?: string }
+  ): Promise<{
+    success: boolean;
+    website: SchoolWebsiteProfile;
+    urls: SchoolWebsiteUrls;
+    message: string;
+  }> {
+    return safeFetch(`${API_BASE}/school/website/profile`, {
+      method: 'PUT',
+      headers: getAuthHeaders(),
+      body: JSON.stringify(data),
+    });
+  },
+
+  async getWebsitePosts(): Promise<{ success: boolean; posts: SchoolWebsitePost[] }> {
+    return safeFetch(`${API_BASE}/school/website/posts`, {
+      headers: getAuthHeaders(),
+    });
+  },
+
+  async createWebsitePost(data: {
+    title: string;
+    category?: string;
+    excerpt?: string;
+    content: string;
+    cover_image_url?: string | null;
+    author_name?: string;
+    author_role?: string;
+    is_published?: boolean;
+    is_featured?: boolean;
+  }): Promise<{ success: boolean; post: SchoolWebsitePost; message: string }> {
+    return safeFetch(`${API_BASE}/school/website/posts`, {
+      method: 'POST',
+      headers: getAuthHeaders(),
+      body: JSON.stringify(data),
+    });
+  },
+
+  async updateWebsitePost(
+    id: string,
+    data: Partial<SchoolWebsitePost>
+  ): Promise<{ success: boolean; post: SchoolWebsitePost; message: string }> {
+    return safeFetch(`${API_BASE}/school/website/posts/${id}`, {
+      method: 'PUT',
+      headers: getAuthHeaders(),
+      body: JSON.stringify(data),
+    });
+  },
+
+  async deleteWebsitePost(id: string): Promise<{ success: boolean; message: string }> {
+    return safeFetch(`${API_BASE}/school/website/posts/${id}`, {
+      method: 'DELETE',
+      headers: getAuthHeaders(),
+    });
+  },
+
+  async getWebsiteGallery(): Promise<{ success: boolean; gallery: SchoolWebsiteGalleryItem[] }> {
+    return safeFetch(`${API_BASE}/school/website/gallery`, {
+      headers: getAuthHeaders(),
+    });
+  },
+
+  async createWebsiteGalleryItem(data: {
+    title: string;
+    caption?: string;
+    album?: string;
+    image_url: string;
+    is_published?: boolean;
+  }): Promise<{ success: boolean; item: SchoolWebsiteGalleryItem; message: string }> {
+    return safeFetch(`${API_BASE}/school/website/gallery`, {
+      method: 'POST',
+      headers: getAuthHeaders(),
+      body: JSON.stringify(data),
+    });
+  },
+
+  async deleteWebsiteGalleryItem(id: string): Promise<{ success: boolean; message: string }> {
+    return safeFetch(`${API_BASE}/school/website/gallery/${id}`, {
+      method: 'DELETE',
+      headers: getAuthHeaders(),
+    });
+  },
+
+  async getWebsiteEvents(): Promise<{ success: boolean; events: SchoolCalendarEvent[] }> {
+    return safeFetch(`${API_BASE}/school/website/events`, {
+      headers: getAuthHeaders(),
+    });
+  },
+
+  async createWebsiteEvent(data: {
+    title: string;
+    event_date: string;
+    end_date?: string;
+    location?: string;
+    description?: string;
+    visibility?: 'PUBLIC' | 'STAFF_ONLY';
+  }): Promise<{ success: boolean; event: SchoolCalendarEvent; message: string }> {
+    return safeFetch(`${API_BASE}/school/website/events`, {
+      method: 'POST',
+      headers: getAuthHeaders(),
+      body: JSON.stringify(data),
+    });
+  },
+
+  async deleteWebsiteEvent(id: string): Promise<{ success: boolean; message: string }> {
+    return safeFetch(`${API_BASE}/school/website/events/${id}`, {
+      method: 'DELETE',
+      headers: getAuthHeaders(),
+    });
+  },
+
+  async getAdmissionInquiries(): Promise<{ success: boolean; inquiries: SchoolAdmissionInquiry[] }> {
+    return safeFetch(`${API_BASE}/school/website/inquiries`, {
+      headers: getAuthHeaders(),
+    });
+  },
+
+  async updateAdmissionInquiryStatus(
+    id: string,
+    data: { status: 'NEW' | 'CONTACTED' | 'ENROLLED' | 'ARCHIVED'; admin_notes?: string }
+  ): Promise<{ success: boolean; inquiry: SchoolAdmissionInquiry }> {
+    return safeFetch(`${API_BASE}/school/website/inquiries/${id}`, {
+      method: 'PATCH',
+      headers: getAuthHeaders(),
+      body: JSON.stringify(data),
+    });
+  },
+
+  async getAdminTimetable(): Promise<{ success: boolean; slots: TimetableSlotItem[] }> {
+    return safeFetch(`${API_BASE}/school/website/timetable`, {
+      headers: getAuthHeaders(),
+    });
+  },
+
+  async createTimetableSlot(data: {
+    class_id?: string;
+    class_name?: string;
+    arm_name?: string;
+    day_of_week: string;
+    period_label?: string;
+    start_time: string;
+    end_time: string;
+    subject_name: string;
+    teacher_name?: string;
+    room_label?: string;
+  }): Promise<{ success: boolean; slot: TimetableSlotItem; message: string }> {
+    return safeFetch(`${API_BASE}/school/website/timetable`, {
+      method: 'POST',
+      headers: getAuthHeaders(),
+      body: JSON.stringify(data),
+    });
+  },
+
+  async deleteTimetableSlot(id: string): Promise<{ success: boolean; message: string }> {
+    return safeFetch(`${API_BASE}/school/website/timetable/${id}`, {
+      method: 'DELETE',
+      headers: getAuthHeaders(),
+    });
+  },
+
+  // ============================================================================
+  // DEDICATED STAFF WORKSPACE (LESSON NOTES, CONFIDENTIAL BRIEFINGS & REQUESTS)
+  // ============================================================================
+  async generateLessonNoteDraft(data: {
+    subject_name: string;
+    class_name: string;
+    term_name?: string;
+    week_number?: number;
+    duration_minutes?: number;
+    topic: string;
+    sub_topic?: string;
+  }): Promise<{
+    success: boolean;
+    draft: Partial<LessonNoteItem>;
+    message: string;
+  }> {
+    return safeFetch(`${API_BASE}/staff-workspace/lesson-notes/generate`, {
+      method: 'POST',
+      headers: getAuthHeaders(),
+      body: JSON.stringify(data),
+    });
+  },
+
+  async getLessonNotes(status?: string): Promise<{ success: boolean; lessonNotes: LessonNoteItem[] }> {
+    const q = status ? `?status=${encodeURIComponent(status)}` : '';
+    return safeFetch(`${API_BASE}/staff-workspace/lesson-notes${q}`, {
+      headers: getAuthHeaders(),
+    });
+  },
+
+  async createLessonNote(data: Partial<LessonNoteItem>): Promise<{
+    success: boolean;
+    lessonNote: LessonNoteItem;
+    message: string;
+  }> {
+    return safeFetch(`${API_BASE}/staff-workspace/lesson-notes`, {
+      method: 'POST',
+      headers: getAuthHeaders(),
+      body: JSON.stringify(data),
+    });
+  },
+
+  async updateLessonNote(
+    id: string,
+    data: Partial<LessonNoteItem>
+  ): Promise<{ success: boolean; lessonNote: LessonNoteItem; message: string }> {
+    return safeFetch(`${API_BASE}/staff-workspace/lesson-notes/${id}`, {
+      method: 'PUT',
+      headers: getAuthHeaders(),
+      body: JSON.stringify(data),
+    });
+  },
+
+  async reviewLessonNote(
+    id: string,
+    data: { status: 'APPROVED' | 'REVISION_REQUESTED'; admin_feedback?: string }
+  ): Promise<{ success: boolean; lessonNote: LessonNoteItem; message: string }> {
+    return safeFetch(`${API_BASE}/staff-workspace/lesson-notes/${id}/review`, {
+      method: 'POST',
+      headers: getAuthHeaders(),
+      body: JSON.stringify(data),
+    });
+  },
+
+  async deleteLessonNote(id: string): Promise<{ success: boolean; message: string }> {
+    return safeFetch(`${API_BASE}/staff-workspace/lesson-notes/${id}`, {
+      method: 'DELETE',
+      headers: getAuthHeaders(),
+    });
+  },
+
+  async getConfidentialStaffNotices(): Promise<{
+    success: boolean;
+    notices: ConfidentialNoticeItem[];
+  }> {
+    return safeFetch(`${API_BASE}/staff-workspace/confidential-notices`, {
+      headers: getAuthHeaders(),
+    });
+  },
+
+  async acknowledgeConfidentialNotice(id: string): Promise<{ success: boolean; message: string }> {
+    return safeFetch(`${API_BASE}/staff-workspace/confidential-notices/${id}/acknowledge`, {
+      method: 'POST',
+      headers: getAuthHeaders(),
+    });
+  },
+
+  async getStaffWorkspaceTimetable(): Promise<{ success: boolean; slots: TimetableSlotItem[] }> {
+    return safeFetch(`${API_BASE}/staff-workspace/timetable`, {
+      headers: getAuthHeaders(),
+    });
+  },
+
+  async getStaffWorkspaceEvents(): Promise<{ success: boolean; events: SchoolCalendarEvent[] }> {
+    return safeFetch(`${API_BASE}/staff-workspace/events`, {
+      headers: getAuthHeaders(),
+    });
+  },
+
+  async getStaffRequests(): Promise<{ success: boolean; requests: StaffRequestItem[] }> {
+    return safeFetch(`${API_BASE}/staff-workspace/requests`, {
+      headers: getAuthHeaders(),
+    });
+  },
+
+  async createStaffRequest(data: {
+    request_type: 'LEAVE' | 'RESOURCES' | 'MAINTENANCE' | 'GENERAL';
+    subject: string;
+    details: string;
+    start_date?: string;
+    end_date?: string;
+  }): Promise<{ success: boolean; request: StaffRequestItem; message: string }> {
+    return safeFetch(`${API_BASE}/staff-workspace/requests`, {
+      method: 'POST',
+      headers: getAuthHeaders(),
+      body: JSON.stringify(data),
+    });
+  },
+
+  async reviewStaffRequest(
+    id: string,
+    data: { status: 'PENDING' | 'APPROVED' | 'DECLINED'; admin_response?: string }
+  ): Promise<{ success: boolean; request: StaffRequestItem; message: string }> {
+    return safeFetch(`${API_BASE}/staff-workspace/requests/${id}`, {
+      method: 'PATCH',
+      headers: getAuthHeaders(),
+      body: JSON.stringify(data),
+    });
+  },
 };
+
 

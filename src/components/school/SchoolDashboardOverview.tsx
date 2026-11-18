@@ -35,11 +35,14 @@ export const SchoolDashboardOverview: React.FC<SchoolDashboardOverviewProps> = (
   onOpenImportModal,
   readOnly = false,
 }) => {
-  const { activeSchool } = useAuth();
+  const { activeSchool, activeSettings } = useAuth();
   const [stats, setStats] = useState<SchoolDashboardStats | null>(null);
   const [loading, setLoading] = useState(true);
   const [copiedPortalLink, setCopiedPortalLink] = useState(false);
+  const [copiedSubdomain, setCopiedSubdomain] = useState(false);
 
+  const subdomainSlug = (activeSettings?.portal_subdomain || activeSchool?.slug || 'school').toLowerCase();
+  const subdomainUrl = `https://${subdomainSlug}.bursariq.com.ng`;
   const shareablePortalUrl = activeSchool?.slug
     ? `${window.location.origin}/#portal/${activeSchool.slug}`
     : `${window.location.origin}/#login`;
@@ -48,6 +51,12 @@ export const SchoolDashboardOverview: React.FC<SchoolDashboardOverviewProps> = (
     navigator.clipboard.writeText(shareablePortalUrl);
     setCopiedPortalLink(true);
     setTimeout(() => setCopiedPortalLink(false), 2500);
+  };
+
+  const handleCopySubdomain = () => {
+    navigator.clipboard.writeText(subdomainUrl);
+    setCopiedSubdomain(true);
+    setTimeout(() => setCopiedSubdomain(false), 2500);
   };
 
   useEffect(() => {
@@ -183,36 +192,49 @@ export const SchoolDashboardOverview: React.FC<SchoolDashboardOverviewProps> = (
         </div>
       </div>
 
-      {/* Shareable Branded Portal Link for Parents, Students, Staff & Outsiders */}
+      {/* Shareable School Website & Subdomain Links for Parents, Students, Staff & Prospective Families */}
       {!readOnly && activeSchool && (
         <div className="bg-slate-900 text-white rounded-2xl p-5 flex flex-col lg:flex-row lg:items-center justify-between gap-4 border border-slate-800 shadow-sm">
-          <div className="space-y-1">
+          <div className="space-y-1.5 min-w-0">
             <div className="flex items-center gap-2">
-              <Link2 className="w-4 h-4 text-emerald-400" />
-              <h3 className="text-sm font-bold text-white">Shareable School Portal Link</h3>
+              <Link2 className="w-4 h-4 text-emerald-400 shrink-0" />
+              <h3 className="text-sm font-bold text-white">Shareable School Website &amp; Subdomain Portal</h3>
             </div>
             <p className="text-xs text-slate-300 max-w-2xl">
-              Share this link with <strong>Parents, Students, Teachers, and Outsiders</strong>. Students &amp; Parents self-activate or sign in with their own Admission No / Phone &amp; personal password (never share admin credentials).
+              Visitors see your school&apos;s public website (about, articles, photo gallery, events, and admissions inquiry) alongside dedicated login portals for <strong>Staff, Parents &amp; Students</strong>.
             </p>
-            <p className="text-[11px] font-mono text-emerald-300 break-all pt-0.5 select-all">
-              {shareablePortalUrl}
-            </p>
+            <div className="flex flex-col sm:flex-row sm:items-center gap-2 sm:gap-5 pt-0.5 text-[11px] font-mono">
+              <span className="text-emerald-300 break-all select-all">
+                Subdomain: {subdomainUrl}
+              </span>
+              <span className="text-slate-300 break-all select-all">
+                Direct Link: {shareablePortalUrl}
+              </span>
+            </div>
           </div>
-          <div className="flex items-center gap-2 shrink-0">
+          <div className="flex flex-wrap items-center gap-2 shrink-0">
             <button
               type="button"
-              onClick={handleCopyPortalLink}
-              className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-xs font-bold flex items-center gap-1.5 transition cursor-pointer"
+              onClick={handleCopySubdomain}
+              className="px-3.5 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-xs font-bold flex items-center gap-1.5 transition cursor-pointer whitespace-nowrap"
             >
-              {copiedPortalLink ? <Check className="w-4 h-4" /> : <Copy className="w-4 h-4" />}
-              <span>{copiedPortalLink ? 'Portal Link Copied' : 'Copy Portal Link'}</span>
+              {copiedSubdomain ? <Check className="w-4 h-4" /> : <Copy className="w-4 h-4" />}
+              <span>{copiedSubdomain ? 'Subdomain Copied' : 'Copy Subdomain'}</span>
             </button>
             <button
               type="button"
-              onClick={() => onNavigateTab('users')}
-              className="px-3.5 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-xl text-xs font-semibold border border-slate-700 transition cursor-pointer"
+              onClick={handleCopyPortalLink}
+              className="px-3.5 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-xl text-xs font-semibold border border-slate-700 flex items-center gap-1.5 transition cursor-pointer whitespace-nowrap"
             >
-              Issue Logins
+              {copiedPortalLink ? <Check className="w-4 h-4 text-emerald-400" /> : <Copy className="w-4 h-4" />}
+              <span>{copiedPortalLink ? 'Link Copied' : 'Copy Portal Link'}</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => onNavigateTab('website')}
+              className="px-3.5 py-2 bg-white hover:bg-slate-100 text-slate-900 rounded-xl text-xs font-bold transition cursor-pointer whitespace-nowrap"
+            >
+              Manage School Website
             </button>
           </div>
         </div>

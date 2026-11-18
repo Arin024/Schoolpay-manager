@@ -28,6 +28,9 @@ import { SchoolAnnouncementsView } from './components/performance/SchoolAnnounce
 import { ParentPortalView } from './components/portal/ParentPortalView.js';
 import { StudentPortalView } from './components/portal/StudentPortalView.js';
 import { TeacherPortalView } from './components/portal/TeacherPortalView.js';
+import { PublicSchoolWebsite } from './components/school/PublicSchoolWebsite.js';
+import { SchoolWebsiteManagerView } from './components/school/SchoolWebsiteManagerView.js';
+import { AdminStaffDeskView } from './components/school/AdminStaffDeskView.js';
 import { SuperAdminDashboard } from './components/admin/SuperAdminDashboard.js';
 import { OfflineIndicator } from './components/common/OfflineIndicator.js';
 import { NotFoundPage } from './components/common/NotFoundPage.js';
@@ -64,6 +67,8 @@ import {
   CalendarCheck,
   MessageSquare,
   Megaphone,
+  Globe,
+  BookOpen,
 } from 'lucide-react';
 import { SchoolStatusBadge } from './components/common/StatusBadge.js';
 
@@ -82,6 +87,8 @@ type SchoolTab =
   | 'staff'
   | 'sessions'
   | 'profile'
+  | 'website'
+  | 'lesson-notes'
   | 'settings'
   | 'users'
   | 'audit'
@@ -103,6 +110,8 @@ const ALL_SCHOOL_TABS: SchoolTab[] = [
   'attendance',
   'behaviour',
   'announcements',
+  'website',
+  'lesson-notes',
   'finance',
   'subscription',
   'students',
@@ -133,7 +142,11 @@ function parsePortalSlugFromLocation(): string | null {
     const rawHash = window.location.hash.replace(/^#\/?/, '');
     if (rawHash.toLowerCase().startsWith('portal/')) {
       const slug = rawHash.slice('portal/'.length).split(/[/?#]/)[0]?.trim();
-      if (slug) return slug;
+      if (slug) return decodeURIComponent(slug);
+    }
+    const pathMatch = window.location.pathname.match(/^\/site\/([^/?#]+)/i);
+    if (pathMatch?.[1]) {
+      return decodeURIComponent(pathMatch[1].trim());
     }
     const params = new URLSearchParams(window.location.search);
     const qSlug = params.get('portal') || params.get('school');
@@ -185,6 +198,21 @@ const AppContent: React.FC = () => {
         // non-fatal
       });
   }, [isSuperAdmin, user?.id]);
+
+  // Auto-resolve school portal when visiting a branded school subdomain (e.g. brightstars.bursariq.com.ng)
+  useEffect(() => {
+    if (user || portalSlug) return;
+    api
+      .getPublicPortalContext()
+      .then((res) => {
+        if (res?.matched && res.slug) {
+          setPortalSlug(res.slug);
+        }
+      })
+      .catch(() => {
+        // non-fatal
+      });
+  }, [user, portalSlug]);
 
   // Auto-detect password recovery links from email or admin sharing (?recovery_ticket=... or ?token=...)
   useEffect(() => {
@@ -263,6 +291,8 @@ const AppContent: React.FC = () => {
           staff: 'Staff Directory',
           sessions: 'Academic Sessions & Terms',
           profile: 'School Profile',
+          website: 'School Website, Blog & Gallery',
+          'lesson-notes': 'Lesson Notes & Staff Desk',
           settings: 'School Configuration',
           users: 'User Roles & Permissions',
           audit: 'Audit Security Trail',
@@ -553,20 +583,37 @@ const AppContent: React.FC = () => {
             onGoLogin={() => navigateTo('login')}
           />
         ) : !user ? (
+          portalSlug && activeView !== 'register' ? (
+            <PublicSchoolWebsite
+              portalSlug={portalSlug}
+              onClearPortal={() => {
+                setPortalSlug(null);
+                window.history.replaceState({ view: 'login' }, '', '/#login');
+                navigateTo('login', undefined, true);
+              }}
+              onAuthSuccess={() => navigateTo('school', 'overview')}
+              onNavigateRegister={() => navigateTo('register')}
+              onSelectSchoolPortal={(nextSlug) => {
+                setPortalSlug(nextSlug);
+                window.history.replaceState({ view: 'login', portalSlug: nextSlug }, '', `#portal/${nextSlug}`);
+              }}
+              onForgotPassword={handleOpenForgotModal}
+            />
+          ) : (
           /* Public Unauthenticated State */
           <div className="space-y-10">
             {/* Value Proposition Hero & Above-The-Fold CTAs */}
             <div className="text-center max-w-3xl mx-auto pt-4 pb-2">
               <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-emerald-100 text-emerald-800 text-xs font-bold uppercase tracking-wider mb-4 border border-emerald-200">
                 <ShieldCheck className="w-4 h-4 text-emerald-600" />
-                <span>Built for Nigerian Schools • Dedicated Private School Portal</span>
+                <span>Built for Nigerian Schools • Instant School Website &amp; Portal</span>
               </div>
               <h1 className="text-3xl sm:text-5xl font-extrabold text-slate-900 tracking-tight leading-tight">
                 One complete school platform.<br className="hidden sm:inline" />
-                <span className="text-emerald-700">Academics, portals, and bursary.</span>
+                <span className="text-emerald-700">Website, academics, staff desk &amp; bursary.</span>
               </h1>
               <p className="mt-3 text-sm sm:text-base text-slate-600 max-w-2xl mx-auto">
-                The all-in-one digital operating system for Nigerian schools (bursariq.com.ng). Run role-separated Admin, Teacher, Parent, and Student portals, End-of-Term &amp; Full-Session cumulative report cards, attendance, behaviour tracking, and reconciled fee billing in one secure environment.
+                The all-in-one digital operating system for Nigerian schools (bursariq.com.ng). Every school receives a shareable public school website &amp; subdomain with news articles and photo gallery, a private Staff Workspace with Nigerian NERDC lesson notes and confidential circulars, Parent/Student portals, report cards, and reconciled fee billing.
               </p>
 
               {/* Primary Call-To-Action (Above The Fold) */}
@@ -805,6 +852,7 @@ const AppContent: React.FC = () => {
               </div>
             </div>
           </div>
+          )
         ) : isSuperAdmin && (activeView === 'superadmin' || !activeSchool) ? (
           /* Super Admin Platform View */
           <SuperAdminDashboard onEnterSchool={handleSuperAdminEnterSchool} />
@@ -903,12 +951,12 @@ const AppContent: React.FC = () => {
               </div>
             )}
 
-            {/* Dedicated Role-Scoped Portals (Parent, Student, Teacher, Bursar, School Admin, Fail-Closed Fallback) */}
+            {/* Dedicated Role-Scoped Portals (Parent, Student, Staff/Teacher, Bursar, School Admin, Fail-Closed Fallback) */}
             {activeRole?.role_name === 'PARENT' ? (
               <ParentPortalView />
             ) : activeRole?.role_name === 'STUDENT' ? (
               <StudentPortalView />
-            ) : activeRole?.role_name === 'TEACHER' ? (
+            ) : activeRole?.role_name === 'TEACHER' || activeRole?.role_name === 'STAFF' ? (
               <TeacherPortalView />
             ) : activeRole?.role_name === 'BURSAR' ? (
               /* Dedicated Bursar Financial Workspace */
@@ -1155,6 +1203,30 @@ const AppContent: React.FC = () => {
               </button>
 
               <button
+                onClick={() => navigateTo('school', 'website')}
+                className={`flex items-center gap-2 px-3.5 py-2.5 rounded-xl text-xs font-bold transition cursor-pointer whitespace-nowrap shrink-0 ${
+                  schoolTab === 'website'
+                    ? 'bg-slate-900 text-white shadow'
+                    : 'text-slate-600 hover:bg-slate-100 hover:text-slate-900'
+                }`}
+              >
+                <Globe className="w-4 h-4 text-emerald-400" />
+                <span>Website &amp; Gallery</span>
+              </button>
+
+              <button
+                onClick={() => navigateTo('school', 'lesson-notes')}
+                className={`flex items-center gap-2 px-3.5 py-2.5 rounded-xl text-xs font-bold transition cursor-pointer whitespace-nowrap shrink-0 ${
+                  schoolTab === 'lesson-notes'
+                    ? 'bg-slate-900 text-white shadow'
+                    : 'text-slate-600 hover:bg-slate-100 hover:text-slate-900'
+                }`}
+              >
+                <BookOpen className="w-4 h-4 text-emerald-400" />
+                <span>Lesson Notes &amp; Staff Desk</span>
+              </button>
+
+              <button
                 onClick={() => navigateTo('school', 'profile')}
                 className={`flex items-center gap-2 px-3.5 py-2.5 rounded-xl text-xs font-bold transition cursor-pointer whitespace-nowrap shrink-0 ${
                   schoolTab === 'profile'
@@ -1258,6 +1330,8 @@ const AppContent: React.FC = () => {
             {schoolTab === 'parents' && <SchoolParentsView />}
             {schoolTab === 'staff' && <SchoolStaffDirectoryView />}
             {schoolTab === 'sessions' && <SchoolAcademicSessionsView />}
+            {schoolTab === 'website' && <SchoolWebsiteManagerView />}
+            {schoolTab === 'lesson-notes' && <AdminStaffDeskView />}
             {schoolTab === 'profile' && <SchoolProfileView />}
             {schoolTab === 'settings' && <SchoolSettingsView />}
             {schoolTab === 'users' && <SchoolUsersView />}
@@ -1349,7 +1423,7 @@ const AppContent: React.FC = () => {
       />
 
       {/* Sticky Mobile CTA for quick access on phone screens */}
-      {!user && (
+      {!user && !portalSlug && (
         <StickyMobileCTA
           onRegister={() => {
             navigateTo('register');

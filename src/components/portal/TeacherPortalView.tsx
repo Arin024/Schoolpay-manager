@@ -19,18 +19,38 @@ import {
   X,
   FileText,
   AlertCircle,
+  ShieldAlert,
+  Clock,
+  Send,
+  Check,
+  CheckCircle2,
 } from 'lucide-react';
 import { api } from '../../services/api.js';
 import { useAuth } from '../../context/AuthContext.js';
-import { InvoiceDef, PaymentItem, ReportCardItem, Student, TeacherDashboardData } from '../../types/index.js';
+import {
+  ConfidentialNoticeItem,
+  InvoiceDef,
+  PaymentItem,
+  ReportCardItem,
+  SchoolCalendarEvent,
+  StaffRequestItem,
+  Student,
+  TeacherDashboardData,
+  TimetableSlotItem,
+} from '../../types/index.js';
 import { SchoolPerformanceView } from '../performance/SchoolPerformanceView.js';
 import { SchoolAttendanceView } from '../performance/SchoolAttendanceView.js';
 import { SchoolBehaviourView } from '../performance/SchoolBehaviourView.js';
 import { SchoolAnnouncementsView } from '../performance/SchoolAnnouncementsView.js';
 import { PrintableReportCardModal } from '../performance/PrintableReportCardModal.js';
+import { LessonNotesStudio } from './LessonNotesStudio.js';
 
 type TeacherTab =
   | 'overview'
+  | 'confidential'
+  | 'lesson-notes'
+  | 'timetable'
+  | 'requests'
   | 'classes'
   | 'students'
   | 'performance'
@@ -62,6 +82,22 @@ export const TeacherPortalView: React.FC = () => {
   const [reportGenerating, setReportGenerating] = useState(false);
   const [reportGenError, setReportGenError] = useState<string | null>(null);
   const [viewingRc, setViewingRc] = useState<ReportCardItem | null>(null);
+
+  // Staff-only workspace modules (Confidential Briefings, Timetable & Events, Staff Requests)
+  const [confidentialNotices, setConfidentialNotices] = useState<ConfidentialNoticeItem[]>([]);
+  const [timetableSlots, setTimetableSlots] = useState<TimetableSlotItem[]>([]);
+  const [staffEvents, setStaffEvents] = useState<SchoolCalendarEvent[]>([]);
+  const [staffRequests, setStaffRequests] = useState<StaffRequestItem[]>([]);
+  const [staffWorkspaceLoading, setStaffWorkspaceLoading] = useState(false);
+  const [staffFeedback, setStaffFeedback] = useState<{ type: 'ok' | 'err'; text: string } | null>(null);
+  const [requestForm, setRequestForm] = useState({
+    request_type: 'LEAVE' as 'LEAVE' | 'RESOURCES' | 'MAINTENANCE' | 'GENERAL',
+    subject: '',
+    details: '',
+    start_date: '',
+    end_date: '',
+  });
+  const [submittingRequest, setSubmittingRequest] = useState(false);
 
   const loadDashboard = async () => {
     setLoading(true);
@@ -146,8 +182,82 @@ export const TeacherPortalView: React.FC = () => {
     }
   }, [tab, canViewFees]);
 
-  const navItems: Array<{ key: TeacherTab; label: string; icon: React.ComponentType<{ className?: string }> }> = [
-    { key: 'overview', label: 'Overview', icon: LayoutDashboard },
+  useEffect(() => {
+    if (tab === 'confidential' || tab === 'overview') {
+      api
+        .getConfidentialStaffNotices()
+        .then((res) => setConfidentialNotices(res.notices || []))
+        .catch(() => setConfidentialNotices([]));
+    }
+    if (tab === 'timetable') {
+      setStaffWorkspaceLoading(true);
+      Promise.all([
+        api.getStaffWorkspaceTimetable().catch(() => ({ slots: [] })),
+        api.getStaffWorkspaceEvents().catch(() => ({ events: [] })),
+      ])
+        .then(([ttRes, evRes]) => {
+          setTimetableSlots(ttRes.slots || []);
+          setStaffEvents(evRes.events || []);
+        })
+        .finally(() => setStaffWorkspaceLoading(false));
+    }
+    if (tab === 'requests') {
+      setStaffWorkspaceLoading(true);
+      api
+        .getStaffRequests()
+        .then((res) => setStaffRequests(res.requests || []))
+        .catch(() => setStaffRequests([]))
+        .finally(() => setStaffWorkspaceLoading(false));
+    }
+  }, [tab, activeSchoolId]);
+
+  const handleAcknowledgeConfidential = async (noticeId: string) => {
+    try {
+      await api.acknowledgeConfidentialNotice(noticeId);
+      setConfidentialNotices((prev) =>
+        prev.map((n) => (n.id === noticeId ? { ...n, is_acknowledged: true, my_read_at: new Date().toISOString() } : n))
+      );
+      setStaffFeedback({ type: 'ok', text: 'Confidential briefing acknowledged.' });
+    } catch (err: any) {
+      setStaffFeedback({ type: 'err', text: err?.message || 'Could not acknowledge notice.' });
+    }
+  };
+
+  const handleCreateStaffRequest = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setSubmittingRequest(true);
+    setStaffFeedback(null);
+    try {
+      const res = await api.createStaffRequest({
+        request_type: requestForm.request_type,
+        subject: requestForm.subject.trim(),
+        details: requestForm.details.trim(),
+        start_date: requestForm.start_date || undefined,
+        end_date: requestForm.end_date || undefined,
+      });
+      setStaffRequests((prev) => [res.request, ...prev]);
+      setRequestForm({ request_type: 'LEAVE', subject: '', details: '', start_date: '', end_date: '' });
+      setStaffFeedback({ type: 'ok', text: res.message || 'Staff request submitted to School Administration.' });
+    } catch (err: any) {
+      setStaffFeedback({ type: 'err', text: err?.message || 'Failed to submit request.' });
+    } finally {
+      setSubmittingRequest(false);
+    }
+  };
+
+  const unreadConfidentialCount = confidentialNotices.filter((n) => !n.is_acknowledged && !n.my_read_at).length;
+
+  const navItems: Array<{
+    key: TeacherTab;
+    label: string;
+    icon: React.ComponentType<{ className?: string }>;
+    badge?: number;
+  }> = [
+    { key: 'overview', label: 'Staff Overview', icon: LayoutDashboard },
+    { key: 'confidential', label: 'Confidential Notices', icon: ShieldAlert, badge: unreadConfidentialCount },
+    { key: 'lesson-notes', label: 'Lesson Notes & Plans', icon: BookOpen },
+    { key: 'timetable', label: 'Timetable & Events', icon: Clock },
+    { key: 'requests', label: 'Staff Requests', icon: Send },
     { key: 'classes', label: 'Assigned Classes', icon: Building2 },
     { key: 'students', label: 'Students', icon: GraduationCap },
     { key: 'performance', label: 'Performance & Reports', icon: BarChart3 },
@@ -189,18 +299,18 @@ export const TeacherPortalView: React.FC = () => {
 
   return (
     <div className="space-y-6">
-      {/* Educator Workspace Banner & Navigation */}
+      {/* Dedicated Staff Workspace Banner & Navigation */}
       <div className="bg-white rounded-2xl border border-slate-200 p-5 space-y-4">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
           <div>
-            <h2 className="text-base font-bold text-slate-900">Read-Only Educator Workspace</h2>
+            <h2 className="text-base font-bold text-slate-900">Dedicated Staff Workspace</h2>
             <p className="text-xs text-slate-500 mt-0.5">
-              View authorized classes, learners, academic results, attendance registers, and conduct logs. All record updates are restricted to School Administration.
+              Private staff portal for NERDC lesson notes, confidential administrative circulars, teaching schedules, and staff requests. Strictly isolated from parent and student portals.
             </p>
           </div>
-          <span className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-slate-100 border border-slate-200 text-xs font-semibold text-slate-700 shrink-0">
-            <Lock className="w-3.5 h-3.5 text-slate-500" />
-            <span>Read-Only Access</span>
+          <span className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-slate-900 text-white text-xs font-semibold shrink-0">
+            <Lock className="w-3.5 h-3.5 text-emerald-400" />
+            <span>Staff-Only Isolation</span>
           </span>
         </div>
 
@@ -219,6 +329,11 @@ export const TeacherPortalView: React.FC = () => {
               >
                 <Icon className="w-3.5 h-3.5" />
                 <span>{item.label}</span>
+                {item.badge ? (
+                  <span className="px-1.5 py-0.5 rounded bg-rose-600 text-white text-[10px] font-bold tabular-nums">
+                    {item.badge}
+                  </span>
+                ) : null}
               </button>
             );
           })}
@@ -228,14 +343,40 @@ export const TeacherPortalView: React.FC = () => {
       {/* OVERVIEW */}
       {tab === 'overview' && dashboard && (
         <div className="space-y-6">
-          <div className="grid grid-cols-2 lg:grid-cols-5 gap-4">
+          <div className="grid grid-cols-2 lg:grid-cols-6 gap-4">
+            <button
+              type="button"
+              onClick={() => setTab('confidential')}
+              className="bg-white rounded-2xl border border-rose-200 p-4 text-left hover:border-rose-300 transition cursor-pointer"
+            >
+              <p className="text-xs text-rose-700 font-semibold">Confidential Notices</p>
+              <p className="text-2xl font-bold text-slate-900 mt-1 tabular-nums">
+                {dashboard.stats.confidentialNoticesCount ?? confidentialNotices.length}
+              </p>
+              <p className="text-[11px] text-slate-500 mt-0.5 tabular-nums">
+                {unreadConfidentialCount > 0 ? `${unreadConfidentialCount} unread briefing(s)` : 'Private staff-only channel'}
+              </p>
+            </button>
+            <button
+              type="button"
+              onClick={() => setTab('lesson-notes')}
+              className="bg-white rounded-2xl border border-emerald-200 p-4 text-left hover:border-emerald-300 transition cursor-pointer"
+            >
+              <p className="text-xs text-emerald-700 font-semibold">My Lesson Notes</p>
+              <p className="text-2xl font-bold text-slate-900 mt-1 tabular-nums">
+                {dashboard.stats.lessonNotesCount ?? 0}
+              </p>
+              <p className="text-[11px] text-slate-500 mt-0.5">NERDC plans &amp; notes</p>
+            </button>
             <button
               type="button"
               onClick={() => setTab('students')}
               className="bg-white rounded-2xl border border-slate-200 p-4 text-left hover:border-slate-300 transition cursor-pointer"
             >
               <p className="text-xs text-slate-500">Authorized Learners</p>
-              <p className="text-2xl font-bold text-slate-900 mt-1 tabular-nums">{dashboard.stats.studentsCount}</p>
+              <p className="text-2xl font-bold text-slate-900 mt-1 tabular-nums">
+                {dashboard.stats.authorizedStudentsCount ?? dashboard.stats.studentsCount ?? dashboard.students.length}
+              </p>
               <p className="text-[11px] text-slate-400 mt-0.5">
                 {dashboard.hasAssignedClasses ? 'Assigned class arms' : 'School roster'}
               </p>
@@ -259,7 +400,9 @@ export const TeacherPortalView: React.FC = () => {
               className="bg-white rounded-2xl border border-slate-200 p-4 text-left hover:border-slate-300 transition cursor-pointer"
             >
               <p className="text-xs text-slate-500">Curriculum Subjects</p>
-              <p className="text-2xl font-bold text-slate-900 mt-1 tabular-nums">{dashboard.stats.subjectsCount}</p>
+              <p className="text-2xl font-bold text-slate-900 mt-1 tabular-nums">
+                {dashboard.stats.subjectsCount ?? dashboard.subjects.length}
+              </p>
               <p className="text-[11px] text-slate-400 mt-0.5">Active school subjects</p>
             </button>
             <button
@@ -272,17 +415,6 @@ export const TeacherPortalView: React.FC = () => {
                 {dashboard.stats.publishedExamsCount}
               </p>
               <p className="text-[11px] text-slate-400 mt-0.5">Report &amp; score access</p>
-            </button>
-            <button
-              type="button"
-              onClick={() => setTab('announcements')}
-              className="bg-white rounded-2xl border border-slate-200 p-4 text-left hover:border-slate-300 transition cursor-pointer col-span-2 lg:col-span-1"
-            >
-              <p className="text-xs text-slate-500">Announcements</p>
-              <p className="text-2xl font-bold text-slate-900 mt-1 tabular-nums">
-                {dashboard.stats.announcementsCount}
-              </p>
-              <p className="text-[11px] text-slate-400 mt-0.5">Published notices</p>
             </button>
           </div>
 
@@ -515,6 +647,303 @@ export const TeacherPortalView: React.FC = () => {
                 </table>
               </div>
             )}
+        </div>
+      )}
+
+      {/* CONFIDENTIAL STAFF NOTICES */}
+      {tab === 'confidential' && (
+        <div className="bg-white rounded-2xl border border-slate-200 p-6 space-y-4 text-xs">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pb-3 border-b border-slate-100">
+            <div>
+              <h3 className="text-sm font-bold text-slate-900 flex items-center gap-2">
+                <ShieldAlert className="w-4 h-4 text-rose-600" />
+                <span>Confidential Staff Briefings ({confidentialNotices.length})</span>
+              </h3>
+              <p className="text-slate-500 mt-0.5">
+                Internal administrative memos meant strictly for teaching &amp; school staff. Never visible to Parents, Students, or Public visitors.
+              </p>
+            </div>
+          </div>
+
+          {staffFeedback && (
+            <div
+              className={`p-3 rounded-xl border flex items-center justify-between ${
+                staffFeedback.type === 'ok'
+                  ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
+                  : 'bg-rose-50 border-rose-200 text-rose-800'
+              }`}
+            >
+              <span className="flex items-center gap-1.5 font-medium">
+                <CheckCircle2 className="w-4 h-4" />
+                <span>{staffFeedback.text}</span>
+              </span>
+              <button type="button" onClick={() => setStaffFeedback(null)} className="cursor-pointer">
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+          )}
+
+          {confidentialNotices.length === 0 ? (
+            <p className="py-10 text-center text-slate-400">No confidential staff circulars issued yet.</p>
+          ) : (
+            <div className="divide-y divide-slate-100">
+              {confidentialNotices.map((notice) => {
+                const isAcked = Boolean(notice.is_acknowledged || notice.my_read_at);
+                return (
+                  <div key={notice.id} className="py-4 first:pt-0 last:pb-0 flex flex-col sm:flex-row sm:items-start justify-between gap-4">
+                    <div className="space-y-1">
+                      <div className="flex flex-wrap items-center gap-2 text-[11px]">
+                        <span className="font-bold text-rose-700">Confidential Staff Only</span>
+                        <span aria-hidden="true">·</span>
+                        <span className="text-slate-500">Priority: {notice.priority}</span>
+                        <span aria-hidden="true">·</span>
+                        <span className="font-mono text-slate-500 tabular-nums">
+                          {notice.published_at || notice.created_at
+                            ? new Date(notice.published_at || notice.created_at || '').toLocaleDateString()
+                            : ''}
+                        </span>
+                      </div>
+                      <h4 className="text-sm font-bold text-slate-900">{notice.title}</h4>
+                      <p className="text-slate-700 whitespace-pre-line leading-relaxed">{notice.content}</p>
+                    </div>
+
+                    <div className="shrink-0">
+                      {isAcked ? (
+                        <span className="inline-flex items-center gap-1.5 text-emerald-700 font-semibold">
+                          <Check className="w-3.5 h-3.5" />
+                          <span>Acknowledged</span>
+                        </span>
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={() => handleAcknowledgeConfidential(notice.id)}
+                          className="px-3.5 py-2 bg-slate-900 hover:bg-slate-800 text-white rounded-xl font-bold inline-flex items-center gap-1.5 cursor-pointer whitespace-nowrap"
+                        >
+                          <Check className="w-3.5 h-3.5 text-emerald-400" />
+                          <span>Acknowledge Receipt</span>
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* LESSON NOTES STUDIO */}
+      {tab === 'lesson-notes' && (
+        <LessonNotesStudio
+          isAdminMode={false}
+          classes={dashboard?.allClasses || []}
+          subjects={dashboard?.subjects || []}
+        />
+      )}
+
+      {/* TEACHING TIMETABLE & STAFF EVENTS */}
+      {tab === 'timetable' && (
+        <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 text-xs">
+          <div className="lg:col-span-7 bg-white rounded-2xl border border-slate-200 p-6 space-y-4">
+            <h3 className="text-sm font-bold text-slate-900">Teaching Timetable ({timetableSlots.length})</h3>
+            {staffWorkspaceLoading ? (
+              <p className="py-10 text-center text-slate-400">Loading school timetable...</p>
+            ) : timetableSlots.length === 0 ? (
+              <p className="py-10 text-center text-slate-400">No timetable periods configured by administration yet.</p>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-left text-xs">
+                  <thead>
+                    <tr className="border-b border-slate-200 text-slate-500 bg-slate-50/70">
+                      <th className="py-2.5 px-3">Day</th>
+                      <th className="py-2.5 px-3">Time</th>
+                      <th className="py-2.5 px-3">Class</th>
+                      <th className="py-2.5 px-3">Subject</th>
+                      <th className="py-2.5 px-3">Room</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100">
+                    {timetableSlots.map((slot) => (
+                      <tr key={slot.id}>
+                        <td className="py-2.5 px-3 font-semibold text-slate-900">{slot.day_of_week}</td>
+                        <td className="py-2.5 px-3 font-mono tabular-nums text-slate-600">
+                          {slot.start_time} – {slot.end_time}
+                        </td>
+                        <td className="py-2.5 px-3 text-slate-700">
+                          {slot.class_name}
+                          {slot.arm_name ? ` (${slot.arm_name})` : ''}
+                        </td>
+                        <td className="py-2.5 px-3 font-semibold text-emerald-700">{slot.subject_name}</td>
+                        <td className="py-2.5 px-3 text-slate-600">{slot.room_label || '—'}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+
+          <div className="lg:col-span-5 bg-white rounded-2xl border border-slate-200 p-6 space-y-4">
+            <h3 className="text-sm font-bold text-slate-900">Staff &amp; School Calendar ({staffEvents.length})</h3>
+            {staffEvents.length === 0 ? (
+              <p className="py-10 text-center text-slate-400">No upcoming events scheduled.</p>
+            ) : (
+              <div className="divide-y divide-slate-100">
+                {staffEvents.map((ev) => (
+                  <div key={ev.id} className="py-3 first:pt-0 last:pb-0 space-y-1">
+                    <div className="flex items-center gap-2 text-[11px]">
+                      <span className="font-mono font-semibold text-slate-700 tabular-nums">{ev.event_date}</span>
+                      <span aria-hidden="true">·</span>
+                      <span className={ev.visibility === 'STAFF_ONLY' ? 'font-bold text-rose-700' : 'text-emerald-700 font-semibold'}>
+                        {ev.visibility === 'STAFF_ONLY' ? 'Staff Only' : 'Public Event'}
+                      </span>
+                    </div>
+                    <p className="font-bold text-slate-900">{ev.title}</p>
+                    {ev.location && <p className="text-slate-500">Venue: {ev.location}</p>}
+                    {ev.description && <p className="text-slate-600">{ev.description}</p>}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* STAFF REQUESTS DESK */}
+      {tab === 'requests' && (
+        <div className="space-y-6 text-xs">
+          {staffFeedback && (
+            <div
+              className={`p-3.5 rounded-xl border flex items-center justify-between ${
+                staffFeedback.type === 'ok'
+                  ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
+                  : 'bg-rose-50 border-rose-200 text-rose-800'
+              }`}
+            >
+              <span className="font-medium">{staffFeedback.text}</span>
+              <button type="button" onClick={() => setStaffFeedback(null)} className="cursor-pointer">
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+          )}
+
+          <form onSubmit={handleCreateStaffRequest} className="bg-white rounded-2xl border border-slate-200 p-6 space-y-4">
+            <div>
+              <h3 className="text-sm font-bold text-slate-900">Submit Private Staff Request to Administration</h3>
+              <p className="text-slate-500 mt-0.5">
+                Request leave, teaching materials, exam stationery, or facility maintenance privately.
+              </p>
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+              <div>
+                <label className="block font-semibold text-slate-700 mb-1">Request Type</label>
+                <select
+                  value={requestForm.request_type}
+                  onChange={(e) => setRequestForm({ ...requestForm, request_type: e.target.value as any })}
+                  className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl"
+                >
+                  <option value="LEAVE">Leave / Time Off</option>
+                  <option value="RESOURCES">Teaching Resources / Lab</option>
+                  <option value="MAINTENANCE">Classroom Maintenance</option>
+                  <option value="GENERAL">General Memo</option>
+                </select>
+              </div>
+              <div className="sm:col-span-2 lg:col-span-3">
+                <label className="block font-semibold text-slate-700 mb-1">Subject *</label>
+                <input
+                  type="text"
+                  required
+                  value={requestForm.subject}
+                  onChange={(e) => setRequestForm({ ...requestForm, subject: e.target.value })}
+                  placeholder="e.g. Science Laboratory Reagents & Whiteboard Markers"
+                  className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl"
+                />
+              </div>
+              {requestForm.request_type === 'LEAVE' && (
+                <>
+                  <div>
+                    <label className="block font-semibold text-slate-700 mb-1">Start Date</label>
+                    <input
+                      type="date"
+                      value={requestForm.start_date}
+                      onChange={(e) => setRequestForm({ ...requestForm, start_date: e.target.value })}
+                      className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl"
+                    />
+                  </div>
+                  <div>
+                    <label className="block font-semibold text-slate-700 mb-1">End Date</label>
+                    <input
+                      type="date"
+                      value={requestForm.end_date}
+                      onChange={(e) => setRequestForm({ ...requestForm, end_date: e.target.value })}
+                      className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl"
+                    />
+                  </div>
+                </>
+              )}
+              <div className="sm:col-span-2 lg:col-span-4">
+                <label className="block font-semibold text-slate-700 mb-1">Request Details *</label>
+                <textarea
+                  rows={3}
+                  required
+                  value={requestForm.details}
+                  onChange={(e) => setRequestForm({ ...requestForm, details: e.target.value })}
+                  placeholder="Provide clear context for the Principal or School Admin..."
+                  className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl"
+                />
+              </div>
+            </div>
+            <div className="flex justify-end">
+              <button
+                type="submit"
+                disabled={submittingRequest}
+                className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl font-bold inline-flex items-center gap-1.5 cursor-pointer disabled:opacity-60"
+              >
+                <Send className="w-3.5 h-3.5" />
+                <span>{submittingRequest ? 'Submitting...' : 'Submit Private Request'}</span>
+              </button>
+            </div>
+          </form>
+
+          <div className="bg-white rounded-2xl border border-slate-200 p-6">
+            <h3 className="text-sm font-bold text-slate-900 mb-4">My Submitted Requests ({staffRequests.length})</h3>
+            {staffWorkspaceLoading ? (
+              <p className="py-8 text-center text-slate-400">Loading requests...</p>
+            ) : staffRequests.length === 0 ? (
+              <p className="py-8 text-center text-slate-400">No requests submitted yet.</p>
+            ) : (
+              <div className="divide-y divide-slate-100">
+                {staffRequests.map((reqItem) => (
+                  <div key={reqItem.id} className="py-3.5 first:pt-0 last:pb-0 space-y-1">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <span className="font-bold text-slate-900">{reqItem.subject}</span>
+                      <span
+                        className={`font-bold ${
+                          reqItem.status === 'APPROVED'
+                            ? 'text-emerald-700'
+                            : reqItem.status === 'DECLINED'
+                            ? 'text-rose-700'
+                            : 'text-amber-700'
+                        }`}
+                      >
+                        {reqItem.status}
+                      </span>
+                    </div>
+                    <p className="text-[11px] text-slate-500">
+                      Type: {reqItem.request_type}
+                      {reqItem.start_date ? ` · Dates: ${reqItem.start_date}${reqItem.end_date ? ` to ${reqItem.end_date}` : ''}` : ''}
+                    </p>
+                    <p className="text-slate-700">{reqItem.details}</p>
+                    {reqItem.admin_response && (
+                      <p className="text-slate-700 bg-slate-50 border border-slate-200 rounded-xl p-2.5 mt-1">
+                        <strong>Admin Response:</strong> {reqItem.admin_response}
+                      </p>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
         </div>
       )}
 

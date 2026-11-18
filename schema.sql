@@ -1025,9 +1025,10 @@ CREATE TABLE IF NOT EXISTS school_announcements (
     school_id TEXT NOT NULL REFERENCES schools(id) ON DELETE CASCADE,
     title TEXT NOT NULL,
     content TEXT NOT NULL,
-    audience TEXT NOT NULL DEFAULT 'ALL' CHECK(audience IN ('ALL', 'PARENTS', 'STUDENTS', 'TEACHERS', 'CLASS')),
+    audience TEXT NOT NULL DEFAULT 'ALL' CHECK(audience IN ('ALL', 'PARENTS', 'STUDENTS', 'TEACHERS', 'CLASS', 'STAFF_ONLY')),
     target_class_id TEXT REFERENCES classes(id) ON DELETE SET NULL,
     priority TEXT NOT NULL DEFAULT 'NORMAL' CHECK(priority IN ('NORMAL', 'IMPORTANT', 'URGENT')),
+    is_confidential INTEGER NOT NULL DEFAULT 0,
     is_published INTEGER NOT NULL DEFAULT 1,
     published_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     created_by TEXT REFERENCES users(id) ON DELETE SET NULL,
@@ -1037,4 +1038,186 @@ CREATE TABLE IF NOT EXISTS school_announcements (
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 CREATE INDEX IF NOT EXISTS idx_announcements_school ON school_announcements(school_id, is_published, is_deleted);
+
+CREATE TABLE IF NOT EXISTS school_website_profiles (
+    id TEXT PRIMARY KEY,
+    school_id TEXT NOT NULL UNIQUE REFERENCES schools(id) ON DELETE CASCADE,
+    tagline TEXT,
+    hero_title TEXT,
+    hero_subtitle TEXT,
+    hero_image_url TEXT,
+    theme_accent TEXT NOT NULL DEFAULT 'emerald',
+    about_title TEXT,
+    about_body TEXT,
+    vision TEXT,
+    mission TEXT,
+    core_values TEXT,
+    principal_name TEXT,
+    principal_title TEXT DEFAULT 'The Principal / Head of School',
+    principal_message TEXT,
+    principal_photo_url TEXT,
+    admissions_open INTEGER NOT NULL DEFAULT 1,
+    admissions_summary TEXT,
+    established_year TEXT,
+    facilities_text TEXT,
+    social_whatsapp TEXT,
+    social_facebook TEXT,
+    social_instagram TEXT,
+    is_published INTEGER NOT NULL DEFAULT 1,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS school_website_posts (
+    id TEXT PRIMARY KEY,
+    school_id TEXT NOT NULL REFERENCES schools(id) ON DELETE CASCADE,
+    title TEXT NOT NULL,
+    slug TEXT NOT NULL,
+    category TEXT NOT NULL DEFAULT 'News',
+    excerpt TEXT,
+    content TEXT NOT NULL,
+    cover_image_url TEXT,
+    author_name TEXT,
+    author_role TEXT,
+    is_published INTEGER NOT NULL DEFAULT 1,
+    is_featured INTEGER NOT NULL DEFAULT 0,
+    published_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    is_deleted INTEGER NOT NULL DEFAULT 0,
+    created_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_website_posts_school ON school_website_posts(school_id, is_published, is_deleted);
+
+CREATE TABLE IF NOT EXISTS school_website_gallery (
+    id TEXT PRIMARY KEY,
+    school_id TEXT NOT NULL REFERENCES schools(id) ON DELETE CASCADE,
+    title TEXT NOT NULL,
+    caption TEXT,
+    album TEXT NOT NULL DEFAULT 'Campus',
+    image_url TEXT NOT NULL,
+    is_published INTEGER NOT NULL DEFAULT 1,
+    display_order INTEGER NOT NULL DEFAULT 0,
+    is_deleted INTEGER NOT NULL DEFAULT 0,
+    created_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_website_gallery_school ON school_website_gallery(school_id, is_published, is_deleted);
+
+CREATE TABLE IF NOT EXISTS school_calendar_events (
+    id TEXT PRIMARY KEY,
+    school_id TEXT NOT NULL REFERENCES schools(id) ON DELETE CASCADE,
+    title TEXT NOT NULL,
+    event_date TEXT NOT NULL,
+    end_date TEXT,
+    location TEXT,
+    description TEXT,
+    visibility TEXT NOT NULL DEFAULT 'PUBLIC' CHECK(visibility IN ('PUBLIC', 'STAFF_ONLY')),
+    is_deleted INTEGER NOT NULL DEFAULT 0,
+    created_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_calendar_events_school ON school_calendar_events(school_id, visibility, is_deleted);
+
+CREATE TABLE IF NOT EXISTS school_admission_inquiries (
+    id TEXT PRIMARY KEY,
+    school_id TEXT NOT NULL REFERENCES schools(id) ON DELETE CASCADE,
+    student_name TEXT NOT NULL,
+    target_class TEXT,
+    parent_name TEXT NOT NULL,
+    parent_phone TEXT NOT NULL,
+    parent_email TEXT,
+    message TEXT,
+    status TEXT NOT NULL DEFAULT 'NEW' CHECK(status IN ('NEW', 'CONTACTED', 'ENROLLED', 'ARCHIVED')),
+    admin_notes TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_admission_inquiries_school ON school_admission_inquiries(school_id, status);
+
+CREATE TABLE IF NOT EXISTS lesson_notes (
+    id TEXT PRIMARY KEY,
+    school_id TEXT NOT NULL REFERENCES schools(id) ON DELETE CASCADE,
+    teacher_user_id TEXT REFERENCES users(id) ON DELETE SET NULL,
+    teacher_name TEXT,
+    subject_id TEXT,
+    subject_name TEXT NOT NULL,
+    class_id TEXT,
+    class_name TEXT NOT NULL,
+    academic_session_id TEXT,
+    term_name TEXT DEFAULT '1st Term',
+    week_number INTEGER NOT NULL DEFAULT 1,
+    duration_minutes INTEGER NOT NULL DEFAULT 40,
+    topic TEXT NOT NULL,
+    sub_topic TEXT,
+    behavioural_objectives TEXT,
+    previous_knowledge TEXT,
+    instructional_materials TEXT,
+    introduction_step TEXT,
+    presentation_steps TEXT,
+    evaluation_questions TEXT,
+    assignment_text TEXT,
+    teacher_notes TEXT,
+    status TEXT NOT NULL DEFAULT 'DRAFT' CHECK(status IN ('DRAFT', 'SUBMITTED', 'APPROVED', 'REVISION_REQUESTED')),
+    admin_feedback TEXT,
+    reviewed_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+    reviewed_at DATETIME,
+    is_deleted INTEGER NOT NULL DEFAULT 0,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_lesson_notes_school ON lesson_notes(school_id, teacher_user_id, status, is_deleted);
+
+CREATE TABLE IF NOT EXISTS school_timetable_slots (
+    id TEXT PRIMARY KEY,
+    school_id TEXT NOT NULL REFERENCES schools(id) ON DELETE CASCADE,
+    class_id TEXT REFERENCES classes(id) ON DELETE CASCADE,
+    class_name TEXT NOT NULL,
+    arm_name TEXT,
+    day_of_week TEXT NOT NULL,
+    period_label TEXT,
+    start_time TEXT NOT NULL,
+    end_time TEXT NOT NULL,
+    subject_name TEXT NOT NULL,
+    teacher_user_id TEXT REFERENCES users(id) ON DELETE SET NULL,
+    teacher_name TEXT,
+    room_label TEXT,
+    is_deleted INTEGER NOT NULL DEFAULT 0,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_timetable_school ON school_timetable_slots(school_id, class_id, day_of_week, is_deleted);
+
+CREATE TABLE IF NOT EXISTS staff_requests (
+    id TEXT PRIMARY KEY,
+    school_id TEXT NOT NULL REFERENCES schools(id) ON DELETE CASCADE,
+    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    staff_name TEXT NOT NULL,
+    request_type TEXT NOT NULL DEFAULT 'LEAVE' CHECK(request_type IN ('LEAVE', 'RESOURCES', 'MAINTENANCE', 'GENERAL')),
+    subject TEXT NOT NULL,
+    details TEXT NOT NULL,
+    start_date TEXT,
+    end_date TEXT,
+    status TEXT NOT NULL DEFAULT 'PENDING' CHECK(status IN ('PENDING', 'APPROVED', 'DECLINED')),
+    admin_response TEXT,
+    reviewed_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+    reviewed_at DATETIME,
+    is_deleted INTEGER NOT NULL DEFAULT 0,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_staff_requests_school ON staff_requests(school_id, user_id, status, is_deleted);
+
+CREATE TABLE IF NOT EXISTS staff_announcement_reads (
+    id TEXT PRIMARY KEY,
+    school_id TEXT NOT NULL REFERENCES schools(id) ON DELETE CASCADE,
+    announcement_id TEXT NOT NULL REFERENCES school_announcements(id) ON DELETE CASCADE,
+    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    read_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (announcement_id, user_id)
+);
+CREATE INDEX IF NOT EXISTS idx_staff_ann_reads_school ON staff_announcement_reads(school_id, announcement_id);
+
 

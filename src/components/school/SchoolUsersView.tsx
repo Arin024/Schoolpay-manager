@@ -46,7 +46,7 @@ export const SchoolUsersView: React.FC = () => {
     email: '',
     phone: '',
     password: '',
-    role_name: 'TEACHER' as 'SCHOOL_ADMIN' | 'BURSAR' | 'TEACHER' | 'PARENT' | 'STUDENT',
+    role_name: 'TEACHER' as 'SCHOOL_ADMIN' | 'BURSAR' | 'TEACHER' | 'STAFF' | 'PARENT' | 'STUDENT',
     parent_id: '',
     create_parent_profile: false,
     student_ids: [] as string[],
@@ -503,7 +503,8 @@ export const SchoolUsersView: React.FC = () => {
                     }
                     className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl font-semibold"
                   >
-                    <option value="TEACHER">Teacher (Read-Only Educator)</option>
+                    <option value="TEACHER">Teacher (Dedicated Staff Workspace)</option>
+                    <option value="STAFF">Non-Teaching Staff (Dedicated Staff Workspace)</option>
                     <option value="PARENT">Parent / Guardian Portal</option>
                     <option value="STUDENT">Student Portal</option>
                     <option value="BURSAR">Bursar / Financial Officer</option>

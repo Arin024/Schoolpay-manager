@@ -235,12 +235,14 @@ export class NotificationService {
     targetClassId: string | null,
     title: string,
     message: string,
-    data?: Record<string, any>
+    data?: Record<string, any>,
+    isConfidential = false
   ) {
     try {
       const userIds = new Set<string>();
+      const staffOnly = Boolean(isConfidential || audience === 'STAFF_ONLY' || audience === 'TEACHERS');
 
-      if (audience === 'ALL' || audience === 'PARENTS') {
+      if (!staffOnly && (audience === 'ALL' || audience === 'PARENTS')) {
         const rows = cacheDb
           .prepare(
             `SELECT DISTINCT ur.user_id FROM user_roles ur
@@ -251,7 +253,7 @@ export class NotificationService {
         rows.forEach((r) => userIds.add(r.user_id));
       }
 
-      if (audience === 'ALL' || audience === 'STUDENTS') {
+      if (!staffOnly && (audience === 'ALL' || audience === 'STUDENTS')) {
         const rows = cacheDb
           .prepare(
             `SELECT DISTINCT ur.user_id FROM user_roles ur
@@ -262,18 +264,21 @@ export class NotificationService {
         rows.forEach((r) => userIds.add(r.user_id));
       }
 
-      if (audience === 'ALL' || audience === 'TEACHERS') {
+      if (staffOnly || audience === 'ALL') {
+        const allowedRoles = staffOnly
+          ? `('TEACHER', 'STAFF', 'SCHOOL_ADMIN', 'SCHOOL_OWNER')`
+          : `('TEACHER', 'STAFF', 'SCHOOL_ADMIN', 'SCHOOL_OWNER', 'BURSAR')`;
         const rows = cacheDb
           .prepare(
             `SELECT DISTINCT ur.user_id FROM user_roles ur
              JOIN roles r ON ur.role_id = r.id
-             WHERE ur.school_id = ? AND r.name IN ('TEACHER', 'SCHOOL_ADMIN', 'SCHOOL_OWNER', 'BURSAR')`
+             WHERE ur.school_id = ? AND r.name IN ${allowedRoles}`
           )
           .all(schoolId) as { user_id: string }[];
         rows.forEach((r) => userIds.add(r.user_id));
       }
 
-      if (audience === 'CLASS' && targetClassId) {
+      if (!staffOnly && audience === 'CLASS' && targetClassId) {
         const stuRows = cacheDb
           .prepare(
             `SELECT DISTINCT user_id FROM students

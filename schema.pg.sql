@@ -1014,9 +1014,10 @@ CREATE TABLE IF NOT EXISTS school_announcements (
     school_id VARCHAR(64) NOT NULL REFERENCES schools(id) ON DELETE CASCADE,
     title VARCHAR(255) NOT NULL,
     content TEXT NOT NULL,
-    audience VARCHAR(32) NOT NULL DEFAULT 'ALL' CHECK(audience IN ('ALL', 'PARENTS', 'STUDENTS', 'TEACHERS', 'CLASS')),
+    audience VARCHAR(32) NOT NULL DEFAULT 'ALL' CHECK(audience IN ('ALL', 'PARENTS', 'STUDENTS', 'TEACHERS', 'CLASS', 'STAFF_ONLY')),
     target_class_id VARCHAR(64) REFERENCES classes(id) ON DELETE SET NULL,
     priority VARCHAR(32) NOT NULL DEFAULT 'NORMAL' CHECK(priority IN ('NORMAL', 'IMPORTANT', 'URGENT')),
+    is_confidential INTEGER NOT NULL DEFAULT 0,
     is_published INTEGER NOT NULL DEFAULT 1,
     published_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
     created_by VARCHAR(64) REFERENCES users(id) ON DELETE SET NULL,
@@ -1025,3 +1026,177 @@ CREATE TABLE IF NOT EXISTS school_announcements (
     created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
 );
+
+CREATE TABLE IF NOT EXISTS school_website_profiles (
+    id VARCHAR(64) PRIMARY KEY,
+    school_id VARCHAR(64) NOT NULL UNIQUE REFERENCES schools(id) ON DELETE CASCADE,
+    tagline VARCHAR(255),
+    hero_title VARCHAR(255),
+    hero_subtitle TEXT,
+    hero_image_url TEXT,
+    theme_accent VARCHAR(32) NOT NULL DEFAULT 'emerald',
+    about_title VARCHAR(255),
+    about_body TEXT,
+    vision TEXT,
+    mission TEXT,
+    core_values TEXT,
+    principal_name VARCHAR(255),
+    principal_title VARCHAR(128) DEFAULT 'The Principal / Head of School',
+    principal_message TEXT,
+    principal_photo_url TEXT,
+    admissions_open INTEGER NOT NULL DEFAULT 1,
+    admissions_summary TEXT,
+    established_year VARCHAR(16),
+    facilities_text TEXT,
+    social_whatsapp VARCHAR(128),
+    social_facebook VARCHAR(255),
+    social_instagram VARCHAR(255),
+    is_published INTEGER NOT NULL DEFAULT 1,
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS school_website_posts (
+    id VARCHAR(64) PRIMARY KEY,
+    school_id VARCHAR(64) NOT NULL REFERENCES schools(id) ON DELETE CASCADE,
+    title VARCHAR(255) NOT NULL,
+    slug VARCHAR(255) NOT NULL,
+    category VARCHAR(64) NOT NULL DEFAULT 'News',
+    excerpt TEXT,
+    content TEXT NOT NULL,
+    cover_image_url TEXT,
+    author_name VARCHAR(255),
+    author_role VARCHAR(128),
+    is_published INTEGER NOT NULL DEFAULT 1,
+    is_featured INTEGER NOT NULL DEFAULT 0,
+    published_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    is_deleted INTEGER NOT NULL DEFAULT 0,
+    created_by VARCHAR(64) REFERENCES users(id) ON DELETE SET NULL,
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS school_website_gallery (
+    id VARCHAR(64) PRIMARY KEY,
+    school_id VARCHAR(64) NOT NULL REFERENCES schools(id) ON DELETE CASCADE,
+    title VARCHAR(255) NOT NULL,
+    caption TEXT,
+    album VARCHAR(64) NOT NULL DEFAULT 'Campus',
+    image_url TEXT NOT NULL,
+    is_published INTEGER NOT NULL DEFAULT 1,
+    display_order INTEGER NOT NULL DEFAULT 0,
+    is_deleted INTEGER NOT NULL DEFAULT 0,
+    created_by VARCHAR(64) REFERENCES users(id) ON DELETE SET NULL,
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS school_calendar_events (
+    id VARCHAR(64) PRIMARY KEY,
+    school_id VARCHAR(64) NOT NULL REFERENCES schools(id) ON DELETE CASCADE,
+    title VARCHAR(255) NOT NULL,
+    event_date VARCHAR(32) NOT NULL,
+    end_date VARCHAR(32),
+    location VARCHAR(255),
+    description TEXT,
+    visibility VARCHAR(32) NOT NULL DEFAULT 'PUBLIC' CHECK(visibility IN ('PUBLIC', 'STAFF_ONLY')),
+    is_deleted INTEGER NOT NULL DEFAULT 0,
+    created_by VARCHAR(64) REFERENCES users(id) ON DELETE SET NULL,
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS school_admission_inquiries (
+    id VARCHAR(64) PRIMARY KEY,
+    school_id VARCHAR(64) NOT NULL REFERENCES schools(id) ON DELETE CASCADE,
+    student_name VARCHAR(255) NOT NULL,
+    target_class VARCHAR(64),
+    parent_name VARCHAR(255) NOT NULL,
+    parent_phone VARCHAR(64) NOT NULL,
+    parent_email VARCHAR(255),
+    message TEXT,
+    status VARCHAR(32) NOT NULL DEFAULT 'NEW' CHECK(status IN ('NEW', 'CONTACTED', 'ENROLLED', 'ARCHIVED')),
+    admin_notes TEXT,
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS lesson_notes (
+    id VARCHAR(64) PRIMARY KEY,
+    school_id VARCHAR(64) NOT NULL REFERENCES schools(id) ON DELETE CASCADE,
+    teacher_user_id VARCHAR(64) REFERENCES users(id) ON DELETE SET NULL,
+    teacher_name VARCHAR(255),
+    subject_id VARCHAR(64),
+    subject_name VARCHAR(128) NOT NULL,
+    class_id VARCHAR(64),
+    class_name VARCHAR(128) NOT NULL,
+    academic_session_id VARCHAR(64),
+    term_name VARCHAR(64) DEFAULT '1st Term',
+    week_number INTEGER NOT NULL DEFAULT 1,
+    duration_minutes INTEGER NOT NULL DEFAULT 40,
+    topic VARCHAR(255) NOT NULL,
+    sub_topic VARCHAR(255),
+    behavioural_objectives TEXT,
+    previous_knowledge TEXT,
+    instructional_materials TEXT,
+    introduction_step TEXT,
+    presentation_steps TEXT,
+    evaluation_questions TEXT,
+    assignment_text TEXT,
+    teacher_notes TEXT,
+    status VARCHAR(32) NOT NULL DEFAULT 'DRAFT' CHECK(status IN ('DRAFT', 'SUBMITTED', 'APPROVED', 'REVISION_REQUESTED')),
+    admin_feedback TEXT,
+    reviewed_by VARCHAR(64) REFERENCES users(id) ON DELETE SET NULL,
+    reviewed_at TIMESTAMPTZ,
+    is_deleted INTEGER NOT NULL DEFAULT 0,
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS school_timetable_slots (
+    id VARCHAR(64) PRIMARY KEY,
+    school_id VARCHAR(64) NOT NULL REFERENCES schools(id) ON DELETE CASCADE,
+    class_id VARCHAR(64) REFERENCES classes(id) ON DELETE CASCADE,
+    class_name VARCHAR(128) NOT NULL,
+    arm_name VARCHAR(64),
+    day_of_week VARCHAR(24) NOT NULL,
+    period_label VARCHAR(64),
+    start_time VARCHAR(16) NOT NULL,
+    end_time VARCHAR(16) NOT NULL,
+    subject_name VARCHAR(128) NOT NULL,
+    teacher_user_id VARCHAR(64) REFERENCES users(id) ON DELETE SET NULL,
+    teacher_name VARCHAR(255),
+    room_label VARCHAR(64),
+    is_deleted INTEGER NOT NULL DEFAULT 0,
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS staff_requests (
+    id VARCHAR(64) PRIMARY KEY,
+    school_id VARCHAR(64) NOT NULL REFERENCES schools(id) ON DELETE CASCADE,
+    user_id VARCHAR(64) NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    staff_name VARCHAR(255) NOT NULL,
+    request_type VARCHAR(32) NOT NULL DEFAULT 'LEAVE' CHECK(request_type IN ('LEAVE', 'RESOURCES', 'MAINTENANCE', 'GENERAL')),
+    subject VARCHAR(255) NOT NULL,
+    details TEXT NOT NULL,
+    start_date VARCHAR(32),
+    end_date VARCHAR(32),
+    status VARCHAR(32) NOT NULL DEFAULT 'PENDING' CHECK(status IN ('PENDING', 'APPROVED', 'DECLINED')),
+    admin_response TEXT,
+    reviewed_by VARCHAR(64) REFERENCES users(id) ON DELETE SET NULL,
+    reviewed_at TIMESTAMPTZ,
+    is_deleted INTEGER NOT NULL DEFAULT 0,
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS staff_announcement_reads (
+    id VARCHAR(64) PRIMARY KEY,
+    school_id VARCHAR(64) NOT NULL REFERENCES schools(id) ON DELETE CASCADE,
+    announcement_id VARCHAR(64) NOT NULL REFERENCES school_announcements(id) ON DELETE CASCADE,
+    user_id VARCHAR(64) NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    read_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (announcement_id, user_id)
+);
+

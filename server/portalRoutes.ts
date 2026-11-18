@@ -34,7 +34,7 @@ for (const method of ['get', 'post', 'put', 'patch', 'delete'] as const) {
 
 const PARENT_PORTAL_ROLES = ['SUPER_ADMIN', 'SCHOOL_OWNER', 'SCHOOL_ADMIN', 'PARENT'];
 const STUDENT_PORTAL_ROLES = ['SUPER_ADMIN', 'SCHOOL_OWNER', 'SCHOOL_ADMIN', 'STUDENT'];
-const TEACHER_PORTAL_ROLES = ['SUPER_ADMIN', 'SCHOOL_OWNER', 'SCHOOL_ADMIN', 'TEACHER'];
+const TEACHER_PORTAL_ROLES = ['SUPER_ADMIN', 'SCHOOL_OWNER', 'SCHOOL_ADMIN', 'TEACHER', 'STAFF'];
 
 function sanitizeBreakdownForPortal(
   rawSnapshot: string | null,
@@ -520,12 +520,14 @@ portalRouter.get(
          FROM school_announcements sa
          LEFT JOIN classes c ON sa.target_class_id = c.id
          WHERE sa.school_id = $1 AND sa.is_published = 1 AND (sa.is_deleted = 0 OR sa.is_deleted IS NULL)
+           AND COALESCE(sa.is_confidential, 0) = 0
            AND sa.audience IN ('ALL', 'PARENTS')
          ORDER BY sa.published_at DESC LIMIT 20`,
         `SELECT sa.*, c.name as target_class_name
          FROM school_announcements sa
          LEFT JOIN classes c ON sa.target_class_id = c.id
          WHERE sa.school_id = ? AND sa.is_published = 1 AND (sa.is_deleted = 0 OR sa.is_deleted IS NULL)
+           AND COALESCE(sa.is_confidential, 0) = 0
            AND sa.audience IN ('ALL', 'PARENTS')
          ORDER BY sa.published_at DESC LIMIT 20`,
         [schoolId]
@@ -552,11 +554,13 @@ portalRouter.get(
         receipts: [],
         gateways: paymentService.getAllProviders(schoolId),
         announcements,
+        timetable: [],
+        events: [],
         notifications,
       });
     }
 
-    const [results, reportCards, sessionReportCards, attendance, behaviour, teacherRemarks, fees, announcements] = await Promise.all([
+    const [results, reportCards, sessionReportCards, attendance, behaviour, teacherRemarks, fees, announcements, timetable, events] = await Promise.all([
       fetchStudentPublishedScores(schoolId, selectedChild.id, academic_session_id, term_id),
       fetchStudentPublishedReportCards(schoolId, selectedChild.id, Boolean(settings.show_class_position), settings.grading_scale),
       fetchStudentPublishedSessionReportCards(schoolId, selectedChild.id, Boolean(settings.show_class_position), settings.grading_scale),
@@ -601,15 +605,41 @@ portalRouter.get(
          FROM school_announcements sa
          LEFT JOIN classes c ON sa.target_class_id = c.id
          WHERE sa.school_id = $1 AND sa.is_published = 1 AND (sa.is_deleted = 0 OR sa.is_deleted IS NULL)
+           AND COALESCE(sa.is_confidential, 0) = 0
+           AND sa.audience NOT IN ('TEACHERS', 'STAFF_ONLY')
            AND (sa.audience IN ('ALL', 'PARENTS') OR (sa.audience = 'CLASS' AND sa.target_class_id = $2))
          ORDER BY sa.published_at DESC LIMIT 30`,
         `SELECT sa.*, c.name as target_class_name
          FROM school_announcements sa
          LEFT JOIN classes c ON sa.target_class_id = c.id
          WHERE sa.school_id = ? AND sa.is_published = 1 AND (sa.is_deleted = 0 OR sa.is_deleted IS NULL)
+           AND COALESCE(sa.is_confidential, 0) = 0
+           AND sa.audience NOT IN ('TEACHERS', 'STAFF_ONLY')
            AND (sa.audience IN ('ALL', 'PARENTS') OR (sa.audience = 'CLASS' AND sa.target_class_id = ?))
          ORDER BY sa.published_at DESC LIMIT 30`,
         [schoolId, selectedChild.class_id || '__none__']
+      ),
+      dbAll(
+        `SELECT * FROM school_timetable_slots
+         WHERE school_id = $1 AND (is_deleted = 0 OR is_deleted IS NULL)
+           AND (class_id = $2 OR LOWER(class_name) = LOWER($3))
+         ORDER BY day_of_week ASC, start_time ASC`,
+        `SELECT * FROM school_timetable_slots
+         WHERE school_id = ? AND (is_deleted = 0 OR is_deleted IS NULL)
+           AND (class_id = ? OR LOWER(class_name) = LOWER(?))
+         ORDER BY day_of_week ASC, start_time ASC`,
+        [schoolId, selectedChild.class_id || '__none__', selectedChild.class_name || '__none__']
+      ),
+      dbAll(
+        `SELECT id, title, event_date, end_date, location, description, visibility
+         FROM school_calendar_events
+         WHERE school_id = $1 AND visibility = 'PUBLIC' AND (is_deleted = 0 OR is_deleted IS NULL)
+         ORDER BY event_date ASC LIMIT 24`,
+        `SELECT id, title, event_date, end_date, location, description, visibility
+         FROM school_calendar_events
+         WHERE school_id = ? AND visibility = 'PUBLIC' AND (is_deleted = 0 OR is_deleted IS NULL)
+         ORDER BY event_date ASC LIMIT 24`,
+        [schoolId]
       ),
     ]);
 
@@ -635,6 +665,8 @@ portalRouter.get(
       receipts: fees.receipts,
       gateways: paymentService.getAllProviders(schoolId),
       announcements,
+      timetable,
+      events,
       notifications,
     });
   }
@@ -901,7 +933,7 @@ portalRouter.get(
     }
 
     const feesAllowed = Boolean(settings.students_can_view_fees);
-    const [results, reportCards, sessionReportCards, attendance, behaviour, teacherRemarks, fees, announcements] = await Promise.all([
+    const [results, reportCards, sessionReportCards, attendance, behaviour, teacherRemarks, fees, announcements, timetable, events] = await Promise.all([
       fetchStudentPublishedScores(schoolId, student.id, academic_session_id, term_id),
       fetchStudentPublishedReportCards(schoolId, student.id, Boolean(settings.show_class_position), settings.grading_scale),
       fetchStudentPublishedSessionReportCards(schoolId, student.id, Boolean(settings.show_class_position), settings.grading_scale),
@@ -946,15 +978,41 @@ portalRouter.get(
          FROM school_announcements sa
          LEFT JOIN classes c ON sa.target_class_id = c.id
          WHERE sa.school_id = $1 AND sa.is_published = 1 AND (sa.is_deleted = 0 OR sa.is_deleted IS NULL)
+           AND COALESCE(sa.is_confidential, 0) = 0
+           AND sa.audience NOT IN ('TEACHERS', 'STAFF_ONLY')
            AND (sa.audience IN ('ALL', 'STUDENTS') OR (sa.audience = 'CLASS' AND sa.target_class_id = $2))
          ORDER BY sa.published_at DESC LIMIT 30`,
         `SELECT sa.*, c.name as target_class_name
          FROM school_announcements sa
          LEFT JOIN classes c ON sa.target_class_id = c.id
          WHERE sa.school_id = ? AND sa.is_published = 1 AND (sa.is_deleted = 0 OR sa.is_deleted IS NULL)
+           AND COALESCE(sa.is_confidential, 0) = 0
+           AND sa.audience NOT IN ('TEACHERS', 'STAFF_ONLY')
            AND (sa.audience IN ('ALL', 'STUDENTS') OR (sa.audience = 'CLASS' AND sa.target_class_id = ?))
          ORDER BY sa.published_at DESC LIMIT 30`,
         [schoolId, student.class_id || '__none__']
+      ),
+      dbAll(
+        `SELECT * FROM school_timetable_slots
+         WHERE school_id = $1 AND (is_deleted = 0 OR is_deleted IS NULL)
+           AND (class_id = $2 OR LOWER(class_name) = LOWER($3))
+         ORDER BY day_of_week ASC, start_time ASC`,
+        `SELECT * FROM school_timetable_slots
+         WHERE school_id = ? AND (is_deleted = 0 OR is_deleted IS NULL)
+           AND (class_id = ? OR LOWER(class_name) = LOWER(?))
+         ORDER BY day_of_week ASC, start_time ASC`,
+        [schoolId, student.class_id || '__none__', student.class_display_name || student.class_name || '__none__']
+      ),
+      dbAll(
+        `SELECT id, title, event_date, end_date, location, description, visibility
+         FROM school_calendar_events
+         WHERE school_id = $1 AND visibility = 'PUBLIC' AND (is_deleted = 0 OR is_deleted IS NULL)
+         ORDER BY event_date ASC LIMIT 24`,
+        `SELECT id, title, event_date, end_date, location, description, visibility
+         FROM school_calendar_events
+         WHERE school_id = ? AND visibility = 'PUBLIC' AND (is_deleted = 0 OR is_deleted IS NULL)
+         ORDER BY event_date ASC LIMIT 24`,
+        [schoolId]
       ),
     ]);
 
@@ -980,6 +1038,8 @@ portalRouter.get(
       payments: fees ? fees.payments : [],
       receipts: fees ? fees.receipts : [],
       announcements,
+      timetable,
+      events,
       notifications,
     });
   }
@@ -1263,7 +1323,7 @@ portalRouter.get(
       );
     }
 
-    const [allClasses, subjects, announcements, examCountRow, reportCountRow, attCountRow] = await Promise.all([
+    const [allClasses, subjects, announcements, examCountRow, reportCountRow, attCountRow, lessonCountRow] = await Promise.all([
       dbAll(
         `SELECT c.id, c.name, c.level,
                 (SELECT COUNT(*) FROM students s WHERE s.class_id = c.id AND s.school_id = $1 AND (s.is_deleted = 0 OR s.is_deleted IS NULL)) as total_students
@@ -1287,14 +1347,14 @@ portalRouter.get(
          FROM school_announcements sa
          LEFT JOIN classes c ON sa.target_class_id = c.id
          WHERE sa.school_id = $1 AND sa.is_published = 1 AND (sa.is_deleted = 0 OR sa.is_deleted IS NULL)
-           AND sa.audience IN ('ALL', 'TEACHERS', 'CLASS')
-         ORDER BY sa.published_at DESC LIMIT 20`,
+           AND (sa.audience IN ('ALL', 'TEACHERS', 'CLASS', 'STAFF_ONLY') OR COALESCE(sa.is_confidential, 0) = 1)
+         ORDER BY sa.published_at DESC LIMIT 30`,
         `SELECT sa.*, c.name as target_class_name
          FROM school_announcements sa
          LEFT JOIN classes c ON sa.target_class_id = c.id
          WHERE sa.school_id = ? AND sa.is_published = 1 AND (sa.is_deleted = 0 OR sa.is_deleted IS NULL)
-           AND sa.audience IN ('ALL', 'TEACHERS', 'CLASS')
-         ORDER BY sa.published_at DESC LIMIT 20`,
+           AND (sa.audience IN ('ALL', 'TEACHERS', 'CLASS', 'STAFF_ONLY') OR COALESCE(sa.is_confidential, 0) = 1)
+         ORDER BY sa.published_at DESC LIMIT 30`,
         [schoolId]
       ),
       dbGet(
@@ -1311,6 +1371,11 @@ portalRouter.get(
         `SELECT COUNT(*) as c FROM attendance_records WHERE school_id = $1`,
         `SELECT COUNT(*) as c FROM attendance_records WHERE school_id = ?`,
         [schoolId]
+      ),
+      dbGet(
+        `SELECT COUNT(*) as c FROM lesson_notes WHERE school_id = $1 AND teacher_user_id = $2 AND (is_deleted = 0 OR is_deleted IS NULL)`,
+        `SELECT COUNT(*) as c FROM lesson_notes WHERE school_id = ? AND teacher_user_id = ? AND (is_deleted = 0 OR is_deleted IS NULL)`,
+        [schoolId, userId]
       ),
     ]);
 
@@ -1342,6 +1407,10 @@ portalRouter.get(
         publishedExamsCount: Number(examCountRow?.c || 0),
         reportCardsPublishedCount: Number(reportCountRow?.c || 0),
         attendanceLogsCount: Number(attCountRow?.c || 0),
+        lessonNotesCount: Number(lessonCountRow?.c || 0),
+        confidentialNoticesCount: announcements.filter(
+          (a) => a.audience === 'STAFF_ONLY' || a.audience === 'TEACHERS' || Number(a.is_confidential) === 1
+        ).length,
         unreadNotificationsCount: notifications.filter((n) => !n.read_at).length,
       },
     });

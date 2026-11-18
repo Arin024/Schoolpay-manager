@@ -116,9 +116,10 @@ async function findActiveSchoolBySlugOrId(identifier: string): Promise<any | nul
   if (pool) {
     try {
       const res = await queryPg(
-        `SELECT * FROM schools
-         WHERE (LOWER(slug) = LOWER($1) OR id = $1)
-           AND (is_deleted = 0 OR is_deleted IS NULL)
+        `SELECT s.* FROM schools s
+         LEFT JOIN school_settings ss ON ss.school_id = s.id
+         WHERE (LOWER(s.slug) = LOWER($1) OR LOWER(COALESCE(ss.portal_subdomain, '')) = LOWER($1) OR s.id = $1)
+           AND (s.is_deleted = 0 OR s.is_deleted IS NULL)
          LIMIT 1`,
         [clean]
       );
@@ -130,12 +131,13 @@ async function findActiveSchoolBySlugOrId(identifier: string): Promise<any | nul
   return (
     cacheDb
       .prepare(
-        `SELECT * FROM schools
-         WHERE (LOWER(slug) = LOWER(?) OR id = ?)
-           AND UPPER(COALESCE(status, 'TRIAL')) != 'CANCELLED'
+        `SELECT s.* FROM schools s
+         LEFT JOIN school_settings ss ON ss.school_id = s.id
+         WHERE (LOWER(s.slug) = LOWER(?) OR LOWER(COALESCE(ss.portal_subdomain, '')) = LOWER(?) OR s.id = ?)
+           AND UPPER(COALESCE(s.status, 'TRIAL')) != 'CANCELLED'
          LIMIT 1`
       )
-      .get(clean, clean) || null
+      .get(clean, clean, clean) || null
   );
 }
 
@@ -154,23 +156,25 @@ publicPortalRouter.get('/schools', async (req, res) => {
       if (q) {
         const pattern = `%${q.toLowerCase()}%`;
         const pgRes = await queryPg(
-          `SELECT id, name, slug, type, status, state, lga, logo_url, website
-           FROM schools
-           WHERE (is_deleted = 0 OR is_deleted IS NULL)
-             AND UPPER(COALESCE(status, 'TRIAL')) NOT IN ('CANCELLED', 'SUSPENDED')
-             AND (LOWER(name) LIKE $1 OR LOWER(slug) LIKE $1 OR LOWER(state) LIKE $1 OR LOWER(lga) LIKE $1)
-           ORDER BY name ASC
+          `SELECT s.id, s.name, s.slug, s.type, s.status, s.state, s.lga, s.logo_url, s.website, ss.portal_subdomain
+           FROM schools s
+           LEFT JOIN school_settings ss ON ss.school_id = s.id
+           WHERE (s.is_deleted = 0 OR s.is_deleted IS NULL)
+             AND UPPER(COALESCE(s.status, 'TRIAL')) NOT IN ('CANCELLED', 'SUSPENDED')
+             AND (LOWER(s.name) LIKE $1 OR LOWER(s.slug) LIKE $1 OR LOWER(COALESCE(ss.portal_subdomain, '')) LIKE $1 OR LOWER(s.state) LIKE $1 OR LOWER(s.lga) LIKE $1)
+           ORDER BY s.name ASC
            LIMIT $2`,
           [pattern, limit]
         );
         rows = pgRes.rows;
       } else {
         const pgRes = await queryPg(
-          `SELECT id, name, slug, type, status, state, lga, logo_url, website
-           FROM schools
-           WHERE (is_deleted = 0 OR is_deleted IS NULL)
-             AND UPPER(COALESCE(status, 'TRIAL')) NOT IN ('CANCELLED', 'SUSPENDED')
-           ORDER BY created_at DESC, name ASC
+          `SELECT s.id, s.name, s.slug, s.type, s.status, s.state, s.lga, s.logo_url, s.website, ss.portal_subdomain
+           FROM schools s
+           LEFT JOIN school_settings ss ON ss.school_id = s.id
+           WHERE (s.is_deleted = 0 OR s.is_deleted IS NULL)
+             AND UPPER(COALESCE(s.status, 'TRIAL')) NOT IN ('CANCELLED', 'SUSPENDED')
+           ORDER BY s.created_at DESC, s.name ASC
            LIMIT $1`,
           [limit]
         );
@@ -186,21 +190,23 @@ publicPortalRouter.get('/schools', async (req, res) => {
       const pattern = `%${q.toLowerCase()}%`;
       rows = cacheDb
         .prepare(
-          `SELECT id, name, slug, type, status, state, lga, logo_url, website
-           FROM schools
-           WHERE UPPER(COALESCE(status, 'TRIAL')) NOT IN ('CANCELLED', 'SUSPENDED')
-             AND (LOWER(name) LIKE ? OR LOWER(slug) LIKE ? OR LOWER(state) LIKE ? OR LOWER(lga) LIKE ?)
-           ORDER BY name ASC
+          `SELECT s.id, s.name, s.slug, s.type, s.status, s.state, s.lga, s.logo_url, s.website, ss.portal_subdomain
+           FROM schools s
+           LEFT JOIN school_settings ss ON ss.school_id = s.id
+           WHERE UPPER(COALESCE(s.status, 'TRIAL')) NOT IN ('CANCELLED', 'SUSPENDED')
+             AND (LOWER(s.name) LIKE ? OR LOWER(s.slug) LIKE ? OR LOWER(COALESCE(ss.portal_subdomain, '')) LIKE ? OR LOWER(s.state) LIKE ? OR LOWER(s.lga) LIKE ?)
+           ORDER BY s.name ASC
            LIMIT ?`
         )
-        .all(pattern, pattern, pattern, pattern, limit) as any[];
+        .all(pattern, pattern, pattern, pattern, pattern, limit) as any[];
     } else {
       rows = cacheDb
         .prepare(
-          `SELECT id, name, slug, type, status, state, lga, logo_url, website
-           FROM schools
-           WHERE UPPER(COALESCE(status, 'TRIAL')) NOT IN ('CANCELLED', 'SUSPENDED')
-           ORDER BY created_at DESC, name ASC
+          `SELECT s.id, s.name, s.slug, s.type, s.status, s.state, s.lga, s.logo_url, s.website, ss.portal_subdomain
+           FROM schools s
+           LEFT JOIN school_settings ss ON ss.school_id = s.id
+           WHERE UPPER(COALESCE(s.status, 'TRIAL')) NOT IN ('CANCELLED', 'SUSPENDED')
+           ORDER BY s.created_at DESC, s.name ASC
            LIMIT ?`
         )
         .all(limit) as any[];

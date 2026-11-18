@@ -3410,9 +3410,12 @@ performanceRouter.get(
       LEFT JOIN classes c ON sa.target_class_id = c.id
       WHERE sa.school_id = ? AND (sa.is_deleted = 0 OR sa.is_deleted IS NULL)
     `;
-    if (roleName === 'TEACHER') {
-      pgSql += ` AND sa.is_published = 1 AND sa.audience IN ('ALL', 'TEACHERS')`;
-      sqSql += ` AND sa.is_published = 1 AND sa.audience IN ('ALL', 'TEACHERS')`;
+    if (roleName === 'TEACHER' || roleName === 'STAFF') {
+      pgSql += ` AND sa.is_published = 1 AND (sa.audience IN ('ALL', 'TEACHERS', 'STAFF_ONLY') OR COALESCE(sa.is_confidential, 0) = 1)`;
+      sqSql += ` AND sa.is_published = 1 AND (sa.audience IN ('ALL', 'TEACHERS', 'STAFF_ONLY') OR COALESCE(sa.is_confidential, 0) = 1)`;
+    } else if (!ADMIN_ONLY_ROLES.includes(roleName || '')) {
+      pgSql += ` AND COALESCE(sa.is_confidential, 0) = 0 AND sa.audience NOT IN ('TEACHERS', 'STAFF_ONLY')`;
+      sqSql += ` AND COALESCE(sa.is_confidential, 0) = 0 AND sa.audience NOT IN ('TEACHERS', 'STAFF_ONLY')`;
     }
     pgSql += ' ORDER BY sa.published_at DESC, sa.created_at DESC';
     sqSql += ' ORDER BY sa.published_at DESC, sa.created_at DESC';
@@ -3435,36 +3438,40 @@ performanceRouter.post(
       audience = 'ALL',
       target_class_id = null,
       priority = 'NORMAL',
+      is_confidential = false,
       is_published = true,
     } = req.body || {};
 
     if (!title?.trim() || !content?.trim()) {
       return res.status(400).json({ error: 'MISSING_FIELDS', message: 'Announcement title and content are required.' });
     }
-    if (!['ALL', 'PARENTS', 'STUDENTS', 'TEACHERS', 'CLASS'].includes(audience)) {
+    if (!['ALL', 'PARENTS', 'STUDENTS', 'TEACHERS', 'CLASS', 'STAFF_ONLY'].includes(audience)) {
       return res.status(400).json({ error: 'INVALID_AUDIENCE', message: 'Invalid announcement audience.' });
     }
 
     const id = newId('ann');
     const pub = is_published ? 1 : 0;
+    const confidentialFlag = audience === 'STAFF_ONLY' || Boolean(is_confidential) ? 1 : 0;
+    const effectiveAudience = confidentialFlag === 1 && !['STAFF_ONLY', 'TEACHERS'].includes(audience) ? 'STAFF_ONLY' : audience;
 
     await execWrite(
       `INSERT INTO school_announcements (
-         id, school_id, title, content, audience, target_class_id, priority, is_published,
+         id, school_id, title, content, audience, target_class_id, priority, is_confidential, is_published,
          published_at, created_by, created_by_name, is_deleted, created_at, updated_at
-       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, CURRENT_TIMESTAMP, $9, $10, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, CURRENT_TIMESTAMP, $10, $11, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
       `INSERT INTO school_announcements (
-         id, school_id, title, content, audience, target_class_id, priority, is_published,
+         id, school_id, title, content, audience, target_class_id, priority, is_confidential, is_published,
          published_at, created_by, created_by_name, is_deleted, created_at, updated_at
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?, ?, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?, ?, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
       [
         id,
         schoolId,
         title.trim(),
         content.trim(),
-        audience,
-        audience === 'CLASS' ? target_class_id : null,
+        effectiveAudience,
+        effectiveAudience === 'CLASS' ? target_class_id : null,
         ['NORMAL', 'IMPORTANT', 'URGENT'].includes(priority) ? priority : 'NORMAL',
+        confidentialFlag,
         pub,
         req.user!.id,
         req.user!.full_name || 'School Admin',
@@ -3474,11 +3481,12 @@ performanceRouter.post(
     if (pub === 1) {
       notificationService.notifyAnnouncementAudience(
         schoolId,
-        audience,
-        audience === 'CLASS' ? target_class_id : null,
+        effectiveAudience,
+        effectiveAudience === 'CLASS' ? target_class_id : null,
         title.trim(),
         content.trim().slice(0, 180),
-        { eventType: 'SCHOOL_ANNOUNCEMENT', announcementId: id, priority }
+        { eventType: 'SCHOOL_ANNOUNCEMENT', announcementId: id, priority, isConfidential: confidentialFlag === 1 },
+        confidentialFlag === 1
       );
     }
 
@@ -3489,7 +3497,7 @@ performanceRouter.post(
       action: 'CREATE_ANNOUNCEMENT',
       entity: 'SCHOOL_ANNOUNCEMENT',
       entityId: id,
-      metadata: { title: title.trim(), audience, priority },
+      metadata: { title: title.trim(), audience: effectiveAudience, priority, isConfidential: confidentialFlag === 1 },
     });
 
     const announcement = await dbGet(`SELECT * FROM school_announcements WHERE id = $1`, `SELECT * FROM school_announcements WHERE id = ?`, [id]);
@@ -3505,7 +3513,7 @@ performanceRouter.put(
   async (req: AuthenticatedRequest, res) => {
     const schoolId = req.targetSchoolId!;
     const { id } = req.params;
-    const { title, content, audience, target_class_id, priority, is_published } = req.body || {};
+    const { title, content, audience, target_class_id, priority, is_confidential, is_published } = req.body || {};
 
     const existing = await dbGet(
       `SELECT * FROM school_announcements WHERE id = $1 AND school_id = $2`,
@@ -3514,31 +3522,44 @@ performanceRouter.put(
     );
     if (!existing) return res.status(404).json({ error: 'NOT_FOUND', message: 'Announcement not found.' });
 
+    const nextAudience = audience || existing.audience;
+    const nextConfidential =
+      audience === 'STAFF_ONLY'
+        ? 1
+        : is_confidential !== undefined
+        ? is_confidential
+          ? 1
+          : 0
+        : existing.is_confidential ?? 0;
+
     await execWrite(
       `UPDATE school_announcements
        SET title = COALESCE($1, title),
            content = COALESCE($2, content),
-           audience = COALESCE($3, audience),
+           audience = $3,
            target_class_id = $4,
            priority = COALESCE($5, priority),
-           is_published = COALESCE($6, is_published),
+           is_confidential = $6,
+           is_published = COALESCE($7, is_published),
            updated_at = CURRENT_TIMESTAMP
-       WHERE id = $7 AND school_id = $8`,
+       WHERE id = $8 AND school_id = $9`,
       `UPDATE school_announcements
        SET title = COALESCE(?, title),
            content = COALESCE(?, content),
-           audience = COALESCE(?, audience),
+           audience = ?,
            target_class_id = ?,
            priority = COALESCE(?, priority),
+           is_confidential = ?,
            is_published = COALESCE(?, is_published),
            updated_at = CURRENT_TIMESTAMP
        WHERE id = ? AND school_id = ?`,
       [
         title?.trim() || null,
         content?.trim() || null,
-        audience || null,
+        nextAudience,
         target_class_id !== undefined ? target_class_id : existing.target_class_id,
         priority || null,
+        nextConfidential,
         is_published !== undefined ? (is_published ? 1 : 0) : null,
         id,
         schoolId,

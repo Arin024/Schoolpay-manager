@@ -24,6 +24,7 @@ export const SchoolAnnouncementsView: React.FC<SchoolAnnouncementsViewProps> = (
     audience: 'ALL',
     target_class_id: '',
     priority: 'NORMAL',
+    is_confidential: false,
     is_published: true,
   });
 
@@ -51,10 +52,12 @@ export const SchoolAnnouncementsView: React.FC<SchoolAnnouncementsViewProps> = (
     e.preventDefault();
     setSaving(true);
     try {
+      const isConfidential = form.audience === 'STAFF_ONLY' || Boolean(form.is_confidential);
       const payload = {
         ...form,
-        audience: form.audience as AnnouncementAudience,
+        audience: (isConfidential && form.audience !== 'TEACHERS' ? 'STAFF_ONLY' : form.audience) as AnnouncementAudience,
         priority: form.priority as AnnouncementPriority,
+        is_confidential: isConfidential ? 1 : 0,
         target_class_id: form.audience === 'CLASS' && form.target_class_id ? form.target_class_id : null,
       };
       if (editing) {
@@ -115,6 +118,7 @@ export const SchoolAnnouncementsView: React.FC<SchoolAnnouncementsViewProps> = (
                 audience: 'ALL',
                 target_class_id: '',
                 priority: 'NORMAL',
+                is_confidential: false,
                 is_published: true,
               });
               setModalOpen(true);
@@ -172,8 +176,11 @@ export const SchoolAnnouncementsView: React.FC<SchoolAnnouncementsViewProps> = (
                     )}
                   </div>
                   <p className="text-[11px] text-slate-500">
-                    Audience: {a.audience}
+                    Audience: {a.audience === 'STAFF_ONLY' ? 'Confidential Staff Only' : a.audience}
                     {a.target_class_name ? ` (${a.target_class_name})` : ''} ·{' '}
+                    {(a.is_confidential === 1 || a.audience === 'STAFF_ONLY') && (
+                      <span className="font-bold text-rose-700">Private Staff Only (Hidden from Parents/Students) · </span>
+                    )}
                     {a.is_published === 1 ? 'Published' : 'Draft'} ·{' '}
                     <span className="font-mono tabular-nums">
                       {a.published_at || a.created_at
@@ -196,6 +203,7 @@ export const SchoolAnnouncementsView: React.FC<SchoolAnnouncementsViewProps> = (
                           audience: a.audience,
                           target_class_id: a.target_class_id || '',
                           priority: a.priority,
+                          is_confidential: a.is_confidential === 1 || a.audience === 'STAFF_ONLY',
                           is_published: a.is_published === 1,
                         });
                         setModalOpen(true);
@@ -245,13 +253,21 @@ export const SchoolAnnouncementsView: React.FC<SchoolAnnouncementsViewProps> = (
                   <label className="block font-semibold text-slate-700 mb-1">Target Audience</label>
                   <select
                     value={form.audience}
-                    onChange={(e) => setForm({ ...form, audience: e.target.value })}
+                    onChange={(e) => {
+                      const val = e.target.value;
+                      setForm({
+                        ...form,
+                        audience: val,
+                        is_confidential: val === 'STAFF_ONLY' ? true : form.is_confidential,
+                      });
+                    }}
                     className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl"
                   >
                     <option value="ALL">All Portal Users</option>
                     <option value="PARENTS">Parents Only</option>
                     <option value="STUDENTS">Students Only</option>
                     <option value="TEACHERS">Teachers Only</option>
+                    <option value="STAFF_ONLY">Confidential — Staff Only (Hidden from Parents &amp; Students)</option>
                     <option value="CLASS">Specific Class</option>
                   </select>
                 </div>
@@ -296,14 +312,30 @@ export const SchoolAnnouncementsView: React.FC<SchoolAnnouncementsViewProps> = (
                   className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl"
                 />
               </div>
-              <label className="flex items-center gap-2 cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={form.is_published}
-                  onChange={(e) => setForm({ ...form, is_published: e.target.checked })}
-                />
-                <span>Publish immediately to target portals</span>
-              </label>
+              <div className="space-y-2">
+                <label className="flex items-center gap-2 cursor-pointer font-semibold text-rose-700">
+                  <input
+                    type="checkbox"
+                    checked={form.is_confidential || form.audience === 'STAFF_ONLY'}
+                    onChange={(e) =>
+                      setForm({
+                        ...form,
+                        is_confidential: e.target.checked,
+                        audience: e.target.checked && form.audience !== 'TEACHERS' ? 'STAFF_ONLY' : form.audience === 'STAFF_ONLY' && !e.target.checked ? 'TEACHERS' : form.audience,
+                      })
+                    }
+                  />
+                  <span>Mark Confidential (Strict Staff Workspace Only — Invisible to Parents &amp; Students)</span>
+                </label>
+                <label className="flex items-center gap-2 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={form.is_published}
+                    onChange={(e) => setForm({ ...form, is_published: e.target.checked })}
+                  />
+                  <span>Publish immediately to target portals</span>
+                </label>
+              </div>
               <div className="pt-3 border-t border-slate-200 flex justify-end gap-2">
                 <button
                   type="button"
