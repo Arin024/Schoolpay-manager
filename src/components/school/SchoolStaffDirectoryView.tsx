@@ -11,6 +11,10 @@ import {
   X,
   AlertCircle,
   Building,
+  Copy,
+  Check,
+  KeyRound,
+  CheckCircle2,
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext.js';
 import { api } from '../../services/api.js';
@@ -21,6 +25,9 @@ export const SchoolStaffDirectoryView: React.FC = () => {
   const [staffList, setStaffList] = useState<StaffItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
+  const [assigningCodes, setAssigningCodes] = useState(false);
+  const [copiedStaffId, setCopiedStaffId] = useState<string | null>(null);
+  const [actionFeedback, setActionFeedback] = useState<{ type: 'ok' | 'err'; text: string } | null>(null);
 
   // Modals
   const [isAddModalOpen, setIsAddModalOpen] = useState(false);
@@ -69,9 +76,13 @@ export const SchoolStaffDirectoryView: React.FC = () => {
     setFormError(null);
 
     try {
-      await api.createStaff(formData);
+      const res = await api.createStaff(formData);
       setIsAddModalOpen(false);
       setFormData(initialFormState);
+      setActionFeedback({
+        type: 'ok',
+        text: `Staff added with Staff Login Code: ${res.staff?.staff_number || 'Issued'}. Share this code with them to sign into the Staff Portal.`,
+      });
       await loadStaff();
     } catch (err: any) {
       setFormError(err?.message || 'Failed to add staff member');
@@ -83,12 +94,12 @@ export const SchoolStaffDirectoryView: React.FC = () => {
   const openEditModal = (staff: StaffItem) => {
     setEditingStaff(staff);
     setFormData({
-      staff_number: staff.staff_number,
+      staff_number: staff.staff_number || '',
       first_name: staff.first_name,
       middle_name: staff.middle_name || '',
       last_name: staff.last_name,
-      email: staff.email,
-      phone: staff.phone,
+      email: staff.email || '',
+      phone: staff.phone || '',
       gender: staff.gender || 'Male',
       job_title: staff.job_title,
       department: staff.department || 'Academic',
@@ -110,12 +121,36 @@ export const SchoolStaffDirectoryView: React.FC = () => {
       await api.updateStaff(editingStaff.id, formData);
       setIsEditModalOpen(false);
       setEditingStaff(null);
+      setActionFeedback({ type: 'ok', text: 'Staff profile updated successfully.' });
       await loadStaff();
     } catch (err: any) {
       setFormError(err?.message || 'Failed to update staff member');
     } finally {
       setFormSubmitting(false);
     }
+  };
+
+  const handleAssignMissingCodes = async () => {
+    setAssigningCodes(true);
+    setActionFeedback(null);
+    try {
+      const res = await api.assignMissingStaffCodes();
+      setActionFeedback({
+        type: 'ok',
+        text: res.message || `Assigned missing staff login codes (${res.assignedCount} updated).`,
+      });
+      await loadStaff();
+    } catch (err: any) {
+      setActionFeedback({ type: 'err', text: err?.message || 'Failed to assign missing staff codes.' });
+    } finally {
+      setAssigningCodes(false);
+    }
+  };
+
+  const handleCopyStaffCode = (staffId: string, code: string) => {
+    navigator.clipboard.writeText(code);
+    setCopiedStaffId(staffId);
+    setTimeout(() => setCopiedStaffId(null), 2000);
   };
 
   const handleExportCsv = async () => {
@@ -130,7 +165,7 @@ export const SchoolStaffDirectoryView: React.FC = () => {
       a.remove();
       window.URL.revokeObjectURL(url);
     } catch (err: any) {
-      alert(err?.message || 'Failed to export staff directory');
+      setActionFeedback({ type: 'err', text: err?.message || 'Failed to export staff directory' });
     }
   };
 
@@ -139,17 +174,18 @@ export const SchoolStaffDirectoryView: React.FC = () => {
     try {
       await api.deleteStaff(staffToDelete.id);
       setStaffToDelete(null);
+      setActionFeedback({ type: 'ok', text: 'Staff member removed.' });
       await loadStaff();
     } catch (err: any) {
-      alert(err?.message || 'Failed to delete staff member');
+      setActionFeedback({ type: 'err', text: err?.message || 'Failed to delete staff member' });
     }
   };
 
   const filteredStaff = staffList.filter((s) => {
     const q = search.toLowerCase();
-    const fullName = `${s.first_name} ${s.last_name}`.toLowerCase();
-    const staffNo = s.staff_number.toLowerCase();
-    const job = s.job_title.toLowerCase();
+    const fullName = `${s.first_name || ''} ${s.last_name || ''}`.toLowerCase();
+    const staffNo = (s.staff_number || '').toLowerCase();
+    const job = (s.job_title || '').toLowerCase();
     const dept = (s.department || '').toLowerCase();
     return fullName.includes(q) || staffNo.includes(q) || job.includes(q) || dept.includes(q);
   });
@@ -157,20 +193,31 @@ export const SchoolStaffDirectoryView: React.FC = () => {
   return (
     <div className="space-y-6">
       {/* Top Header */}
-      <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-6 flex flex-col md:flex-row md:items-center justify-between gap-4">
+      <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-6 flex flex-col lg:flex-row lg:items-center justify-between gap-4">
         <div>
           <h2 className="text-lg font-black text-slate-900 tracking-tight flex items-center gap-2">
             <Briefcase className="w-5 h-5 text-emerald-600" />
-            <span>Staff Directory &amp; Academic Personnel</span>
+            <span>Staff Directory &amp; Login Codes</span>
           </h2>
           <p className="text-xs text-slate-500 mt-0.5">
-            Manage teachers, administrative staff, bursars, and instructors for{' '}
-            <strong className="text-slate-700">{activeSchool?.name}</strong>.
+            Manage teachers, bursars, and non-teaching personnel for{' '}
+            <strong className="text-slate-700">{activeSchool?.name}</strong>. Each staff member receives a unique Staff Login Code for role-separated portal sign-in.
           </p>
         </div>
 
-        <div className="flex items-center gap-2 self-start md:self-auto">
+        <div className="flex flex-wrap items-center gap-2 self-start lg:self-auto">
           <button
+            type="button"
+            disabled={assigningCodes}
+            onClick={handleAssignMissingCodes}
+            className="px-3.5 py-2.5 bg-indigo-50 hover:bg-indigo-100 text-indigo-800 border border-indigo-200 rounded-xl text-xs font-bold transition flex items-center gap-1.5 cursor-pointer disabled:opacity-60"
+            title="Auto-issue unique sequential Staff Login Codes to existing staff without overwriting assigned codes"
+          >
+            <KeyRound className="w-4 h-4 text-indigo-600" />
+            <span>{assigningCodes ? 'Issuing Codes...' : 'Assign Missing Staff Codes'}</span>
+          </button>
+          <button
+            type="button"
             onClick={handleExportCsv}
             className="px-3.5 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-700 border border-slate-200 rounded-xl text-xs font-bold transition flex items-center gap-1.5 cursor-pointer"
             title="Export staff directory as CSV"
@@ -179,6 +226,7 @@ export const SchoolStaffDirectoryView: React.FC = () => {
             <span>Export CSV</span>
           </button>
           <button
+            type="button"
             onClick={() => {
               setFormData(initialFormState);
               setFormError(null);
@@ -191,6 +239,28 @@ export const SchoolStaffDirectoryView: React.FC = () => {
           </button>
         </div>
       </div>
+
+      {actionFeedback && (
+        <div
+          className={`p-3.5 rounded-xl border text-xs flex items-center justify-between gap-2 ${
+            actionFeedback.type === 'ok'
+              ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
+              : 'bg-rose-50 border-rose-200 text-rose-800'
+          }`}
+        >
+          <span className="flex items-center gap-2 font-medium">
+            {actionFeedback.type === 'ok' ? (
+              <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+            ) : (
+              <AlertCircle className="w-4 h-4 text-rose-600 shrink-0" />
+            )}
+            <span>{actionFeedback.text}</span>
+          </span>
+          <button type="button" onClick={() => setActionFeedback(null)} className="cursor-pointer">
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+      )}
 
       {/* Search and Counts */}
       <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-4 flex items-center justify-between gap-4">
@@ -238,7 +308,7 @@ export const SchoolStaffDirectoryView: React.FC = () => {
               <thead>
                 <tr className="border-b border-slate-200 text-slate-500 font-semibold uppercase tracking-wider text-[11px] bg-slate-50/60">
                   <th className="py-3 px-4">Staff Member</th>
-                  <th className="py-3 px-4">Staff No</th>
+                  <th className="py-3 px-4">Staff Login Code</th>
                   <th className="py-3 px-4">Role &amp; Department</th>
                   <th className="py-3 px-4">Contact</th>
                   <th className="py-3 px-4">Status</th>
@@ -263,8 +333,28 @@ export const SchoolStaffDirectoryView: React.FC = () => {
                         </div>
                       </div>
                     </td>
-                    <td className="py-3.5 px-4 font-mono font-semibold text-slate-700">
-                      {staff.staff_number}
+                    <td className="py-3.5 px-4">
+                      {staff.staff_number ? (
+                        <div className="inline-flex items-center gap-1.5">
+                          <span className="font-mono font-bold text-indigo-800 bg-indigo-50 border border-indigo-200 px-2 py-0.5 rounded-lg">
+                            {staff.staff_number}
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() => handleCopyStaffCode(staff.id, staff.staff_number)}
+                            className="p-1 rounded hover:bg-slate-100 text-slate-400 hover:text-indigo-700 cursor-pointer"
+                            title="Copy Staff Login Code"
+                          >
+                            {copiedStaffId === staff.id ? (
+                              <Check className="w-3.5 h-3.5 text-emerald-600" />
+                            ) : (
+                              <Copy className="w-3.5 h-3.5" />
+                            )}
+                          </button>
+                        </div>
+                      ) : (
+                        <span className="text-slate-400 italic">Pending code</span>
+                      )}
                     </td>
                     <td className="py-3.5 px-4 text-slate-600">
                       <p className="font-semibold text-slate-800">{staff.job_title}</p>
@@ -273,11 +363,11 @@ export const SchoolStaffDirectoryView: React.FC = () => {
                     <td className="py-3.5 px-4 text-slate-600">
                       <p className="flex items-center gap-1 font-semibold text-slate-700">
                         <Phone className="w-3 h-3 text-slate-400" />
-                        <span>{staff.phone}</span>
+                        <span>{staff.phone || '—'}</span>
                       </p>
                       <p className="text-[10px] text-slate-400 flex items-center gap-1 mt-0.5">
                         <Mail className="w-3 h-3 text-slate-400" />
-                        <span>{staff.email}</span>
+                        <span>{staff.email || 'Code-only login'}</span>
                       </p>
                     </td>
                     <td className="py-3.5 px-4">
@@ -389,13 +479,13 @@ export const SchoolStaffDirectoryView: React.FC = () => {
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
                   <label className="block font-semibold text-slate-700 mb-1">
-                    Staff ID / Number <span className="text-slate-400 font-normal">(Optional)</span>
+                    Unique Staff Login Code <span className="text-slate-400 font-normal">(Auto-issued if blank)</span>
                   </label>
                   <input
                     type="text"
                     value={formData.staff_number}
                     onChange={(e) => setFormData({ ...formData, staff_number: e.target.value })}
-                    placeholder="Auto-generated if blank (e.g. STF/001)"
+                    placeholder="Auto-generated e.g. BMC/STF/2026/0001"
                     className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl font-mono"
                   />
                 </div>

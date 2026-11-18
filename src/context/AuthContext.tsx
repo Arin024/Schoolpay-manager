@@ -25,6 +25,11 @@ interface AuthContextType {
     school_id?: string;
     school_slug?: string;
   }) => Promise<void>;
+  staffCodeLogin: (credentials: {
+    staff_code: string;
+    school_id?: string;
+    school_slug?: string;
+  }) => Promise<void>;
   completeSessionAuth: (data: any) => Promise<void>;
   registerSchoolSuccess: (data: any) => void;
   logout: () => Promise<void>;
@@ -174,6 +179,15 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     school_slug?: string;
   }) => {
     const data = await api.admissionLogin(credentials);
+    await completeSessionAuth(data);
+  };
+
+  const staffCodeLogin = async (credentials: {
+    staff_code: string;
+    school_id?: string;
+    school_slug?: string;
+  }) => {
+    const data = await api.staffCodeLogin(credentials);
     await completeSessionAuth(data);
   };
 
@@ -356,6 +370,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         impersonatedBy,
         login,
         admissionLogin,
+        staffCodeLogin,
         completeSessionAuth,
         registerSchoolSuccess,
         logout,

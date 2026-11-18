@@ -328,6 +328,8 @@ export async function initDatabase() {
             'ALTER TABLE students ALTER COLUMN admission_number DROP NOT NULL',
             'ALTER TABLE students ALTER COLUMN gender DROP NOT NULL',
             'ALTER TABLE staff ALTER COLUMN staff_number DROP NOT NULL',
+            'ALTER TABLE staff ADD COLUMN IF NOT EXISTS user_id VARCHAR(64)',
+            'ALTER TABLE staff ADD COLUMN IF NOT EXISTS is_deleted INTEGER DEFAULT 0',
             'ALTER TABLE staff ALTER COLUMN email DROP NOT NULL',
             'ALTER TABLE staff ALTER COLUMN phone DROP NOT NULL',
             'ALTER TABLE staff ALTER COLUMN job_title DROP NOT NULL',
@@ -428,6 +430,10 @@ export async function initDatabase() {
 
   // 12b. Non-destructive backfill of unique portal subdomains & default website profiles for existing schools
   await backfillSchoolSubdomainsAndWebsiteProfiles();
+
+  // 12c. Non-destructive backfill of unique Staff Login Codes (<PREFIX>/STF/<YEAR>/<0001>) & user links
+  const { backfillAllSchoolsStaffCodesAndLinks } = await import('./staffCodeService.ts');
+  await backfillAllSchoolsStaffCodesAndLinks();
 
   // 13. Start automated daily backup scheduler
   startAutomaticBackupScheduler();

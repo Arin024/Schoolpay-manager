@@ -225,6 +225,26 @@ class CDPClient {
     await new Promise((r) => setTimeout(r, 250));
   }
 
+  async setViewport(width: number, height: number, mobile: boolean) {
+    await this.send('Emulation.setDeviceMetricsOverride', {
+      width,
+      height,
+      deviceScaleFactor: mobile ? 2 : 1,
+      mobile,
+    });
+    await new Promise((r) => setTimeout(r, 250));
+  }
+
+  async checkNoHorizontalOverflow(contextLabel: string) {
+    const metrics = await this.evaluate<{ scrollWidth: number; innerWidth: number }>(
+      'return { scrollWidth: document.documentElement.scrollWidth, innerWidth: window.innerWidth };'
+    );
+    assert.ok(
+      metrics.scrollWidth <= metrics.innerWidth + 1,
+      `[${contextLabel}] Horizontal overflow detected: scrollWidth=${metrics.scrollWidth}px > innerWidth=${metrics.innerWidth}px`
+    );
+  }
+
   close() {
     try {
       this.ws.close();
@@ -417,6 +437,8 @@ async function run() {
       designation: 'Senior Mathematics Tutor',
     });
     assert.strictEqual(teacherUserRes.status, 201, `Teacher provision failed: ${JSON.stringify(teacherUserRes.data)}`);
+    const teacherStaffCode: string = teacherUserRes.data.issuedStaffNumber;
+    assert.ok(teacherStaffCode && teacherStaffCode.includes('/STF/'), `Expected sequential Staff Login Code, got: ${teacherStaffCode}`);
 
     const staffUserRes = await apiReq(adminToken, schoolId, 'POST', '/api/v1/school/users/provision', {
       full_name: 'Mrs. Halima Yusuf',
@@ -426,8 +448,51 @@ async function run() {
       designation: 'School Librarian & Exam Officer',
     });
     assert.strictEqual(staffUserRes.status, 201, `Staff provision failed: ${JSON.stringify(staffUserRes.data)}`);
+    const librarianStaffCode: string = staffUserRes.data.issuedStaffNumber;
+    assert.ok(librarianStaffCode && librarianStaffCode !== teacherStaffCode, 'Librarian must receive a distinct unique Staff Login Code');
 
-    console.log(`[1/8] Backfill + New School #portal/${schoolSlug} + Auto Admission ${studentAdmNo} + Teacher/Staff ready.`);
+    // Also add a code-only staff member via Staff Directory (NO email, NO password)
+    const codeOnlyStaffRes = await apiReq(adminToken, schoolId, 'POST', '/api/v1/school/staff', {
+      first_name: 'Mallam',
+      last_name: 'Ibrahim',
+      job_title: 'Biology Tutor',
+      department: 'Sciences',
+    });
+    assert.strictEqual(codeOnlyStaffRes.status, 201, `Code-only staff creation failed: ${JSON.stringify(codeOnlyStaffRes.data)}`);
+    const codeOnlyStaffNumber: string = codeOnlyStaffRes.data.staff?.staff_number;
+    assert.ok(codeOnlyStaffNumber && codeOnlyStaffNumber.includes('/STF/'), 'Code-only staff must auto-receive Staff Login Code');
+
+    // Verify Admin/Owner & Bursar cannot authenticate via Staff Login Code endpoint (role separation guard)
+    const bursarUserRes = await apiReq(adminToken, schoolId, 'POST', '/api/v1/school/users/provision', {
+      full_name: 'Mr. Kabiru Musa',
+      email: 'bursar@abca.edu.ng',
+      password: 'Password123!',
+      role_name: 'BURSAR',
+      designation: 'School Bursar',
+    });
+    assert.strictEqual(bursarUserRes.status, 201);
+
+    // Also test a long-named Nigerian school (matching mobile overflow edge-case)
+    const longSchoolReg = await apiReq(null, null, 'POST', '/api/v1/auth/register-school', {
+      schoolName: 'Saint Joseph Advanced College Of Health and Management Sciences',
+      schoolType: 'International',
+      state: 'Ogun',
+      lga: 'Ado-Odo Ota',
+      address: 'KM 10 Idiroko Express Way, Ota',
+      phone: '08160754659',
+      email: 'admissions@sjachms.edu.ng',
+      ownerName: 'Dr. Joseph Adeyinka',
+      ownerEmail: 'rector@sjachms.edu.ng',
+      password: 'Password123!',
+      question1: 'What state is the college located?',
+      answer1: 'Ogun',
+      question2: 'Founder year?',
+      answer2: '2020',
+    });
+    assert.strictEqual(longSchoolReg.status, 201);
+    const longSchoolSlug: string = longSchoolReg.data.school.slug;
+
+    console.log(`[1/8] Backfill + Auto Admission ${studentAdmNo} + Staff Codes (${teacherStaffCode}, ${librarianStaffCode}, ${codeOnlyStaffNumber}) ready.`);
 
     // Launch Headless Chrome CDP
     const cdpPort = 9338;
@@ -455,8 +520,10 @@ async function run() {
     assert.ok(wsUrl, 'Failed to obtain Chromium CDP WebSocket URL');
     cdp = await CDPClient.connect(wsUrl);
 
-    // 2. Admin customizes School Website, Subdomain, Articles, Gallery, Public/Staff Events & Timetable via Browser UI
+    // 2. Verify Root Landing keeps Register Your School, then Admin signs in cleanly
     await cdp.goto(`${TEST_BASE}/`);
+    const rootText = await cdp.bodyText();
+    assert.ok(rootText.includes('Register Your School'), 'Root BursarIQ landing must retain Register Your School');
     await cdp.fillInput('input[type="email"]', 'principal@abca.edu.ng');
     await cdp.fillInput('input[type="password"]', 'Password123!');
     await cdp.clickSubmit();
@@ -564,13 +631,35 @@ async function run() {
     const publicDomText = await cdp.bodyText();
     assert.ok(!publicDomText.includes('Confidential: 2026 Term Salary'), 'Public website leaked confidential staff notice!');
     assert.ok(!publicDomText.includes('Confidential Staff Promotion Panel'), 'Public website leaked confidential staff event!');
+    assert.ok(!publicDomText.includes('Register Your School'), 'Public school website must hide Register Your School!');
+    assert.ok(!publicDomText.includes('Register New School'), 'Public school website must hide Register New School footer link!');
+    assert.ok(!publicDomText.includes('Register Free'), 'Public school website must hide Register Free CTA!');
+    await cdp.checkNoHorizontalOverflow('Desktop /site/abca-kano');
+
+    // Mobile Responsive Audit across narrow 360px & 390px viewports on long-named school & abca-kano
+    await cdp.setViewport(360, 800, true);
+    await cdp.goto(`${TEST_BASE}/#portal/${longSchoolSlug}`);
+    await cdp.waitForText('Saint Joseph Advanced College Of Health and Management Sciences');
+    await cdp.checkNoHorizontalOverflow('Mobile 360px /#portal/longSchool');
+    const mobilePortalText = await cdp.bodyText();
+    assert.ok(!mobilePortalText.includes('Register Your School'), 'Mobile school portal must hide Register Your School!');
+    assert.ok(!mobilePortalText.includes('Register Free'), 'Mobile school portal must hide Register Free!');
+
+    await cdp.setViewport(390, 844, true);
+    await cdp.goto(`${TEST_BASE}/site/abca-kano`);
+    await cdp.waitForText('Ahmadu Bello Crescent Academy');
+    await cdp.checkNoHorizontalOverflow('Mobile 390px /site/abca-kano');
+
+    // Restore desktop viewport for interaction steps
+    await cdp.setViewport(1440, 900, false);
 
     // Open Article Reader Modal & close
     await cdp.clickButtonByText('Read Full Article');
     await cdp.waitForText('proudly celebrates our mathematics');
     await cdp.clickButtonByText('Close article');
 
-    // Submit Prospective Admissions Inquiry on Public Website
+    // Use prominent Apply / Inquiry CTA and submit Prospective Admissions Inquiry on Public Website
+    await cdp.clickButtonByText('Apply / Inquiry');
     await cdp.fillInputByPlaceholder('Chinedu Okafor', 'Chinedu Okonkwo');
     await cdp.fillInputByPlaceholder('Mrs. Ngozi Okafor', 'Mrs. Ngozi Okonkwo');
     await cdp.fillInputByPlaceholder('08031234567', '08031234567');
@@ -578,31 +667,42 @@ async function run() {
     await cdp.clickButtonByText('Send Admissions Inquiry');
     await cdp.waitForText('inquiry');
 
-    console.log('[3/8] Public School Website (/site/abca-kano + subdomain host lookup), Article Reader & Admissions Inquiry verified.');
+    console.log('[3/8] Public School Website (/site/abca-kano + mobile 360px/390px + Register Your School hidden + Inquiry) verified.');
 
-    // Verify Admin sees Inquiry and marks CONTACTED
+    // Verify Admin sees Inquiry on Dashboard Overview, Announcements Notices, AND Website Inbox
     await cdp.goto(`${TEST_BASE}/`);
     await cdp.fillInput('input[type="email"]', 'principal@abca.edu.ng');
     await cdp.fillInput('input[type="password"]', 'Password123!');
     await cdp.clickSubmit();
-    await cdp.waitForText('Manage School Website');
-    await cdp.clickButtonByText('Manage School Website');
+    await cdp.waitForText('Prospective Student Admissions Notices');
+    await cdp.waitForText('Chinedu Okonkwo');
+    await cdp.clickButtonByText('Announcements', true);
+    await cdp.waitForText('Prospective Student Inquiry Notices');
+    await cdp.waitForText('Chinedu Okonkwo');
+    await cdp.clickButtonByText('Website & Gallery');
     await cdp.clickButtonByText('Admissions Inquiries');
     await cdp.waitForText('Chinedu Okonkwo');
     await cdp.clickButtonByText('CONTACTED');
     await cdp.waitForText('Status: CONTACTED');
     await cdp.logoutInBrowser();
 
-    // 4. Dedicated Staff Workspace (TEACHER): Confidential Briefing, NERDC Lesson Note Generator, Timetable & Staff Request
-    await cdp.goto(`${TEST_BASE}/`);
-    await cdp.fillInput('input[type="email"]', 'teacher@abca.edu.ng');
-    await cdp.fillInput('input[type="password"]', 'Password123!');
-    await cdp.clickSubmit();
+    // 4. Role-Separated Dedicated Staff Login via UNIQUE STAFF LOGIN CODE (No Password Needed!)
+    await cdp.goto(`${TEST_BASE}/#portal/${schoolSlug}`);
+    await cdp.clickButtonByText('Staff', true);
+    await cdp.fillInputByPlaceholder('BMC/STF/2026/0001', teacherStaffCode);
+    await cdp.clickButtonByText('Open Staff Workspace');
     await cdp.waitForText('Dedicated Staff Workspace');
+    await cdp.waitForText(teacherStaffCode);
 
-    // Confidential Briefing + Acknowledge
+    // Confirm Staff Overview displays Prospective Student Admissions Notices
+    await cdp.waitForText('Prospective Student Applications & Admissions Notices');
+    await cdp.waitForText('Chinedu Okonkwo');
+
+    // Confidential Briefing + Admissions Notice in Confidential Notices tab + Acknowledge
     await cdp.clickButtonByText('Confidential Notices');
     await cdp.waitForText('Confidential: 2026 Term Salary & Appraisal Review');
+    await cdp.waitForText('Prospective Student Admissions Notices');
+    await cdp.waitForText('Chinedu Okonkwo');
     await cdp.clickButtonByText('Acknowledge Receipt');
     await cdp.waitForText('Acknowledged');
 
@@ -635,17 +735,50 @@ async function run() {
     await cdp.waitForText('Need New Physics Pendulum Apparatus');
     await cdp.logoutInBrowser();
 
-    // Also confirm STAFF non-teaching role accesses Dedicated Staff Workspace cleanly
-    await cdp.goto(`${TEST_BASE}/`);
-    await cdp.fillInput('input[type="email"]', 'librarian@abca.edu.ng');
-    await cdp.fillInput('input[type="password"]', 'Password123!');
-    await cdp.clickSubmit();
+    // Confirm code-only staff member (created WITHOUT password/email) also enters Dedicated Staff Workspace seamlessly!
+    await cdp.goto(`${TEST_BASE}/#portal/${schoolSlug}`);
+    await cdp.clickButtonByText('Staff', true);
+    await cdp.fillInputByPlaceholder('BMC/STF/2026/0001', codeOnlyStaffNumber);
+    await cdp.clickButtonByText('Open Staff Workspace');
     await cdp.waitForText('Dedicated Staff Workspace');
-    await cdp.clickButtonByText('Confidential Notices');
-    await cdp.waitForText('Confidential: 2026 Term Salary & Appraisal Review');
+    await cdp.waitForText(codeOnlyStaffNumber);
+    await cdp.waitForText('Chinedu Okonkwo');
     await cdp.logoutInBrowser();
 
-    console.log('[4/8] Dedicated Staff Workspace (TEACHER + STAFF): Confidential Briefing ack, NERDC Lesson Note generator & Staff Request verified.');
+    // Strict API Role Separation Checks for Staff Code Login
+    const invalidAdminStaffCode = await apiReq(null, null, 'POST', '/api/v1/public/portal/staff-code-login', {
+      staff_code: 'PRINCIPAL-ADMIN',
+      school_slug: schoolSlug,
+    });
+    assert.strictEqual(invalidAdminStaffCode.status, 401);
+
+    // Link an Admin staff_number and confirm staff-code-login REJECTS Admin role (403 ADMIN_PASSWORD_REQUIRED)
+    const adminStaffEntry = await apiReq(adminToken, schoolId, 'POST', '/api/v1/school/staff', {
+      first_name: 'Sani',
+      last_name: 'Bello',
+      email: 'principal@abca.edu.ng',
+      job_title: 'Principal',
+      department: 'Administration',
+    });
+    assert.strictEqual(adminStaffEntry.status, 201);
+    const adminCode = adminStaffEntry.data.staff?.staff_number;
+    const rejectedAdminCodeLogin = await apiReq(null, null, 'POST', '/api/v1/public/portal/staff-code-login', {
+      staff_code: adminCode,
+      school_slug: schoolSlug,
+    });
+    assert.strictEqual(
+      rejectedAdminCodeLogin.status,
+      403,
+      `Admin/Owner MUST be rejected by staff-code-login (got ${rejectedAdminCodeLogin.status})`
+    );
+    assert.strictEqual(rejectedAdminCodeLogin.data.error, 'ADMIN_PASSWORD_REQUIRED');
+
+    // Confirm assign-missing-codes is non-destructive and preserves existing codes
+    const assignRes = await apiReq(adminToken, schoolId, 'POST', '/api/v1/school/staff/assign-missing-codes');
+    assert.strictEqual(assignRes.status, 200);
+    assert.strictEqual(assignRes.data.assignedCount, 0, 'Existing issued staff codes must be preserved without overwriting');
+
+    console.log('[4/8] Dedicated Staff Workspace (Staff Login Code role separation + Prospective Notices + Lesson Notes) verified.');
 
     // 5. Admin Approves Submitted Lesson Note & Staff Request
     await cdp.goto(`${TEST_BASE}/`);
@@ -740,6 +873,9 @@ async function run() {
       const inqBlock = await apiReq(tok, schoolId, 'GET', '/api/v1/school/website/inquiries');
       assert.strictEqual(inqBlock.status, 403, `${label} must receive 403 on website inquiries, got ${inqBlock.status}`);
 
+      const staffInqBlock = await apiReq(tok, schoolId, 'GET', '/api/v1/staff-workspace/admissions-inquiries');
+      assert.strictEqual(staffInqBlock.status, 403, `${label} must receive 403 on staff admissions-inquiries, got ${staffInqBlock.status}`);
+
       const annList = await apiReq(tok, schoolId, 'GET', '/api/v1/school/announcements');
       assert.strictEqual(annList.status, 403, `${label} must receive 403 on /api/v1/school/announcements, got ${annList.status}`);
     }
@@ -782,12 +918,14 @@ async function run() {
     await cdp.waitForText('2026 STEM Olympiad Victory');
     await cdp.waitForText('New Science Laboratory Wing');
 
-    await cdp.goto(`${TEST_BASE}/`);
-    await cdp.fillInput('input[type="email"]', 'teacher@abca.edu.ng');
-    await cdp.fillInput('input[type="password"]', 'Password123!');
-    await cdp.clickSubmit();
+    await cdp.goto(`${TEST_BASE}/#portal/${schoolSlug}`);
+    await cdp.clickButtonByText('Staff', true);
+    await cdp.fillInputByPlaceholder('BMC/STF/2026/0001', teacherStaffCode);
+    await cdp.clickButtonByText('Open Staff Workspace');
+    await cdp.waitForText('Dedicated Staff Workspace');
     await cdp.clickButtonByText('Confidential Notices');
     await cdp.waitForText('Acknowledged');
+    await cdp.waitForText('Chinedu Okonkwo');
     await cdp.clickButtonByText('Lesson Notes & Plans');
     await cdp.waitForText('Quadratic Equations by Factorization');
     await cdp.waitForText('Approved by Admin');

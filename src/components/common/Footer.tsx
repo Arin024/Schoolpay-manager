@@ -5,9 +5,10 @@ import { PORTFOLIO_URL } from '../../constants/index.js';
 
 interface FooterProps {
   onNavigateView?: (view: string) => void;
+  hideRegisterSchool?: boolean;
 }
 
-export const Footer: React.FC<FooterProps> = ({ onNavigateView }) => {
+export const Footer: React.FC<FooterProps> = ({ onNavigateView, hideRegisterSchool = false }) => {
   return (
     <footer className="w-full mt-auto border-t border-slate-200/90 bg-white/95 backdrop-blur-md text-xs text-slate-600">
       {/* pb-36 on mobile reserves ample clearance so fixed bottom CTA bars never obstruct the footer */}
@@ -47,15 +48,17 @@ export const Footer: React.FC<FooterProps> = ({ onNavigateView }) => {
                   Sign In to Your School
                 </button>
               </li>
-              <li>
-                <button
-                  type="button"
-                  onClick={() => onNavigateView?.('register')}
-                  className="hover:text-emerald-700 transition cursor-pointer"
-                >
-                  Register New School (30-Day Free Trial)
-                </button>
-              </li>
+              {!hideRegisterSchool && (
+                <li>
+                  <button
+                    type="button"
+                    onClick={() => onNavigateView?.('register')}
+                    className="hover:text-emerald-700 transition cursor-pointer"
+                  >
+                    Register New School (30-Day Free Trial)
+                  </button>
+                </li>
+              )}
               <li>
                 <button
                   type="button"
@@ -124,7 +127,6 @@ export const Footer: React.FC<FooterProps> = ({ onNavigateView }) => {
               rel="noopener noreferrer"
               className="inline-flex items-center gap-2 px-3 py-1.5 rounded-lg bg-emerald-50/90 hover:bg-emerald-100/90 text-slate-800 hover:text-emerald-900 border border-emerald-200 transition shadow-sm font-semibold text-xs group"
             >
-              <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse flex-shrink-0" />
               <span>
                 Engineered and designed by Arinzechukwu Christian
               </span>

@@ -206,6 +206,18 @@ export const api = {
     });
   },
 
+  async staffCodeLogin(credentials: {
+    staff_code: string;
+    school_id?: string;
+    school_slug?: string;
+  }) {
+    return safeFetch(`${API_BASE}/public/portal/staff-code-login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(credentials),
+    });
+  },
+
   // Unauthenticated Public School Portal Directory, Verification & Self-Activation
   async searchPublicSchools(query = ''): Promise<{ success: boolean; schools: PublicSchoolSummary[] }> {
     const params = new URLSearchParams();
@@ -700,6 +712,20 @@ export const api = {
   async deleteStaff(staffId: string): Promise<{ message: string }> {
     return safeFetch(`${API_BASE}/school/staff/${staffId}`, {
       method: 'DELETE',
+      headers: getAuthHeaders(),
+    });
+  },
+
+  async assignMissingStaffCodes(): Promise<{
+    success: boolean;
+    assignedCount: number;
+    prefix: string;
+    linkedUsersCount?: number;
+    staff: Array<{ id: string; first_name: string; last_name: string; staff_number: string }>;
+    message: string;
+  }> {
+    return safeFetch(`${API_BASE}/school/staff/assign-missing-codes`, {
+      method: 'POST',
       headers: getAuthHeaders(),
     });
   },
@@ -2310,16 +2336,19 @@ export const api = {
 
   // Admin Portal User Provisioning & Explicit Verification Linkage
   async provisionPortalUser(data: {
-    email: string;
+    email?: string;
     full_name: string;
     phone?: string;
     password?: string;
+    staff_number?: string;
+    job_title?: string;
+    department?: string;
     role_name: 'SCHOOL_ADMIN' | 'BURSAR' | 'TEACHER' | 'STAFF' | 'PARENT' | 'STUDENT';
     parent_id?: string | null;
     create_parent_profile?: boolean;
     student_ids?: string[];
     student_id?: string | null;
-  }): Promise<{ success: boolean; message: string; user: any }> {
+  }): Promise<{ success: boolean; message: string; user: any; issuedStaffNumber?: string | null }> {
     return safeFetch(`${API_BASE}/school/users/provision`, {
       method: 'POST',
       headers: getAuthHeaders(),
@@ -2776,6 +2805,15 @@ export const api = {
   async acknowledgeConfidentialNotice(id: string): Promise<{ success: boolean; message: string }> {
     return safeFetch(`${API_BASE}/staff-workspace/confidential-notices/${id}/acknowledge`, {
       method: 'POST',
+      headers: getAuthHeaders(),
+    });
+  },
+
+  async getStaffWorkspaceAdmissionsInquiries(): Promise<{
+    success: boolean;
+    inquiries: SchoolAdmissionInquiry[];
+  }> {
+    return safeFetch(`${API_BASE}/staff-workspace/admissions-inquiries`, {
       headers: getAuthHeaders(),
     });
   },

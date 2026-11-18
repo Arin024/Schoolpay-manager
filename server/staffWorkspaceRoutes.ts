@@ -668,3 +668,23 @@ staffWorkspaceRouter.patch('/requests/:id', ...adminReviewGuard, async (req: Aut
   );
   return res.json({ success: true, request, message: `Staff request marked as ${status}.` });
 });
+
+// ==============================================================================
+// 5. PROSPECTIVE ADMISSIONS INQUIRY NOTICES (READ-ONLY FOR STAFF, WRITABLE BY ADMIN)
+// ==============================================================================
+
+staffWorkspaceRouter.get('/admissions-inquiries', ...staffOnlyGuard, async (req: AuthenticatedRequest, res) => {
+  const schoolId = req.targetSchoolId!;
+  const inquiries = await dbAll(
+    `SELECT id, school_id, student_name, target_class, parent_name, parent_phone, parent_email, message, status, admin_notes, created_at
+     FROM school_admission_inquiries
+     WHERE school_id = $1
+     ORDER BY created_at DESC LIMIT 50`,
+    `SELECT id, school_id, student_name, target_class, parent_name, parent_phone, parent_email, message, status, admin_notes, created_at
+     FROM school_admission_inquiries
+     WHERE school_id = ?
+     ORDER BY created_at DESC LIMIT 50`,
+    [schoolId]
+  );
+  return res.json({ success: true, inquiries });
+});

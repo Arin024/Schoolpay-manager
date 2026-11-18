@@ -10,6 +10,7 @@ interface HeaderProps {
   onOpenSecuritySettings?: () => void;
   activeView: string;
   setActiveView: (view: string) => void;
+  hideRegisterSchool?: boolean;
 }
 
 export const Header: React.FC<HeaderProps> = ({
@@ -17,6 +18,7 @@ export const Header: React.FC<HeaderProps> = ({
   onOpenSecuritySettings,
   activeView,
   setActiveView,
+  hideRegisterSchool = false,
 }) => {
   const {
     user,
@@ -168,7 +170,7 @@ export const Header: React.FC<HeaderProps> = ({
                   <LogOut className="w-4 h-4" />
                 </button>
               </>
-            ) : (
+            ) : !hideRegisterSchool ? (
               <div className="flex items-center gap-2 sm:gap-3">
                 <button
                   type="button"
@@ -181,12 +183,12 @@ export const Header: React.FC<HeaderProps> = ({
                       }
                     }, 60);
                   }}
-                  className="px-3.5 py-1.5 sm:px-4 sm:py-2 rounded-xl text-xs font-bold bg-emerald-600 hover:bg-emerald-500 text-white shadow-sm transition cursor-pointer flex items-center gap-1.5 shrink-0"
+                  className="px-3 sm:px-4 py-1.5 sm:py-2 rounded-xl text-xs font-bold bg-emerald-600 hover:bg-emerald-500 text-white shadow-sm transition cursor-pointer flex items-center gap-1.5 whitespace-nowrap shrink-0"
                 >
                   <span>Register Your School</span>
                 </button>
               </div>
-            )}
+            ) : null}
           </div>
         </div>
       </div>

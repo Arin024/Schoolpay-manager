@@ -574,7 +574,7 @@ async function run() {
 
     // Sign in as School Admin -> open Overview & Roles -> Bulk Generate Logins
     await cdp.clickButtonByText('Portal Login', true);
-    await cdp.clickButtonByText('Staff / Email');
+    await cdp.clickButtonByText('Admin', true);
     await cdp.fillInput('input[type="email"]', 'admin@brightstar.edu.ng');
     await cdp.fillInput('input[type="password"]', 'Password123!');
     await cdp.clickSubmit();

@@ -17,10 +17,13 @@ import {
   Copy,
   Check,
   Link2,
+  UserPlus,
+  AlertCircle,
+  X,
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext.js';
 import { api } from '../../services/api.js';
-import { SchoolDashboardStats } from '../../types/index.js';
+import { SchoolAdmissionInquiry, SchoolDashboardStats } from '../../types/index.js';
 
 interface SchoolDashboardOverviewProps {
   onNavigateTab: (tab: any) => void;
@@ -37,7 +40,9 @@ export const SchoolDashboardOverview: React.FC<SchoolDashboardOverviewProps> = (
 }) => {
   const { activeSchool, activeSettings } = useAuth();
   const [stats, setStats] = useState<SchoolDashboardStats | null>(null);
+  const [inquiries, setInquiries] = useState<SchoolAdmissionInquiry[]>([]);
   const [loading, setLoading] = useState(true);
+  const [exportError, setExportError] = useState<string | null>(null);
   const [copiedPortalLink, setCopiedPortalLink] = useState(false);
   const [copiedSubdomain, setCopiedSubdomain] = useState(false);
 
@@ -61,13 +66,17 @@ export const SchoolDashboardOverview: React.FC<SchoolDashboardOverviewProps> = (
 
   useEffect(() => {
     loadDashboardStats();
-  }, [activeSchool?.id]);
+  }, [activeSchool?.id, readOnly]);
 
   const loadDashboardStats = async () => {
     setLoading(true);
     try {
-      const res = await api.getSchoolStats();
-      setStats(res.stats);
+      const [statsRes, inqRes] = await Promise.all([
+        api.getSchoolStats(),
+        !readOnly ? api.getAdmissionInquiries().catch(() => ({ inquiries: [] })) : Promise.resolve({ inquiries: [] }),
+      ]);
+      setStats(statsRes.stats);
+      setInquiries(inqRes.inquiries || []);
     } catch (err) {
       console.error('Failed to load school statistics:', err);
     } finally {
@@ -76,6 +85,7 @@ export const SchoolDashboardOverview: React.FC<SchoolDashboardOverviewProps> = (
   };
 
   const handleExport = async () => {
+    setExportError(null);
     try {
       const blob = await api.exportStudentsCsv();
       const url = window.URL.createObjectURL(blob);
@@ -87,7 +97,7 @@ export const SchoolDashboardOverview: React.FC<SchoolDashboardOverviewProps> = (
       a.remove();
       window.URL.revokeObjectURL(url);
     } catch (err: any) {
-      alert(err?.message || 'Failed to export CSV');
+      setExportError(err?.message || 'Failed to export CSV');
     }
   };
 
@@ -236,6 +246,64 @@ export const SchoolDashboardOverview: React.FC<SchoolDashboardOverviewProps> = (
             >
               Manage School Website
             </button>
+          </div>
+        </div>
+      )}
+
+      {exportError && (
+        <div className="p-3.5 rounded-xl bg-rose-50 border border-rose-200 text-rose-800 text-xs flex items-center justify-between gap-3">
+          <span className="flex items-center gap-2 font-medium">
+            <AlertCircle className="w-4 h-4 text-rose-600 shrink-0" />
+            <span>{exportError}</span>
+          </span>
+          <button type="button" onClick={() => setExportError(null)} className="cursor-pointer">
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+      )}
+
+      {!readOnly && inquiries.length > 0 && (
+        <div className="bg-white rounded-2xl border border-blue-200 shadow-sm p-5 space-y-3">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+            <div className="flex items-center gap-2">
+              <UserPlus className="w-4 h-4 text-blue-600 shrink-0" />
+              <h3 className="text-sm font-bold text-slate-900">
+                Prospective Student Admissions Notices ({inquiries.length})
+              </h3>
+              <span className="text-[11px] font-bold text-blue-700 tabular-nums">
+                {inquiries.filter((i) => i.status === 'NEW').length} new
+              </span>
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                onClick={() => onNavigateTab('website')}
+                className="px-3 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold cursor-pointer"
+              >
+                Open Website Inbox
+              </button>
+              <button
+                type="button"
+                onClick={() => onNavigateTab('announcements')}
+                className="px-3 py-1.5 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-800 text-xs font-semibold cursor-pointer"
+              >
+                View School Notices
+              </button>
+            </div>
+          </div>
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-3 text-xs">
+            {inquiries.slice(0, 3).map((inq) => (
+              <div key={inq.id} className="p-3 rounded-xl bg-slate-50 border border-slate-200 space-y-1">
+                <div className="flex items-center justify-between gap-2">
+                  <p className="font-bold text-slate-900 truncate">{inq.student_name}</p>
+                  <span className="text-[11px] font-bold text-blue-700 shrink-0">{inq.status}</span>
+                </div>
+                <p className="text-[11px] text-slate-600 truncate">
+                  {inq.target_class || 'General Admissions'} · Parent: {inq.parent_name}
+                </p>
+                <p className="text-[11px] font-mono text-slate-500">{inq.parent_phone}</p>
+              </div>
+            ))}
           </div>
         </div>
       )}

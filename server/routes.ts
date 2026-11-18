@@ -51,6 +51,10 @@ import {
   assignMissingAdmissionNumbersForSchool,
 } from './admissionNumberService.ts';
 import {
+  generateNextStaffCode,
+  assignMissingStaffCodesForSchool,
+} from './staffCodeService.ts';
+import {
   ADMIN_ONLY_ROLES,
   DIRECTORY_READ_ROLES,
   ACADEMIC_READ_ROLES,
@@ -4455,10 +4459,11 @@ apiRouter.get('/v1/school/staff', requireAuth, requireTenant, requireRole(DIRECT
       for (const st of staff) {
         cacheDb.prepare(`
           INSERT INTO staff (
-            id, school_id, staff_number, first_name, middle_name, last_name, email, phone,
+            id, school_id, user_id, staff_number, first_name, middle_name, last_name, email, phone,
             gender, address, job_title, department, employment_status, date_joined, is_deleted, created_at, updated_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
           ON CONFLICT(id) DO UPDATE SET
+            user_id = COALESCE(excluded.user_id, staff.user_id),
             staff_number = excluded.staff_number,
             first_name = excluded.first_name,
             middle_name = excluded.middle_name,
@@ -4476,6 +4481,7 @@ apiRouter.get('/v1/school/staff', requireAuth, requireTenant, requireRole(DIRECT
         `).run(
           st.id,
           st.school_id,
+          st.user_id || null,
           st.staff_number || null,
           st.first_name,
           st.middle_name || null,
@@ -4542,7 +4548,7 @@ apiRouter.post(
     const safeLastName = last_name.trim();
     const effectiveStaffNo = staff_number && typeof staff_number === 'string' && staff_number.trim()
       ? staff_number.trim()
-      : `STF-${crypto.randomBytes(3).toString('hex').toUpperCase()}`;
+      : await generateNextStaffCode(schoolId);
     const effectiveJobTitle = job_title && typeof job_title === 'string' && job_title.trim()
       ? job_title.trim()
       : 'Staff Member';
@@ -4589,17 +4595,45 @@ apiRouter.post(
       });
     }
 
-    // Check staff number uniqueness in this school
+    // Check staff number uniqueness in this school (case-insensitive)
     let existingStaffNo: any = null;
-    const checkPg = pool ? await queryPg('SELECT id FROM staff WHERE school_id = $1 AND staff_number = $2', [schoolId, effectiveStaffNo]) : null;
+    const checkPg = pool
+      ? await queryPg('SELECT id FROM staff WHERE school_id = $1 AND LOWER(TRIM(staff_number)) = LOWER($2) AND (is_deleted = 0 OR is_deleted IS NULL)', [schoolId, effectiveStaffNo])
+      : null;
     if (checkPg && checkPg.rows.length > 0) {
       existingStaffNo = checkPg.rows[0];
     } else {
-      existingStaffNo = cacheDb.prepare('SELECT id FROM staff WHERE school_id = ? AND staff_number = ?').get(schoolId, effectiveStaffNo);
+      existingStaffNo = cacheDb.prepare('SELECT id FROM staff WHERE school_id = ? AND LOWER(TRIM(staff_number)) = LOWER(?) AND (is_deleted = 0 OR is_deleted IS NULL)').get(schoolId, effectiveStaffNo);
     }
 
     if (existingStaffNo) {
-      return res.status(409).json({ error: 'DUPLICATE_STAFF_NUMBER', message: 'Staff number already exists in your school.' });
+      return res.status(409).json({ error: 'DUPLICATE_STAFF_NUMBER', message: 'Staff code already exists in your school.' });
+    }
+
+    // Link existing TEACHER/STAFF account in this school if email matches (never links ADMIN/BURSAR accounts)
+    let matchedUserId: string | null = null;
+    if (safeEmail) {
+      const matchedUserRow = pool
+        ? (
+            await queryPg(
+              `SELECT u.id FROM users u
+               JOIN user_roles ur ON ur.user_id = u.id
+               JOIN roles r ON ur.role_id = r.id
+               WHERE ur.school_id = $1 AND LOWER(u.email) = $2 AND r.name IN ('TEACHER', 'STAFF')
+               LIMIT 1`,
+              [schoolId, safeEmail]
+            )
+          ).rows[0]
+        : cacheDb
+            .prepare(
+              `SELECT u.id FROM users u
+               JOIN user_roles ur ON ur.user_id = u.id
+               JOIN roles r ON ur.role_id = r.id
+               WHERE ur.school_id = ? AND LOWER(u.email) = ? AND r.name IN ('TEACHER', 'STAFF')
+               LIMIT 1`
+            )
+            .get(schoolId, safeEmail) as any;
+      if (matchedUserRow?.id) matchedUserId = matchedUserRow.id;
     }
 
     const id = 'stf_' + crypto.randomUUID().slice(0, 8);
@@ -4607,12 +4641,13 @@ apiRouter.post(
     if (pool) {
       await queryPg(`
         INSERT INTO staff (
-          id, school_id, staff_number, first_name, middle_name, last_name, email, phone,
+          id, school_id, user_id, staff_number, first_name, middle_name, last_name, email, phone,
           gender, address, job_title, department, employment_status, date_joined, created_at, updated_at
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
       `, [
         id,
         schoolId,
+        matchedUserId,
         effectiveStaffNo,
         safeFirstName,
         safeMiddleName,
@@ -4630,10 +4665,11 @@ apiRouter.post(
 
     cacheDb.prepare(`
       INSERT INTO staff (
-        id, school_id, staff_number, first_name, middle_name, last_name, email, phone,
+        id, school_id, user_id, staff_number, first_name, middle_name, last_name, email, phone,
         gender, address, job_title, department, employment_status, date_joined, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
       ON CONFLICT(id) DO UPDATE SET
+        user_id = COALESCE(excluded.user_id, staff.user_id),
         staff_number = excluded.staff_number,
         first_name = excluded.first_name,
         middle_name = excluded.middle_name,
@@ -4650,6 +4686,7 @@ apiRouter.post(
     `).run(
       id,
       schoolId,
+      matchedUserId,
       effectiveStaffNo,
       safeFirstName,
       safeMiddleName,
@@ -4666,7 +4703,40 @@ apiRouter.post(
 
     const pgCreated = pool ? await queryPg('SELECT * FROM staff WHERE id = $1', [id]) : null;
     const created = pgCreated?.rows[0] || cacheDb.prepare('SELECT * FROM staff WHERE id = ?').get(id);
-    return res.status(201).json({ success: true, message: 'Staff member added successfully', staff: created });
+    return res.status(201).json({ success: true, message: `Staff member added with login code ${effectiveStaffNo}`, staff: created });
+  }
+);
+
+// POST /api/v1/school/staff/assign-missing-codes (Backfill unique Staff Codes for existing uncoded staff/teachers)
+apiRouter.post(
+  '/v1/school/staff/assign-missing-codes',
+  requireAuth,
+  requireTenant,
+  requireRole(ADMIN_ONLY_ROLES),
+  async (req: AuthenticatedRequest, res) => {
+    const schoolId = req.targetSchoolId!;
+    const result = await assignMissingStaffCodesForSchool(schoolId);
+    logAudit({
+      actorId: req.user!.id,
+      actorEmail: req.user!.email,
+      schoolId,
+      action: 'ASSIGN_MISSING_STAFF_CODES',
+      entity: 'STAFF',
+      ipAddress: req.ip || '127.0.0.1',
+      metadata: {
+        assignedCount: result.assignedCount,
+        createdProfilesCount: result.createdProfilesCount,
+        prefix: result.prefix,
+      },
+    });
+    return res.json({
+      success: true,
+      ...result,
+      message:
+        result.assignedCount > 0
+          ? `Assigned unique Staff Login Codes (${result.prefix}/STF/...) to ${result.assignedCount} staff record(s).`
+          : 'All active staff and teachers already have a unique Staff Login Code.',
+    });
   }
 );
 
@@ -5052,7 +5122,9 @@ apiRouter.get('/v1/school/users', requireAuth, requireTenant, requireRole(ADMIN_
              r.name as role_name, r.display_name as role_display_name,
              (SELECT p.id FROM parents p WHERE p.user_id = u.id AND p.school_id = $1 AND (p.is_deleted = 0 OR p.is_deleted IS NULL) LIMIT 1) as linked_parent_id,
              (SELECT s.id FROM students s WHERE s.user_id = u.id AND s.school_id = $1 AND (s.is_deleted = 0 OR s.is_deleted IS NULL) LIMIT 1) as linked_student_id,
-             (SELECT s.full_name FROM students s WHERE s.user_id = u.id AND s.school_id = $1 AND (s.is_deleted = 0 OR s.is_deleted IS NULL) LIMIT 1) as linked_student_name
+             (SELECT s.full_name FROM students s WHERE s.user_id = u.id AND s.school_id = $1 AND (s.is_deleted = 0 OR s.is_deleted IS NULL) LIMIT 1) as linked_student_name,
+             (SELECT st.id FROM staff st WHERE st.school_id = $1 AND (st.user_id = u.id OR (st.email IS NOT NULL AND TRIM(st.email) != '' AND LOWER(TRIM(st.email)) = LOWER(TRIM(u.email)))) AND (st.is_deleted = 0 OR st.is_deleted IS NULL) LIMIT 1) as linked_staff_id,
+             (SELECT st.staff_number FROM staff st WHERE st.school_id = $1 AND (st.user_id = u.id OR (st.email IS NOT NULL AND TRIM(st.email) != '' AND LOWER(TRIM(st.email)) = LOWER(TRIM(u.email)))) AND (st.is_deleted = 0 OR st.is_deleted IS NULL) LIMIT 1) as linked_staff_number
       FROM user_roles ur
       JOIN users u ON ur.user_id = u.id
       JOIN roles r ON ur.role_id = r.id
@@ -5069,13 +5141,15 @@ apiRouter.get('/v1/school/users', requireAuth, requireTenant, requireRole(ADMIN_
                r.name as role_name, r.display_name as role_display_name,
                (SELECT p.id FROM parents p WHERE p.user_id = u.id AND p.school_id = ? AND (p.is_deleted = 0 OR p.is_deleted IS NULL) LIMIT 1) as linked_parent_id,
                (SELECT s.id FROM students s WHERE s.user_id = u.id AND s.school_id = ? AND (s.is_deleted = 0 OR s.is_deleted IS NULL) LIMIT 1) as linked_student_id,
-               (SELECT s.full_name FROM students s WHERE s.user_id = u.id AND s.school_id = ? AND (s.is_deleted = 0 OR s.is_deleted IS NULL) LIMIT 1) as linked_student_name
+               (SELECT s.full_name FROM students s WHERE s.user_id = u.id AND s.school_id = ? AND (s.is_deleted = 0 OR s.is_deleted IS NULL) LIMIT 1) as linked_student_name,
+               (SELECT st.id FROM staff st WHERE st.school_id = ? AND (st.user_id = u.id OR (st.email IS NOT NULL AND TRIM(st.email) != '' AND LOWER(TRIM(st.email)) = LOWER(TRIM(u.email)))) AND (st.is_deleted = 0 OR st.is_deleted IS NULL) LIMIT 1) as linked_staff_id,
+               (SELECT st.staff_number FROM staff st WHERE st.school_id = ? AND (st.user_id = u.id OR (st.email IS NOT NULL AND TRIM(st.email) != '' AND LOWER(TRIM(st.email)) = LOWER(TRIM(u.email)))) AND (st.is_deleted = 0 OR st.is_deleted IS NULL) LIMIT 1) as linked_staff_number
         FROM user_roles ur
         JOIN users u ON ur.user_id = u.id
         JOIN roles r ON ur.role_id = r.id
         WHERE ur.school_id = ?
         ORDER BY u.created_at ASC
-      `).all(schoolId, schoolId, schoolId, schoolId);
+      `).all(schoolId, schoolId, schoolId, schoolId, schoolId, schoolId);
     }
 
     return res.json({ success: true, users });
@@ -5099,6 +5173,9 @@ apiRouter.post(
       phone = null,
       password,
       role_name,
+      staff_number = null,
+      job_title = null,
+      department = 'Academic',
       parent_id = null,
       create_parent_profile = false,
       student_ids = [],
@@ -5106,16 +5183,50 @@ apiRouter.post(
     } = req.body || {};
 
     const allowedRoles = ['SCHOOL_ADMIN', 'BURSAR', 'TEACHER', 'STAFF', 'PARENT', 'STUDENT'];
-    if (!email || !full_name || !role_name || !allowedRoles.includes(role_name)) {
+    const isStaffRole = role_name === 'TEACHER' || role_name === 'STAFF';
+    if (!full_name || !role_name || !allowedRoles.includes(role_name) || (!isStaffRole && !email)) {
       return res.status(400).json({
         error: 'INVALID_PAYLOAD',
-        message: 'Valid email, full_name, and role_name (SCHOOL_ADMIN, BURSAR, TEACHER, STAFF, PARENT, STUDENT) are required.',
+        message: isStaffRole
+          ? 'Staff full name and role_name are required.'
+          : 'Valid email, full_name, and role_name (SCHOOL_ADMIN, BURSAR, TEACHER, STAFF, PARENT, STUDENT) are required.',
       });
     }
 
-    const cleanEmail = String(email).trim().toLowerCase();
     const cleanName = String(full_name).trim();
     const pool = getPgPool();
+
+    // Generate or validate staff_number upfront for TEACHER / STAFF so every staff user gets a unique login code
+    let resolvedStaffCode: string | null = null;
+    if (isStaffRole) {
+      resolvedStaffCode =
+        staff_number && typeof staff_number === 'string' && staff_number.trim()
+          ? staff_number.trim()
+          : await generateNextStaffCode(schoolId);
+      const dupStaff = pool
+        ? (
+            await queryPg(
+              'SELECT id FROM staff WHERE school_id = $1 AND LOWER(TRIM(staff_number)) = LOWER($2) AND (is_deleted = 0 OR is_deleted IS NULL) LIMIT 1',
+              [schoolId, resolvedStaffCode]
+            )
+          ).rows[0]
+        : cacheDb
+            .prepare(
+              'SELECT id FROM staff WHERE school_id = ? AND LOWER(TRIM(staff_number)) = LOWER(?) AND (is_deleted = 0 OR is_deleted IS NULL) LIMIT 1'
+            )
+            .get(schoolId, resolvedStaffCode);
+      if (dupStaff) {
+        return res.status(409).json({
+          error: 'DUPLICATE_STAFF_NUMBER',
+          message: `Staff code "${resolvedStaffCode}" is already assigned in your school.`,
+        });
+      }
+    }
+
+    const cleanEmail =
+      email && String(email).trim()
+        ? String(email).trim().toLowerCase()
+        : `${String(resolvedStaffCode || 'staff').toLowerCase().replace(/[^a-z0-9]+/g, '.')}.${crypto.randomBytes(2).toString('hex')}@${schoolId.slice(-6)}.staff.bursariq.local`;
 
     // Verify role exists
     let roleRow: any = null;
@@ -5160,15 +5271,23 @@ apiRouter.post(
       }
       userId = existingUser.id;
     } else {
-      if (!password || String(password).length < 6) {
+      const hasPassword = Boolean(password && String(password).trim().length > 0);
+      if (!isStaffRole && (!hasPassword || String(password).length < 6)) {
         return res.status(400).json({
           error: 'WEAK_PASSWORD',
           message: 'New user accounts require a password of at least 6 characters.',
         });
       }
+      if (isStaffRole && hasPassword && String(password).length < 6) {
+        return res.status(400).json({
+          error: 'WEAK_PASSWORD',
+          message: 'Optional initial password must be at least 6 characters if provided.',
+        });
+      }
+      const effectivePassword = hasPassword ? String(password) : crypto.randomBytes(24).toString('hex');
       userId = 'usr_' + crypto.randomUUID().slice(0, 12);
       const salt = generateSalt();
-      const passwordHash = hashPassword(String(password), salt);
+      const passwordHash = hashPassword(effectivePassword, salt);
       temporaryPasswordUsed = true;
 
       if (pool) {
@@ -5290,6 +5409,84 @@ apiRouter.post(
       try { cacheDb.prepare('UPDATE students SET user_id = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND school_id = ?').run(userId, student_id, schoolId); } catch {}
     }
 
+    // Handle explicit Staff Directory profile creation / linking + unique Staff Code for TEACHER / STAFF
+    let linkedStaffId: string | null = null;
+    if (isStaffRole) {
+      const existingStaffRow = pool
+        ? (
+            await queryPg(
+              `SELECT id, staff_number FROM staff
+               WHERE school_id = $1 AND (user_id = $2 OR (email IS NOT NULL AND TRIM(email) != '' AND LOWER(TRIM(email)) = LOWER($3)))
+                 AND (is_deleted = 0 OR is_deleted IS NULL)
+               LIMIT 1`,
+              [schoolId, userId, cleanEmail]
+            )
+          ).rows[0]
+        : (cacheDb
+            .prepare(
+              `SELECT id, staff_number FROM staff
+               WHERE school_id = ? AND (user_id = ? OR (email IS NOT NULL AND TRIM(email) != '' AND LOWER(TRIM(email)) = LOWER(?)))
+                 AND (is_deleted = 0 OR is_deleted IS NULL)
+               LIMIT 1`
+            )
+            .get(schoolId, userId, cleanEmail) as any);
+
+      if (existingStaffRow) {
+        linkedStaffId = existingStaffRow.id;
+        resolvedStaffCode = existingStaffRow.staff_number && String(existingStaffRow.staff_number).trim()
+          ? String(existingStaffRow.staff_number).trim()
+          : resolvedStaffCode;
+        if (pool) {
+          await queryPg(
+            `UPDATE staff SET user_id = $1, staff_number = COALESCE(NULLIF(TRIM(staff_number), ''), $2), updated_at = CURRENT_TIMESTAMP
+             WHERE id = $3 AND school_id = $4`,
+            [userId, resolvedStaffCode, existingStaffRow.id, schoolId]
+          );
+        }
+        try {
+          cacheDb
+            .prepare(
+              `UPDATE staff SET user_id = ?, staff_number = COALESCE(NULLIF(TRIM(staff_number), ''), ?), updated_at = CURRENT_TIMESTAMP
+               WHERE id = ? AND school_id = ?`
+            )
+            .run(userId, resolvedStaffCode, existingStaffRow.id, schoolId);
+        } catch {}
+      } else {
+        linkedStaffId = 'stf_' + crypto.randomUUID().slice(0, 8);
+        const nameParts = cleanName.split(/\s+/);
+        const sFirst = nameParts[0] || cleanName;
+        const sLast = nameParts.slice(1).join(' ') || 'Staff';
+        const effectiveJobTitle =
+          job_title && typeof job_title === 'string' && job_title.trim()
+            ? job_title.trim()
+            : role_name === 'TEACHER'
+            ? 'Class Teacher'
+            : 'School Staff';
+        const effectiveDept = department && typeof department === 'string' && department.trim() ? department.trim() : 'Academic';
+        const staffEmailVal = email && String(email).trim() ? cleanEmail : null;
+
+        if (pool) {
+          await queryPg(
+            `INSERT INTO staff (
+              id, school_id, user_id, staff_number, first_name, middle_name, last_name,
+              email, phone, job_title, department, employment_status, date_joined, is_deleted, created_at, updated_at
+            ) VALUES ($1, $2, $3, $4, $5, '', $6, $7, $8, $9, $10, 'ACTIVE', CURRENT_DATE, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+            [linkedStaffId, schoolId, userId, resolvedStaffCode, sFirst, sLast, staffEmailVal, phone, effectiveJobTitle, effectiveDept]
+          );
+        }
+        try {
+          cacheDb
+            .prepare(
+              `INSERT INTO staff (
+                id, school_id, user_id, staff_number, first_name, middle_name, last_name,
+                email, phone, job_title, department, employment_status, date_joined, is_deleted, created_at, updated_at
+              ) VALUES (?, ?, ?, ?, ?, '', ?, ?, ?, ?, ?, 'ACTIVE', CURRENT_DATE, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`
+            )
+            .run(linkedStaffId, schoolId, userId, resolvedStaffCode, sFirst, sLast, staffEmailVal, phone, effectiveJobTitle, effectiveDept);
+        } catch {}
+      }
+    }
+
     logAudit({
       actorId: req.user!.id,
       actorEmail: req.user!.email,
@@ -5297,13 +5494,34 @@ apiRouter.post(
       action: 'PROVISION_PORTAL_USER',
       entity: 'USER',
       entityId: userId,
-      metadata: { email: cleanEmail, role_name, linkedParentId, student_id, student_ids, temporaryPasswordUsed },
+      metadata: {
+        email: cleanEmail,
+        role_name,
+        linkedParentId,
+        linkedStaffId,
+        linkedStaffCode: resolvedStaffCode,
+        student_id,
+        student_ids,
+        temporaryPasswordUsed,
+      },
     });
 
     return res.status(201).json({
       success: true,
-      message: `${roleRow.display_name} account provisioned successfully.`,
-      user: { id: userId, email: cleanEmail, full_name: cleanName, role_name, linked_parent_id: linkedParentId, linked_student_id: student_id },
+      issuedStaffNumber: resolvedStaffCode,
+      message: isStaffRole && resolvedStaffCode
+        ? `${roleRow.display_name} provisioned with unique Staff Code ${resolvedStaffCode}.`
+        : `${roleRow.display_name} account provisioned successfully.`,
+      user: {
+        id: userId,
+        email: cleanEmail,
+        full_name: cleanName,
+        role_name,
+        linked_parent_id: linkedParentId,
+        linked_student_id: student_id,
+        linked_staff_id: linkedStaffId,
+        linked_staff_number: resolvedStaffCode,
+      },
     });
   }
 );

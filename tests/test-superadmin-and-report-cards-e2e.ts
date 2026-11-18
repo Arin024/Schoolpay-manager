@@ -167,7 +167,14 @@ class CDPClient {
     );
     await this.fillInput('input[type="email"]', email);
     await this.fillInput('input[type="password"]', password);
-    await this.clickButtonByText('Sign In', true);
+    const submitted = await this.evaluate(`
+      const btn = document.querySelector('form button[type="submit"]');
+      if (!btn || btn.disabled) return false;
+      btn.scrollIntoView({ block: 'center' });
+      btn.click();
+      return true;
+    `);
+    assert.ok(submitted, 'Login submit button missing or disabled');
     await this.waitFor(
       () =>
         this.evaluate(`

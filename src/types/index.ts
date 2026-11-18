@@ -188,8 +188,8 @@ export interface StaffItem {
   first_name: string;
   middle_name?: string | null;
   last_name: string;
-  email: string;
-  phone: string;
+  email?: string | null;
+  phone?: string | null;
   gender?: string | null;
   address?: string | null;
   job_title: string;
@@ -1255,6 +1255,7 @@ export interface TeacherDashboardData {
   subjects: SubjectItem[];
   students: Student[];
   announcements: SchoolAnnouncementItem[];
+  recentAdmissionsInquiries?: SchoolAdmissionInquiry[];
   notifications: NotificationItem[];
   stats: {
     studentsCount?: number;
@@ -1268,6 +1269,7 @@ export interface TeacherDashboardData {
     attendanceLogsCount?: number;
     lessonNotesCount?: number;
     confidentialNoticesCount?: number;
+    newInquiriesCount?: number;
     unreadNotificationsCount?: number;
     teachersCanViewFees?: boolean;
   };

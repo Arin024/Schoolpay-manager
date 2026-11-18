@@ -24,6 +24,9 @@ import {
   Send,
   Check,
   CheckCircle2,
+  Copy,
+  KeyRound,
+  UserPlus,
 } from 'lucide-react';
 import { api } from '../../services/api.js';
 import { useAuth } from '../../context/AuthContext.js';
@@ -32,6 +35,7 @@ import {
   InvoiceDef,
   PaymentItem,
   ReportCardItem,
+  SchoolAdmissionInquiry,
   SchoolCalendarEvent,
   StaffRequestItem,
   Student,
@@ -83,8 +87,10 @@ export const TeacherPortalView: React.FC = () => {
   const [reportGenError, setReportGenError] = useState<string | null>(null);
   const [viewingRc, setViewingRc] = useState<ReportCardItem | null>(null);
 
-  // Staff-only workspace modules (Confidential Briefings, Timetable & Events, Staff Requests)
+  // Staff-only workspace modules (Confidential Briefings, Admissions Notices, Timetable & Events, Staff Requests)
   const [confidentialNotices, setConfidentialNotices] = useState<ConfidentialNoticeItem[]>([]);
+  const [admissionsInquiries, setAdmissionsInquiries] = useState<SchoolAdmissionInquiry[]>([]);
+  const [copiedStaffCode, setCopiedStaffCode] = useState(false);
   const [timetableSlots, setTimetableSlots] = useState<TimetableSlotItem[]>([]);
   const [staffEvents, setStaffEvents] = useState<SchoolCalendarEvent[]>([]);
   const [staffRequests, setStaffRequests] = useState<StaffRequestItem[]>([]);
@@ -105,6 +111,9 @@ export const TeacherPortalView: React.FC = () => {
     try {
       const res = await api.getTeacherDashboard();
       setDashboard(res);
+      if (res.recentAdmissionsInquiries) {
+        setAdmissionsInquiries(res.recentAdmissionsInquiries);
+      }
       const sessList = res.sessions || [];
       const activeSess = sessList.find((s) => s.status === 'ACTIVE') || sessList[0];
       const activeTerm = activeSess?.terms?.find((t) => t.status === 'ACTIVE') || activeSess?.terms?.[0];
@@ -188,6 +197,10 @@ export const TeacherPortalView: React.FC = () => {
         .getConfidentialStaffNotices()
         .then((res) => setConfidentialNotices(res.notices || []))
         .catch(() => setConfidentialNotices([]));
+      api
+        .getStaffWorkspaceAdmissionsInquiries()
+        .then((res) => setAdmissionsInquiries(res.inquiries || []))
+        .catch(() => {});
     }
     if (tab === 'timetable') {
       setStaffWorkspaceLoading(true);
@@ -245,7 +258,14 @@ export const TeacherPortalView: React.FC = () => {
     }
   };
 
+  const handleCopyStaffCode = (code: string) => {
+    navigator.clipboard.writeText(code);
+    setCopiedStaffCode(true);
+    setTimeout(() => setCopiedStaffCode(false), 2000);
+  };
+
   const unreadConfidentialCount = confidentialNotices.filter((n) => !n.is_acknowledged && !n.my_read_at).length;
+  const newInquiriesCount = dashboard?.stats?.newInquiriesCount ?? admissionsInquiries.filter((i) => i.status === 'NEW').length;
 
   const navItems: Array<{
     key: TeacherTab;
@@ -305,13 +325,31 @@ export const TeacherPortalView: React.FC = () => {
           <div>
             <h2 className="text-base font-bold text-slate-900">Dedicated Staff Workspace</h2>
             <p className="text-xs text-slate-500 mt-0.5">
-              Private staff portal for NERDC lesson notes, confidential administrative circulars, teaching schedules, and staff requests. Strictly isolated from parent and student portals.
+              Private staff portal for NERDC lesson notes, confidential administrative circulars, prospective admissions notices, teaching schedules, and staff requests. Strictly isolated from parent and student portals.
             </p>
           </div>
-          <span className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-slate-900 text-white text-xs font-semibold shrink-0">
-            <Lock className="w-3.5 h-3.5 text-emerald-400" />
-            <span>Staff-Only Isolation</span>
-          </span>
+          <div className="flex flex-wrap items-center gap-2 shrink-0">
+            {teacherStaff?.staff_number && (
+              <button
+                type="button"
+                onClick={() => handleCopyStaffCode(teacherStaff.staff_number!)}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-emerald-50 border border-emerald-200 text-emerald-900 text-xs font-mono font-bold cursor-pointer hover:bg-emerald-100 transition"
+                title="Copy your unique Staff Login Code"
+              >
+                <KeyRound className="w-3.5 h-3.5 text-emerald-700" />
+                <span>{teacherStaff.staff_number}</span>
+                {copiedStaffCode ? (
+                  <Check className="w-3.5 h-3.5 text-emerald-700" />
+                ) : (
+                  <Copy className="w-3.5 h-3.5 text-emerald-600" />
+                )}
+              </button>
+            )}
+            <span className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-slate-900 text-white text-xs font-semibold shrink-0">
+              <Lock className="w-3.5 h-3.5 text-emerald-400" />
+              <span>Staff-Only Isolation</span>
+            </span>
+          </div>
         </div>
 
         <div className="flex flex-wrap items-center gap-1.5 pt-2 border-t border-slate-100">
@@ -407,14 +445,16 @@ export const TeacherPortalView: React.FC = () => {
             </button>
             <button
               type="button"
-              onClick={() => setTab('performance')}
-              className="bg-white rounded-2xl border border-slate-200 p-4 text-left hover:border-slate-300 transition cursor-pointer"
+              onClick={() => setTab('confidential')}
+              className="bg-white rounded-2xl border border-blue-200 p-4 text-left hover:border-blue-300 transition cursor-pointer"
             >
-              <p className="text-xs text-slate-500">Published Exams</p>
-              <p className="text-2xl font-bold text-emerald-700 mt-1 tabular-nums">
-                {dashboard.stats.publishedExamsCount}
+              <p className="text-xs text-blue-700 font-semibold">Admissions Inquiries</p>
+              <p className="text-2xl font-bold text-slate-900 mt-1 tabular-nums">
+                {admissionsInquiries.length}
               </p>
-              <p className="text-[11px] text-slate-400 mt-0.5">Report &amp; score access</p>
+              <p className="text-[11px] text-slate-500 mt-0.5 tabular-nums">
+                {newInquiriesCount > 0 ? `${newInquiriesCount} new inquiry notice(s)` : 'Prospective student forms'}
+              </p>
             </button>
           </div>
 
@@ -481,6 +521,45 @@ export const TeacherPortalView: React.FC = () => {
                 </div>
               )}
             </div>
+          </div>
+
+          {/* Prospective Student Admissions Inquiry Notices */}
+          <div className="bg-white rounded-2xl border border-slate-200 p-5 space-y-3 text-xs">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <h3 className="text-sm font-bold text-slate-900 flex items-center gap-2">
+                <UserPlus className="w-4 h-4 text-blue-600" />
+                <span>Prospective Student Applications &amp; Admissions Notices ({admissionsInquiries.length})</span>
+              </h3>
+              <button
+                type="button"
+                onClick={() => setTab('confidential')}
+                className="text-xs font-semibold text-emerald-700 hover:text-emerald-800 cursor-pointer"
+              >
+                View all notices
+              </button>
+            </div>
+            {admissionsInquiries.length === 0 ? (
+              <p className="py-4 text-slate-400">
+                No prospective student inquiry forms submitted on your public school website yet.
+              </p>
+            ) : (
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                {admissionsInquiries.slice(0, 4).map((inq) => (
+                  <div key={inq.id} className="p-3.5 rounded-xl border border-slate-200 bg-slate-50/70 space-y-1">
+                    <div className="flex items-center justify-between gap-2">
+                      <p className="font-bold text-slate-900">
+                        {inq.student_name} {inq.target_class ? `(${inq.target_class})` : ''}
+                      </p>
+                      <span className="text-[11px] font-bold text-blue-700">{inq.status}</span>
+                    </div>
+                    <p className="text-[11px] text-slate-600">
+                      Parent: {inq.parent_name} · {inq.parent_phone}
+                    </p>
+                    {inq.message && <p className="text-slate-600 line-clamp-2">{inq.message}</p>}
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
         </div>
       )}
@@ -652,83 +731,123 @@ export const TeacherPortalView: React.FC = () => {
 
       {/* CONFIDENTIAL STAFF NOTICES */}
       {tab === 'confidential' && (
-        <div className="bg-white rounded-2xl border border-slate-200 p-6 space-y-4 text-xs">
-          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pb-3 border-b border-slate-100">
-            <div>
-              <h3 className="text-sm font-bold text-slate-900 flex items-center gap-2">
-                <ShieldAlert className="w-4 h-4 text-rose-600" />
-                <span>Confidential Staff Briefings ({confidentialNotices.length})</span>
-              </h3>
-              <p className="text-slate-500 mt-0.5">
-                Internal administrative memos meant strictly for teaching &amp; school staff. Never visible to Parents, Students, or Public visitors.
-              </p>
+        <div className="space-y-6 text-xs">
+          <div className="bg-white rounded-2xl border border-slate-200 p-6 space-y-4">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pb-3 border-b border-slate-100">
+              <div>
+                <h3 className="text-sm font-bold text-slate-900 flex items-center gap-2">
+                  <ShieldAlert className="w-4 h-4 text-rose-600" />
+                  <span>Confidential Staff Briefings ({confidentialNotices.length})</span>
+                </h3>
+                <p className="text-slate-500 mt-0.5">
+                  Internal administrative memos meant strictly for teaching &amp; school staff. Never visible to Parents, Students, or Public visitors.
+                </p>
+              </div>
             </div>
+
+            {staffFeedback && (
+              <div
+                className={`p-3 rounded-xl border flex items-center justify-between ${
+                  staffFeedback.type === 'ok'
+                    ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
+                    : 'bg-rose-50 border-rose-200 text-rose-800'
+                }`}
+              >
+                <span className="flex items-center gap-1.5 font-medium">
+                  <CheckCircle2 className="w-4 h-4" />
+                  <span>{staffFeedback.text}</span>
+                </span>
+                <button type="button" onClick={() => setStaffFeedback(null)} className="cursor-pointer">
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+            )}
+
+            {confidentialNotices.length === 0 ? (
+              <p className="py-10 text-center text-slate-400">No confidential staff circulars issued yet.</p>
+            ) : (
+              <div className="divide-y divide-slate-100">
+                {confidentialNotices.map((notice) => {
+                  const isAcked = Boolean(notice.is_acknowledged || notice.my_read_at);
+                  return (
+                    <div key={notice.id} className="py-4 first:pt-0 last:pb-0 flex flex-col sm:flex-row sm:items-start justify-between gap-4">
+                      <div className="space-y-1">
+                        <div className="flex flex-wrap items-center gap-2 text-[11px]">
+                          <span className="font-bold text-rose-700">Confidential Staff Only</span>
+                          <span aria-hidden="true">·</span>
+                          <span className="text-slate-500">Priority: {notice.priority}</span>
+                          <span aria-hidden="true">·</span>
+                          <span className="font-mono text-slate-500 tabular-nums">
+                            {notice.published_at || notice.created_at
+                              ? new Date(notice.published_at || notice.created_at || '').toLocaleDateString()
+                              : ''}
+                          </span>
+                        </div>
+                        <h4 className="text-sm font-bold text-slate-900">{notice.title}</h4>
+                        <p className="text-slate-700 whitespace-pre-line leading-relaxed">{notice.content}</p>
+                      </div>
+
+                      <div className="shrink-0">
+                        {isAcked ? (
+                          <span className="inline-flex items-center gap-1.5 text-emerald-700 font-semibold">
+                            <Check className="w-3.5 h-3.5" />
+                            <span>Acknowledged</span>
+                          </span>
+                        ) : (
+                          <button
+                            type="button"
+                            onClick={() => handleAcknowledgeConfidential(notice.id)}
+                            className="px-3.5 py-2 bg-slate-900 hover:bg-slate-800 text-white rounded-xl font-bold inline-flex items-center gap-1.5 cursor-pointer whitespace-nowrap"
+                          >
+                            <Check className="w-3.5 h-3.5 text-emerald-400" />
+                            <span>Acknowledge Receipt</span>
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
           </div>
 
-          {staffFeedback && (
-            <div
-              className={`p-3 rounded-xl border flex items-center justify-between ${
-                staffFeedback.type === 'ok'
-                  ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
-                  : 'bg-rose-50 border-rose-200 text-rose-800'
-              }`}
-            >
-              <span className="flex items-center gap-1.5 font-medium">
-                <CheckCircle2 className="w-4 h-4" />
-                <span>{staffFeedback.text}</span>
-              </span>
-              <button type="button" onClick={() => setStaffFeedback(null)} className="cursor-pointer">
-                <X className="w-4 h-4" />
-              </button>
+          <div className="bg-white rounded-2xl border border-slate-200 p-6 space-y-4">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pb-3 border-b border-slate-100">
+              <div>
+                <h3 className="text-sm font-bold text-slate-900 flex items-center gap-2">
+                  <UserPlus className="w-4 h-4 text-blue-600" />
+                  <span>Prospective Student Admissions Notices ({admissionsInquiries.length})</span>
+                </h3>
+                <p className="text-slate-500 mt-0.5">
+                  Prospective family forms submitted through your school&apos;s public website. Strictly visible to School Admin &amp; Staff only.
+                </p>
+              </div>
             </div>
-          )}
-
-          {confidentialNotices.length === 0 ? (
-            <p className="py-10 text-center text-slate-400">No confidential staff circulars issued yet.</p>
-          ) : (
-            <div className="divide-y divide-slate-100">
-              {confidentialNotices.map((notice) => {
-                const isAcked = Boolean(notice.is_acknowledged || notice.my_read_at);
-                return (
-                  <div key={notice.id} className="py-4 first:pt-0 last:pb-0 flex flex-col sm:flex-row sm:items-start justify-between gap-4">
-                    <div className="space-y-1">
-                      <div className="flex flex-wrap items-center gap-2 text-[11px]">
-                        <span className="font-bold text-rose-700">Confidential Staff Only</span>
-                        <span aria-hidden="true">·</span>
-                        <span className="text-slate-500">Priority: {notice.priority}</span>
-                        <span aria-hidden="true">·</span>
-                        <span className="font-mono text-slate-500 tabular-nums">
-                          {notice.published_at || notice.created_at
-                            ? new Date(notice.published_at || notice.created_at || '').toLocaleDateString()
-                            : ''}
-                        </span>
-                      </div>
-                      <h4 className="text-sm font-bold text-slate-900">{notice.title}</h4>
-                      <p className="text-slate-700 whitespace-pre-line leading-relaxed">{notice.content}</p>
+            {admissionsInquiries.length === 0 ? (
+              <p className="py-8 text-center text-slate-400">No prospective student admissions inquiries submitted yet.</p>
+            ) : (
+              <div className="divide-y divide-slate-100">
+                {admissionsInquiries.map((inq) => (
+                  <div key={inq.id} className="py-3.5 first:pt-0 last:pb-0 space-y-1">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <p className="font-bold text-slate-900 text-sm">
+                        {inq.student_name} {inq.target_class ? `— Applying for ${inq.target_class}` : ''}
+                      </p>
+                      <span className="font-semibold text-blue-700">Status: {inq.status}</span>
                     </div>
-
-                    <div className="shrink-0">
-                      {isAcked ? (
-                        <span className="inline-flex items-center gap-1.5 text-emerald-700 font-semibold">
-                          <Check className="w-3.5 h-3.5" />
-                          <span>Acknowledged</span>
-                        </span>
-                      ) : (
-                        <button
-                          type="button"
-                          onClick={() => handleAcknowledgeConfidential(notice.id)}
-                          className="px-3.5 py-2 bg-slate-900 hover:bg-slate-800 text-white rounded-xl font-bold inline-flex items-center gap-1.5 cursor-pointer whitespace-nowrap"
-                        >
-                          <Check className="w-3.5 h-3.5 text-emerald-400" />
-                          <span>Acknowledge Receipt</span>
-                        </button>
-                      )}
-                    </div>
+                    <p className="text-slate-600">
+                      Guardian: <strong>{inq.parent_name}</strong> · Phone: <span className="font-mono">{inq.parent_phone}</span>
+                      {inq.parent_email ? ` · Email: ${inq.parent_email}` : ''}
+                    </p>
+                    {inq.message && <p className="text-slate-700">{inq.message}</p>}
+                    <p className="text-[11px] text-slate-400 font-mono tabular-nums">
+                      Submitted: {inq.created_at ? new Date(inq.created_at).toLocaleString() : '—'}
+                    </p>
                   </div>
-                );
-              })}
-            </div>
-          )}
+                ))}
+              </div>
+            )}
+          </div>
         </div>
       )}
 
@@ -985,9 +1104,21 @@ export const TeacherPortalView: React.FC = () => {
                 <Briefcase className="w-3.5 h-3.5 text-emerald-600" />
                 <span>{teacherStaff?.job_title || 'Classroom Educator'}</span>
               </p>
-              <p className="text-slate-600">
-                Staff No: <span className="font-mono">{teacherStaff?.staff_number || 'Unlinked'}</span>
-              </p>
+              <div className="flex flex-wrap items-center justify-between gap-2 text-slate-600">
+                <span>
+                  Staff Login Code: <span className="font-mono font-bold text-slate-900">{teacherStaff?.staff_number || 'Pending'}</span>
+                </span>
+                {teacherStaff?.staff_number && (
+                  <button
+                    type="button"
+                    onClick={() => handleCopyStaffCode(teacherStaff.staff_number!)}
+                    className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-white border border-slate-300 text-slate-700 hover:bg-slate-100 font-semibold cursor-pointer"
+                  >
+                    {copiedStaffCode ? <Check className="w-3 h-3 text-emerald-600" /> : <Copy className="w-3 h-3" />}
+                    <span>{copiedStaffCode ? 'Copied' : 'Copy Code'}</span>
+                  </button>
+                )}
+              </div>
               <p className="text-slate-600">Department: {teacherStaff?.department || 'Academics'}</p>
               <p className="text-slate-600">
                 Assigned Arms: <strong className="tabular-nums">{dashboard.assignedClasses.length}</strong>

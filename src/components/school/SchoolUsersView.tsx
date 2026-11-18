@@ -46,12 +46,16 @@ export const SchoolUsersView: React.FC = () => {
     email: '',
     phone: '',
     password: '',
+    staff_number: '',
+    job_title: 'Classroom Educator',
+    department: 'Academics',
     role_name: 'TEACHER' as 'SCHOOL_ADMIN' | 'BURSAR' | 'TEACHER' | 'STAFF' | 'PARENT' | 'STUDENT',
     parent_id: '',
     create_parent_profile: false,
     student_ids: [] as string[],
     student_id: '',
   });
+  const [copiedUserStaffCode, setCopiedUserStaffCode] = useState<string | null>(null);
 
   // Revoke & Status Toggle Modal State
   const [userToRevoke, setUserToRevoke] = useState<any | null>(null);
@@ -138,14 +142,20 @@ export const SchoolUsersView: React.FC = () => {
     e.preventDefault();
     setProvisionSaving(true);
     setProvisionError(null);
+    const isStaffPortalRole = provForm.role_name === 'TEACHER' || provForm.role_name === 'STAFF';
     try {
       const payload: any = {
-        email: provForm.email.trim(),
+        email: provForm.email.trim() || undefined,
         full_name: provForm.full_name.trim(),
         phone: provForm.phone.trim() || undefined,
-        password: provForm.password,
+        password: provForm.password || undefined,
         role_name: provForm.role_name,
       };
+      if (isStaffPortalRole) {
+        if (provForm.staff_number.trim()) payload.staff_number = provForm.staff_number.trim();
+        if (provForm.job_title.trim()) payload.job_title = provForm.job_title.trim();
+        if (provForm.department.trim()) payload.department = provForm.department.trim();
+      }
       if (provForm.role_name === 'PARENT') {
         if (provForm.create_parent_profile) {
           payload.create_parent_profile = true;
@@ -167,13 +177,19 @@ export const SchoolUsersView: React.FC = () => {
       }
 
       const res = await api.provisionPortalUser(payload);
-      setProvisionSuccess(res.message || 'Portal account provisioned successfully.');
+      const staffCodeNotice = res.issuedStaffNumber
+        ? ` Issued Staff Login Code: ${res.issuedStaffNumber}`
+        : '';
+      setProvisionSuccess((res.message || 'Portal account provisioned successfully.') + staffCodeNotice);
       setIsProvisionOpen(false);
       setProvForm({
         full_name: '',
         email: '',
         phone: '',
         password: '',
+        staff_number: '',
+        job_title: 'Classroom Educator',
+        department: 'Academics',
         role_name: 'TEACHER',
         parent_id: '',
         create_parent_profile: false,
@@ -392,6 +408,29 @@ export const SchoolUsersView: React.FC = () => {
                       <div>
                         <RoleBadge role={u.role_name} />
                       </div>
+                      {u.linked_staff_number && (
+                        <div className="flex items-center gap-1.5 pt-0.5">
+                          <span className="font-mono text-[11px] font-bold text-indigo-800 bg-indigo-50 border border-indigo-200 px-1.5 py-0.5 rounded">
+                            Staff Code: {u.linked_staff_number}
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              navigator.clipboard.writeText(u.linked_staff_number);
+                              setCopiedUserStaffCode(u.id);
+                              setTimeout(() => setCopiedUserStaffCode(null), 2000);
+                            }}
+                            className="p-0.5 text-slate-400 hover:text-indigo-700 cursor-pointer"
+                            title="Copy Staff Login Code"
+                          >
+                            {copiedUserStaffCode === u.id ? (
+                              <Check className="w-3 h-3 text-emerald-600" />
+                            ) : (
+                              <Copy className="w-3 h-3" />
+                            )}
+                          </button>
+                        </div>
+                      )}
                       {u.linked_student_name && (
                         <p className="text-[11px] text-slate-600 flex items-center gap-1">
                           <GraduationCap className="w-3 h-3 text-emerald-600" />
@@ -526,13 +565,19 @@ export const SchoolUsersView: React.FC = () => {
 
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
-                  <label className="block font-semibold text-slate-700 mb-1">Login Email *</label>
+                  <label className="block font-semibold text-slate-700 mb-1">
+                    Login Email {provForm.role_name === 'TEACHER' || provForm.role_name === 'STAFF' ? '(Optional for Staff Code)' : '*'}
+                  </label>
                   <input
                     type="email"
-                    required
+                    required={provForm.role_name !== 'TEACHER' && provForm.role_name !== 'STAFF'}
                     value={provForm.email}
                     onChange={(e) => setProvForm({ ...provForm, email: e.target.value })}
-                    placeholder="user@school.edu.ng"
+                    placeholder={
+                      provForm.role_name === 'TEACHER' || provForm.role_name === 'STAFF'
+                        ? 'Optional (Staff Code works without email)'
+                        : 'user@school.edu.ng'
+                    }
                     className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl"
                   />
                 </div>
@@ -548,17 +593,58 @@ export const SchoolUsersView: React.FC = () => {
                 </div>
               </div>
 
+              {(provForm.role_name === 'TEACHER' || provForm.role_name === 'STAFF') && (
+                <div className="p-3.5 rounded-xl bg-indigo-50/70 border border-indigo-200 space-y-3">
+                  <p className="font-bold text-indigo-950">Unique Staff Login Code &amp; Role Profile</p>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <div>
+                      <label className="block font-semibold text-slate-700 mb-1">
+                        Staff Login Code <span className="text-slate-400 font-normal">(Auto-issued if blank)</span>
+                      </label>
+                      <input
+                        type="text"
+                        value={provForm.staff_number}
+                        onChange={(e) => setProvForm({ ...provForm, staff_number: e.target.value })}
+                        placeholder="e.g. BMC/STF/2026/0001"
+                        className="w-full px-3 py-2 bg-white border border-slate-300 rounded-xl font-mono"
+                      />
+                    </div>
+                    <div>
+                      <label className="block font-semibold text-slate-700 mb-1">Job Title</label>
+                      <input
+                        type="text"
+                        value={provForm.job_title}
+                        onChange={(e) => setProvForm({ ...provForm, job_title: e.target.value })}
+                        placeholder={provForm.role_name === 'STAFF' ? 'e.g. Lab Attendant / Librarian' : 'e.g. Biology Teacher'}
+                        className="w-full px-3 py-2 bg-white border border-slate-300 rounded-xl"
+                      />
+                    </div>
+                  </div>
+                </div>
+              )}
+
               <div>
                 <label className="block font-semibold text-slate-700 mb-1">
-                  Initial Password * <span className="font-normal text-slate-400">(Min 8 chars; required for new accounts)</span>
+                  Initial Password{' '}
+                  {provForm.role_name === 'TEACHER' || provForm.role_name === 'STAFF' ? (
+                    <span className="font-normal text-slate-400">(Optional — Staff sign in using their Staff Login Code)</span>
+                  ) : (
+                    <>
+                      * <span className="font-normal text-slate-400">(Min 8 chars; required for Admin/Bursar)</span>
+                    </>
+                  )}
                 </label>
                 <input
                   type="password"
-                  required
-                  minLength={8}
+                  required={provForm.role_name !== 'TEACHER' && provForm.role_name !== 'STAFF'}
+                  minLength={provForm.password ? 8 : undefined}
                   value={provForm.password}
                   onChange={(e) => setProvForm({ ...provForm, password: e.target.value })}
-                  placeholder="••••••••"
+                  placeholder={
+                    provForm.role_name === 'TEACHER' || provForm.role_name === 'STAFF'
+                      ? 'Optional password'
+                      : '••••••••'
+                  }
                   className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl"
                 />
               </div>

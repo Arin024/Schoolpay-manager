@@ -286,11 +286,11 @@ export const PublicSchoolWebsite: React.FC<PublicSchoolWebsiteProps> = ({
     lightboxIndex !== null && filteredGallery[lightboxIndex] ? filteredGallery[lightboxIndex] : null;
 
   return (
-    <div className="space-y-12 pb-10">
-      {/* Three-Zone Single-Line School Website Bar */}
+    <div className="space-y-8 sm:space-y-12 pb-10 min-w-0">
+      {/* Three-Zone Responsive School Website Bar */}
       <nav
         aria-label="School website navigation"
-        className="bg-white rounded-2xl border border-slate-200 px-5 py-3.5 flex items-center justify-between gap-8"
+        className="bg-white rounded-2xl border border-slate-200 px-3 sm:px-5 py-3 flex items-center justify-between gap-2 sm:gap-6 min-w-0"
       >
         <a
           href={`#portal/${school.slug}`}
@@ -298,12 +298,12 @@ export const PublicSchoolWebsite: React.FC<PublicSchoolWebsiteProps> = ({
             e.preventDefault();
             window.scrollTo({ top: 0, behavior: 'smooth' });
           }}
-          className="text-base sm:text-lg font-extrabold text-slate-900 tracking-tight whitespace-nowrap shrink-0 truncate max-w-[240px] sm:max-w-[300px]"
+          className="text-sm sm:text-lg font-extrabold text-slate-900 tracking-tight truncate min-w-0 flex-1"
         >
           {school.name}
         </a>
 
-        <div className="hidden lg:flex items-center gap-6 text-xs font-semibold text-slate-600">
+        <div className="hidden lg:flex items-center gap-6 text-xs font-semibold text-slate-600 shrink-0">
           <button
             type="button"
             onClick={() => scrollToSection('school-about')}
@@ -341,11 +341,18 @@ export const PublicSchoolWebsite: React.FC<PublicSchoolWebsiteProps> = ({
           </button>
         </div>
 
-        <div className="flex items-center gap-3 shrink-0">
+        <div className="flex items-center gap-1.5 sm:gap-2.5 shrink-0">
+          <button
+            type="button"
+            onClick={() => scrollToSection('school-admissions')}
+            className="px-2.5 sm:px-3.5 py-1.5 sm:py-2 text-[11px] sm:text-xs font-bold text-slate-800 bg-slate-100 hover:bg-slate-200 border border-slate-200 rounded-xl transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+          >
+            Apply / Inquiry
+          </button>
           <button
             type="button"
             onClick={onClearPortal}
-            className={`px-4 py-2 text-xs font-bold text-white ${theme.buttonBg} ${theme.buttonHover} rounded-xl transition-colors whitespace-nowrap shrink-0 cursor-pointer`}
+            className={`px-2.5 sm:px-4 py-1.5 sm:py-2 text-[11px] sm:text-xs font-bold text-white ${theme.buttonBg} ${theme.buttonHover} rounded-xl transition-colors whitespace-nowrap shrink-0 cursor-pointer`}
           >
             All Schools
           </button>
@@ -353,9 +360,9 @@ export const PublicSchoolWebsite: React.FC<PublicSchoolWebsiteProps> = ({
       </nav>
 
       {/* Hero Split Banner: School Website Showcase (Left) + Embedded Official School Portal Login (Right) */}
-      <section className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-stretch">
+      <section className="grid grid-cols-1 lg:grid-cols-12 gap-5 sm:gap-6 items-stretch min-w-0">
         <div
-          className={`lg:col-span-7 bg-gradient-to-br ${theme.heroBg} text-white rounded-3xl border ${theme.heroBorder} overflow-hidden flex flex-col justify-between shadow-sm`}
+          className={`lg:col-span-7 min-w-0 bg-gradient-to-br ${theme.heroBg} text-white rounded-3xl border ${theme.heroBorder} overflow-hidden flex flex-col justify-between shadow-sm`}
         >
           {website.hero_image_url ? (
             <div className="relative h-56 sm:h-64 w-full overflow-hidden">
@@ -421,37 +428,47 @@ export const PublicSchoolWebsite: React.FC<PublicSchoolWebsiteProps> = ({
             </div>
           )}
 
-          <div className="p-6 sm:p-8 space-y-6 flex-1 flex flex-col justify-between">
-            <div className="space-y-3">
-              <p className="text-xs font-medium text-emerald-300">
+          <div className="p-4 sm:p-8 space-y-5 sm:space-y-6 flex-1 flex flex-col justify-between min-w-0">
+            <div className="space-y-3 min-w-0">
+              <p className="text-xs font-medium text-emerald-300 break-words">
                 Official School Website · Session {settings?.current_academic_session || '2025/2026'} ({settings?.current_term || '1st Term'})
               </p>
               <h1
-                className="text-2xl sm:text-4xl font-black tracking-tight text-white leading-tight"
+                className="text-2xl sm:text-4xl font-black tracking-tight text-white leading-tight break-words"
                 style={{ textWrap: 'balance' }}
               >
                 {website.hero_title || `Welcome to ${school.name}`}
               </h1>
-              <p className="text-sm text-slate-200 leading-relaxed max-w-2xl">
+              <p className="text-sm text-slate-200 leading-relaxed max-w-2xl break-words">
                 {website.hero_subtitle ||
                   website.about_body ||
                   `Official digital campus, academic portal, news updates, and admissions gateway for ${school.name}.`}
               </p>
+              <div className="pt-1 flex flex-wrap items-center gap-2.5">
+                <button
+                  type="button"
+                  onClick={() => scrollToSection('school-admissions')}
+                  className={`px-4 py-2 text-xs font-bold text-white ${theme.buttonBg} ${theme.buttonHover} rounded-xl transition-colors inline-flex items-center gap-1.5 cursor-pointer shadow-sm`}
+                >
+                  <GraduationCap className="w-4 h-4" />
+                  <span>Prospective Student Admissions Form</span>
+                </button>
+              </div>
             </div>
 
             {/* Shareable School Subdomain & Link Box */}
-            <div className="rounded-2xl bg-white/10 border border-white/15 p-4 space-y-2.5 text-xs">
-              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
-                <div className="min-w-0">
+            <div className="rounded-2xl bg-white/10 border border-white/15 p-3.5 sm:p-4 space-y-3 text-xs min-w-0">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 min-w-0">
+                <div className="min-w-0 flex-1">
                   <p className="text-[11px] font-semibold text-slate-300 flex items-center gap-1.5">
                     <Globe className="w-3.5 h-3.5 text-emerald-300 shrink-0" />
                     <span>Official Shareable School Subdomain</span>
                   </p>
-                  <p className="font-mono text-white font-semibold truncate select-all mt-0.5">
+                  <p className="font-mono text-white font-semibold break-all sm:truncate select-all mt-0.5 text-[11px] sm:text-xs">
                     {shareableSubdomainUrl}
                   </p>
                 </div>
-                <div className="flex items-center gap-2 shrink-0">
+                <div className="flex flex-wrap items-center gap-2 shrink-0">
                   <button
                     type="button"
                     onClick={() => handleCopy('subdomain', shareableSubdomainUrl)}
@@ -497,7 +514,7 @@ export const PublicSchoolWebsite: React.FC<PublicSchoolWebsiteProps> = ({
         </div>
 
         {/* Right Column: Official School Portal Login Card */}
-        <div className="lg:col-span-5 flex flex-col justify-start">
+        <div className="lg:col-span-5 min-w-0 flex flex-col justify-start">
           <LoginForm
             onSwitchToRegister={onNavigateRegister}
             onForgotPassword={onForgotPassword || (() => {})}
@@ -512,8 +529,8 @@ export const PublicSchoolWebsite: React.FC<PublicSchoolWebsiteProps> = ({
       </section>
 
       {/* About, Vision, Mission & Principal's Welcome */}
-      <section id="school-about" className="scroll-mt-24 grid grid-cols-1 lg:grid-cols-12 gap-6">
-        <div className="lg:col-span-7 bg-white rounded-2xl border border-slate-200 p-6 sm:p-8 space-y-6">
+      <section id="school-about" className="scroll-mt-24 grid grid-cols-1 lg:grid-cols-12 gap-6 min-w-0">
+        <div className="lg:col-span-7 min-w-0 bg-white rounded-2xl border border-slate-200 p-5 sm:p-8 space-y-6">
           <div className="space-y-2">
             <p className={`text-xs font-bold ${theme.accentText}`}>About Our School</p>
             <h2 className="text-2xl font-bold text-slate-900 tracking-tight">
@@ -557,21 +574,21 @@ export const PublicSchoolWebsite: React.FC<PublicSchoolWebsiteProps> = ({
             </div>
           )}
 
-          <div className="pt-5 border-t border-slate-100 flex flex-wrap items-center gap-5 text-xs text-slate-600">
+          <div className="pt-5 border-t border-slate-100 flex flex-wrap items-center gap-x-5 gap-y-2 text-xs text-slate-600 min-w-0">
             {school.address && (
-              <span className="inline-flex items-center gap-1.5">
+              <span className="inline-flex items-center gap-1.5 min-w-0 break-words">
                 <MapPin className={`w-4 h-4 ${theme.accentText} shrink-0`} />
                 <span>{school.address}</span>
               </span>
             )}
             {school.phone && (
-              <a href={`tel:${school.phone}`} className="inline-flex items-center gap-1.5 hover:text-slate-900">
+              <a href={`tel:${school.phone}`} className="inline-flex items-center gap-1.5 hover:text-slate-900 break-all">
                 <Phone className={`w-4 h-4 ${theme.accentText} shrink-0`} />
                 <span>{school.phone}</span>
               </a>
             )}
             {school.email && (
-              <a href={`mailto:${school.email}`} className="inline-flex items-center gap-1.5 hover:text-slate-900">
+              <a href={`mailto:${school.email}`} className="inline-flex items-center gap-1.5 hover:text-slate-900 break-all">
                 <Mail className={`w-4 h-4 ${theme.accentText} shrink-0`} />
                 <span>{school.email}</span>
               </a>
@@ -580,7 +597,7 @@ export const PublicSchoolWebsite: React.FC<PublicSchoolWebsiteProps> = ({
         </div>
 
         {/* Principal's Welcome Card */}
-        <div className="lg:col-span-5 bg-white rounded-2xl border border-slate-200 p-6 sm:p-8 flex flex-col justify-between space-y-5">
+        <div className="lg:col-span-5 min-w-0 bg-white rounded-2xl border border-slate-200 p-5 sm:p-8 flex flex-col justify-between space-y-5">
           <div className="space-y-4">
             <div className="flex items-center gap-4">
               {website.principal_photo_url ? (
@@ -595,11 +612,11 @@ export const PublicSchoolWebsite: React.FC<PublicSchoolWebsiteProps> = ({
                   {(website.principal_name || school.name).charAt(0)}
                 </div>
               )}
-              <div>
+              <div className="min-w-0">
                 <p className={`text-xs font-semibold ${theme.accentText}`}>
                   {website.principal_title || 'Principal / Head of School'}
                 </p>
-                <h3 className="text-base font-bold text-slate-900">
+                <h3 className="text-base font-bold text-slate-900 break-words">
                   {website.principal_name || 'Office of the Principal'}
                 </h3>
               </div>
@@ -636,7 +653,7 @@ export const PublicSchoolWebsite: React.FC<PublicSchoolWebsiteProps> = ({
           </div>
 
           {categories.length > 1 && (
-            <div className="flex items-center gap-1 p-1 bg-slate-100 rounded-xl self-start">
+            <div className="flex flex-wrap items-center gap-1 p-1 bg-slate-100 rounded-xl self-start max-w-full">
               {categories.map((cat) => (
                 <button
                   key={cat}
@@ -782,9 +799,9 @@ export const PublicSchoolWebsite: React.FC<PublicSchoolWebsiteProps> = ({
       </section>
 
       {/* Upcoming School Calendar & Prospective Admissions Inquiry */}
-      <section className="grid grid-cols-1 lg:grid-cols-12 gap-6">
+      <section className="grid grid-cols-1 lg:grid-cols-12 gap-6 min-w-0">
         {/* Public Calendar Events */}
-        <div id="school-calendar" className="scroll-mt-24 lg:col-span-5 bg-white rounded-2xl border border-slate-200 p-6 sm:p-7 space-y-5">
+        <div id="school-calendar" className="scroll-mt-24 lg:col-span-5 min-w-0 bg-white rounded-2xl border border-slate-200 p-5 sm:p-7 space-y-5">
           <div>
             <p className={`text-xs font-bold ${theme.accentText}`}>Upcoming Dates</p>
             <h2 className="text-xl font-bold text-slate-900 tracking-tight">School Events Calendar</h2>
@@ -799,7 +816,7 @@ export const PublicSchoolWebsite: React.FC<PublicSchoolWebsiteProps> = ({
             <div className="divide-y divide-slate-100">
               {events.map((ev) => (
                 <div key={ev.id} className="py-3.5 first:pt-0 last:pb-0 space-y-1 text-xs">
-                  <div className="flex items-center gap-2 text-slate-500 font-mono tabular-nums">
+                  <div className="flex flex-wrap items-center gap-2 text-slate-500 font-mono tabular-nums">
                     <span>{ev.event_date}</span>
                     {ev.location && (
                       <>
@@ -817,13 +834,13 @@ export const PublicSchoolWebsite: React.FC<PublicSchoolWebsiteProps> = ({
         </div>
 
         {/* Prospective Admissions Inquiry Form */}
-        <div id="school-admissions" className="scroll-mt-24 lg:col-span-7 bg-white rounded-2xl border border-slate-200 p-6 sm:p-7 space-y-5">
+        <div id="school-admissions" className="scroll-mt-24 lg:col-span-7 min-w-0 bg-white rounded-2xl border border-slate-200 p-5 sm:p-7 space-y-5">
           <div className="space-y-1">
             <p className={`text-xs font-bold ${theme.accentText}`}>Admissions &amp; Parent Inquiries</p>
-            <h2 className="text-xl font-bold text-slate-900 tracking-tight">Request Admission Information</h2>
+            <h2 className="text-xl font-bold text-slate-900 tracking-tight">Prospective Student Application &amp; Inquiry Form</h2>
             <p className="text-xs text-slate-600">
               {website.admissions_summary ||
-                `Prospective parents interested in enrolling a ward into ${school.name} can submit an inquiry directly to our Admissions Office.`}
+                `Prospective parents interested in enrolling a child into ${school.name} can fill this form. Submissions appear directly on the School Admin & Staff notices desk.`}
             </p>
           </div>
 

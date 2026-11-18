@@ -1582,3 +1582,505 @@ publicPortalRouter.post('/portal/admission-login', async (req, res) => {
     });
   }
 });
+
+/**
+ * POST /api/v1/public/portal/staff-code-login
+ * Passwordless unique Staff Code login strictly for Staff Workspace roles (TEACHER & STAFF).
+ * Strictly enforces role separation:
+ *   - NEVER allows signing into SUPER_ADMIN, SCHOOL_OWNER, SCHOOL_ADMIN, BURSAR, PARENT, or STUDENT accounts.
+ *   - School Admins / Owners / Bursars must sign in via the Admin tab with Email + Password.
+ */
+publicPortalRouter.post('/portal/staff-code-login', async (req, res) => {
+  if (!enforcePublicRateLimit(req, res)) return;
+
+  try {
+    const { staff_code, school_id, school_slug } = req.body || {};
+    const cleanCode = String(staff_code || '').trim();
+
+    if (!cleanCode) {
+      return res.status(400).json({
+        error: 'MISSING_STAFF_CODE',
+        message: 'Please enter the unique Staff Login Code issued by your school administrator.',
+      });
+    }
+
+    const pool = getPgPool();
+    const schoolFilterInput = String(school_slug || school_id || '').trim();
+    let scopedSchool: any = null;
+    if (schoolFilterInput) {
+      scopedSchool = await findActiveSchoolBySlugOrId(schoolFilterInput);
+      if (!scopedSchool || ['CANCELLED', 'SUSPENDED'].includes(String(scopedSchool.status || '').toUpperCase())) {
+        return res.status(404).json({
+          error: 'SCHOOL_NOT_FOUND',
+          message: 'Selected school portal was not found or is inactive.',
+        });
+      }
+    }
+
+    let matchedRows: any[] = [];
+    if (pool) {
+      try {
+        const sql = scopedSchool
+          ? `SELECT st.*, sc.name AS school_name, sc.slug AS school_slug, sc.type AS school_type, sc.status AS school_status,
+                    sc.state AS school_state, sc.lga AS school_lga, sc.address AS school_address,
+                    sc.phone AS school_phone, sc.email AS school_email, sc.website AS school_website, sc.logo_url AS school_logo_url
+             FROM staff st
+             JOIN schools sc ON st.school_id = sc.id
+             WHERE st.school_id = $1
+               AND LOWER(TRIM(st.staff_number)) = LOWER($2)
+               AND (st.is_deleted = 0 OR st.is_deleted IS NULL)
+               AND (sc.is_deleted = 0 OR sc.is_deleted IS NULL)
+               AND UPPER(COALESCE(sc.status, 'TRIAL')) NOT IN ('CANCELLED', 'SUSPENDED')
+             LIMIT 10`
+          : `SELECT st.*, sc.name AS school_name, sc.slug AS school_slug, sc.type AS school_type, sc.status AS school_status,
+                    sc.state AS school_state, sc.lga AS school_lga, sc.address AS school_address,
+                    sc.phone AS school_phone, sc.email AS school_email, sc.website AS school_website, sc.logo_url AS school_logo_url
+             FROM staff st
+             JOIN schools sc ON st.school_id = sc.id
+             WHERE LOWER(TRIM(st.staff_number)) = LOWER($1)
+               AND (st.is_deleted = 0 OR st.is_deleted IS NULL)
+               AND (sc.is_deleted = 0 OR sc.is_deleted IS NULL)
+               AND UPPER(COALESCE(sc.status, 'TRIAL')) NOT IN ('CANCELLED', 'SUSPENDED')
+             LIMIT 10`;
+        const pgRes = await queryPg(sql, scopedSchool ? [scopedSchool.id, cleanCode] : [cleanCode]);
+        matchedRows = pgRes.rows;
+      } catch (err: any) {
+        console.warn('[Staff Code Login PG Query Notice]', err?.message);
+      }
+    }
+
+    if (matchedRows.length === 0) {
+      const sqSql = scopedSchool
+        ? `SELECT st.*, sc.name AS school_name, sc.slug AS school_slug, sc.type AS school_type, sc.status AS school_status,
+                  sc.state AS school_state, sc.lga AS school_lga, sc.address AS school_address,
+                  sc.phone AS school_phone, sc.email AS school_email, sc.website AS school_website, sc.logo_url AS school_logo_url
+           FROM staff st
+           JOIN schools sc ON st.school_id = sc.id
+           WHERE st.school_id = ?
+             AND LOWER(TRIM(st.staff_number)) = LOWER(?)
+             AND (st.is_deleted = 0 OR st.is_deleted IS NULL)
+             AND UPPER(COALESCE(sc.status, 'TRIAL')) NOT IN ('CANCELLED', 'SUSPENDED')
+           LIMIT 10`
+        : `SELECT st.*, sc.name AS school_name, sc.slug AS school_slug, sc.type AS school_type, sc.status AS school_status,
+                  sc.state AS school_state, sc.lga AS school_lga, sc.address AS school_address,
+                  sc.phone AS school_phone, sc.email AS school_email, sc.website AS school_website, sc.logo_url AS school_logo_url
+           FROM staff st
+           JOIN schools sc ON st.school_id = sc.id
+           WHERE LOWER(TRIM(st.staff_number)) = LOWER(?)
+             AND (st.is_deleted = 0 OR st.is_deleted IS NULL)
+             AND UPPER(COALESCE(sc.status, 'TRIAL')) NOT IN ('CANCELLED', 'SUSPENDED')
+           LIMIT 10`;
+      matchedRows = cacheDb.prepare(sqSql).all(...(scopedSchool ? [scopedSchool.id, cleanCode] : [cleanCode])) as any[];
+    }
+
+    if (matchedRows.length === 0) {
+      return res.status(401).json({
+        error: 'STAFF_CODE_NOT_FOUND',
+        message: scopedSchool
+          ? `No active staff member with code "${cleanCode}" was found at ${scopedSchool.name}.`
+          : `No active staff record matched Staff Code "${cleanCode}". Verify your code with your school administrator.`,
+      });
+    }
+
+    const distinctSchoolsMap = new Map<string, any>();
+    for (const r of matchedRows) {
+      if (!distinctSchoolsMap.has(r.school_id)) {
+        distinctSchoolsMap.set(r.school_id, r);
+      }
+    }
+
+    if (distinctSchoolsMap.size > 1 && !scopedSchool) {
+      return res.status(409).json({
+        error: 'AMBIGUOUS_STAFF_CODE',
+        message: 'Multiple schools share this staff code. Please select your school below to sign in.',
+        schools: Array.from(distinctSchoolsMap.values()).map((r) => ({
+          id: r.school_id,
+          name: r.school_name,
+          slug: r.school_slug,
+          type: r.school_type,
+          status: r.school_status,
+          state: r.school_state,
+          lga: r.school_lga,
+        })),
+      });
+    }
+
+    const st = matchedRows[0];
+    const targetSchoolId = String(st.school_id);
+    const school = scopedSchool || {
+      id: targetSchoolId,
+      name: st.school_name,
+      slug: st.school_slug,
+      type: st.school_type,
+      status: st.school_status,
+      state: st.school_state,
+      lga: st.school_lga,
+      address: st.school_address,
+      phone: st.school_phone,
+      email: st.email || st.school_email,
+      website: st.school_website,
+      logo_url: st.school_logo_url,
+    };
+
+    const empStatus = String(st.employment_status || 'ACTIVE').toUpperCase();
+    if (empStatus !== 'ACTIVE') {
+      return res.status(403).json({
+        error: 'STAFF_PORTAL_SUSPENDED',
+        message: `Staff portal access is unavailable because this staff record is marked ${empStatus}. Contact your school administrator.`,
+      });
+    }
+
+    try {
+      cacheDb
+        .prepare(
+          `INSERT INTO schools (id, name, slug, type, status, state, lga, address, phone, email, website, logo_url)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT(id) DO UPDATE SET name = excluded.name, slug = excluded.slug, status = excluded.status`
+        )
+        .run(
+          school.id,
+          school.name || 'School',
+          school.slug || targetSchoolId,
+          school.type || 'Secondary',
+          school.status || 'TRIAL',
+          school.state || '',
+          school.lga || '',
+          school.address || null,
+          school.phone || null,
+          st.school_email || null,
+          school.website || null,
+          school.logo_url || null
+        );
+    } catch {}
+
+    const ADMIN_OR_NON_STAFF_ROLES = ['SUPER_ADMIN', 'SCHOOL_OWNER', 'SCHOOL_ADMIN', 'BURSAR', 'PARENT', 'STUDENT'];
+    const ALLOWED_STAFF_ROLES = ['TEACHER', 'STAFF'];
+
+    async function inspectCandidateUser(userId: string): Promise<{
+      user: any;
+      roles: any[];
+      blocked?: { status: number; error: string; message: string };
+    }> {
+      let u: any = null;
+      let uRoles: any[] = [];
+      if (pool) {
+        try {
+          u = (await queryPg('SELECT * FROM users WHERE id = $1 LIMIT 1', [userId])).rows[0] || null;
+          if (u) {
+            uRoles = (
+              await queryPg(
+                `SELECT ur.*, r.name AS role_name FROM user_roles ur JOIN roles r ON ur.role_id = r.id WHERE ur.user_id = $1`,
+                [userId]
+              )
+            ).rows;
+          }
+        } catch {}
+      }
+      if (!u) {
+        u = cacheDb.prepare('SELECT * FROM users WHERE id = ? LIMIT 1').get(userId) as any;
+        if (u) {
+          uRoles = cacheDb
+            .prepare(`SELECT ur.*, r.name AS role_name FROM user_roles ur JOIN roles r ON ur.role_id = r.id WHERE ur.user_id = ?`)
+            .all(userId) as any[];
+        }
+      }
+      if (!u) return { user: null, roles: [] };
+      const schoolScopedRoles = uRoles.filter((r) => String(r.school_id || '') === targetSchoolId);
+      const hasDisallowedRole =
+        Number(u.is_platform_admin) === 1 ||
+        schoolScopedRoles.some((r) => ADMIN_OR_NON_STAFF_ROLES.includes(String(r.role_name || '').toUpperCase())) ||
+        uRoles.some((r) => ['SUPER_ADMIN'].includes(String(r.role_name || '').toUpperCase()));
+
+      if (hasDisallowedRole) {
+        return {
+          user: u,
+          roles: uRoles,
+          blocked: {
+            status: 403,
+            error: 'ADMIN_PASSWORD_REQUIRED',
+            message:
+              'Staff Login Codes are strictly for Teaching & Non-Teaching Staff portals. School Administrators, Owners, and Bursars must sign in under the Admin tab with Email and Password.',
+          },
+        };
+      }
+      if (Number(u.is_active) === 0) {
+        return {
+          user: u,
+          roles: uRoles,
+          blocked: {
+            status: 403,
+            error: 'ACCOUNT_DEACTIVATED',
+            message: 'This staff portal account has been deactivated by your school administrator.',
+          },
+        };
+      }
+      return { user: u, roles: uRoles };
+    }
+
+    let portalUser: any = null;
+    let targetRoleName: 'TEACHER' | 'STAFF' = 'TEACHER';
+
+    if (st.user_id) {
+      const checked = await inspectCandidateUser(st.user_id);
+      if (checked.blocked) {
+        return res.status(checked.blocked.status).json({ error: checked.blocked.error, message: checked.blocked.message });
+      }
+      if (checked.user) {
+        portalUser = checked.user;
+        const staffRoleMatch = checked.roles.find(
+          (r) => String(r.school_id || '') === targetSchoolId && ALLOWED_STAFF_ROLES.includes(String(r.role_name || '').toUpperCase())
+        );
+        if (staffRoleMatch?.role_name === 'STAFF') targetRoleName = 'STAFF';
+      }
+    }
+
+    // Fallback: match existing active user by staff email within this school
+    if (!portalUser && st.email && String(st.email).trim()) {
+      const cleanStaffEmail = String(st.email).trim().toLowerCase();
+      let candidateByEmail: any = null;
+      if (pool) {
+        try {
+          candidateByEmail = (await queryPg('SELECT id FROM users WHERE LOWER(email) = $1 LIMIT 1', [cleanStaffEmail])).rows[0] || null;
+        } catch {}
+      }
+      if (!candidateByEmail) {
+        candidateByEmail = cacheDb.prepare('SELECT id FROM users WHERE LOWER(email) = ? LIMIT 1').get(cleanStaffEmail) as any;
+      }
+      if (candidateByEmail) {
+        const checked = await inspectCandidateUser(candidateByEmail.id);
+        if (checked.blocked) {
+          return res.status(checked.blocked.status).json({ error: checked.blocked.error, message: checked.blocked.message });
+        }
+        if (checked.user) {
+          portalUser = checked.user;
+          const staffRoleMatch = checked.roles.find(
+            (r) => String(r.school_id || '') === targetSchoolId && ALLOWED_STAFF_ROLES.includes(String(r.role_name || '').toUpperCase())
+          );
+          if (staffRoleMatch?.role_name === 'STAFF') targetRoleName = 'STAFF';
+          if (pool) {
+            await queryPg('UPDATE staff SET user_id = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2 AND school_id = $3', [
+              portalUser.id,
+              st.id,
+              targetSchoolId,
+            ]);
+          }
+          try {
+            cacheDb
+              .prepare('UPDATE staff SET user_id = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND school_id = ?')
+              .run(portalUser.id, st.id, targetSchoolId);
+          } catch {}
+        }
+      }
+    }
+
+    // If staff record exists without a portal user yet, auto-bind a strict TEACHER portal user
+    if (!portalUser) {
+      const codeToken = makeSafeSlugToken(st.staff_number, st.id);
+      const schoolSlugToken = makeSafeSlugToken(school.slug, targetSchoolId.slice(-6));
+      const fullName = [st.first_name, st.middle_name, st.last_name].filter(Boolean).join(' ').trim() || 'Staff Member';
+      const userEmail =
+        st.email && String(st.email).trim()
+          ? String(st.email).trim().toLowerCase()
+          : `staff.${codeToken}.${crypto.randomBytes(2).toString('hex')}@${schoolSlugToken}.staff.bursariq.local`;
+
+      const jobLower = String(st.job_title || '').toLowerCase();
+      targetRoleName =
+        jobLower.includes('teacher') || jobLower.includes('educator') || jobLower.includes('lecturer') || !jobLower
+          ? 'TEACHER'
+          : 'STAFF';
+      const targetRoleId = targetRoleName === 'STAFF' ? 'role_staff' : 'role_teacher';
+
+      const newUserId = 'usr_' + crypto.randomUUID().slice(0, 12);
+      const salt = generateSalt();
+      const passwordHash = hashPassword(crypto.randomBytes(24).toString('hex'), salt);
+
+      if (pool) {
+        await queryPg(
+          `INSERT INTO users (id, email, password_hash, salt, full_name, phone, is_platform_admin, is_active, created_at, updated_at)
+           VALUES ($1, $2, $3, $4, $5, $6, 0, 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+          [newUserId, userEmail, passwordHash, salt, fullName, st.phone || null]
+        );
+        await queryPg(
+          `INSERT INTO user_roles (id, user_id, school_id, role_id, is_primary, created_at)
+           VALUES ($1, $2, $3, $4, 1, CURRENT_TIMESTAMP)
+           ON CONFLICT (user_id, school_id, role_id) DO NOTHING`,
+          ['ur_' + crypto.randomUUID().slice(0, 12), newUserId, targetSchoolId, targetRoleId]
+        );
+        await queryPg('UPDATE staff SET user_id = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2 AND school_id = $3', [
+          newUserId,
+          st.id,
+          targetSchoolId,
+        ]);
+      }
+
+      try {
+        cacheDb
+          .prepare(
+            `INSERT INTO users (id, email, password_hash, salt, full_name, phone, is_platform_admin, is_active, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, 0, 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+             ON CONFLICT(id) DO UPDATE SET full_name = excluded.full_name`
+          )
+          .run(newUserId, userEmail, passwordHash, salt, fullName, st.phone || null);
+        cacheDb
+          .prepare(
+            `INSERT INTO user_roles (id, user_id, school_id, role_id, is_primary, created_at)
+             VALUES (?, ?, ?, ?, 1, CURRENT_TIMESTAMP)
+             ON CONFLICT(user_id, school_id, role_id) DO NOTHING`
+          )
+          .run('ur_' + crypto.randomUUID().slice(0, 12), newUserId, targetSchoolId, targetRoleId);
+        cacheDb
+          .prepare('UPDATE staff SET user_id = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND school_id = ?')
+          .run(newUserId, st.id, targetSchoolId);
+      } catch {}
+
+      portalUser = {
+        id: newUserId,
+        email: userEmail,
+        password_hash: passwordHash,
+        salt,
+        full_name: fullName,
+        phone: st.phone || null,
+        is_platform_admin: 0,
+        is_active: 1,
+      };
+    } else {
+      const targetRoleId = targetRoleName === 'STAFF' ? 'role_staff' : 'role_teacher';
+      if (pool) {
+        try {
+          await queryPg(
+            `INSERT INTO user_roles (id, user_id, school_id, role_id, is_primary, created_at)
+             VALUES ($1, $2, $3, $4, 1, CURRENT_TIMESTAMP)
+             ON CONFLICT (user_id, school_id, role_id) DO NOTHING`,
+            ['ur_' + crypto.randomUUID().slice(0, 12), portalUser.id, targetSchoolId, targetRoleId]
+          );
+        } catch {}
+      }
+      try {
+        cacheDb
+          .prepare(
+            `INSERT INTO users (id, email, password_hash, salt, full_name, phone, is_platform_admin, is_active, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, 0, 1, CURRENT_TIMESTAMP)
+             ON CONFLICT(id) DO UPDATE SET full_name = excluded.full_name, phone = excluded.phone, is_active = excluded.is_active`
+          )
+          .run(
+            portalUser.id,
+            portalUser.email,
+            portalUser.password_hash || 'locked',
+            portalUser.salt || 'locked',
+            portalUser.full_name,
+            portalUser.phone || null
+          );
+        cacheDb
+          .prepare(
+            `INSERT INTO user_roles (id, user_id, school_id, role_id, is_primary, created_at)
+             VALUES (?, ?, ?, ?, 1, CURRENT_TIMESTAMP)
+             ON CONFLICT(user_id, school_id, role_id) DO NOTHING`
+          )
+          .run('ur_' + crypto.randomUUID().slice(0, 12), portalUser.id, targetSchoolId, targetRoleId);
+      } catch {}
+    }
+
+    const clientIp = req.ip || (req.headers['x-forwarded-for'] as string) || '127.0.0.1';
+    const token = await createSessionAsync(portalUser.id, targetSchoolId, clientIp, req.headers['user-agent']);
+
+    let roles: any[] = [];
+    if (pool) {
+      try {
+        roles = (
+          await queryPg(
+            `SELECT ur.*, r.name AS role_name, r.display_name AS role_display_name, r.scope AS role_scope,
+                    s.name AS school_name, s.status AS school_status, s.slug AS school_slug
+             FROM user_roles ur
+             JOIN roles r ON ur.role_id = r.id
+             LEFT JOIN schools s ON ur.school_id = s.id
+             WHERE ur.user_id = $1`,
+            [portalUser.id]
+          )
+        ).rows;
+      } catch {}
+    }
+    if (roles.length === 0) {
+      roles = cacheDb
+        .prepare(
+          `SELECT ur.*, r.name AS role_name, r.display_name AS role_display_name, r.scope AS role_scope,
+                  s.name AS school_name, s.status AS school_status, s.slug AS school_slug
+           FROM user_roles ur
+           JOIN roles r ON ur.role_id = r.id
+           LEFT JOIN schools s ON ur.school_id = s.id
+           WHERE ur.user_id = ?`
+        )
+        .all(portalUser.id) as any[];
+    }
+
+    const activeRole =
+      roles.find((r) => r.school_id === targetSchoolId && ALLOWED_STAFF_ROLES.includes(String(r.role_name || '').toUpperCase())) ||
+      roles.find((r) => r.school_id === targetSchoolId) ||
+      roles[0] ||
+      null;
+
+    let activeSettings: any = null;
+    if (pool) {
+      try {
+        activeSettings =
+          (await queryPg('SELECT * FROM school_settings WHERE school_id = $1 LIMIT 1', [targetSchoolId])).rows[0] || null;
+      } catch {}
+    }
+    if (!activeSettings) {
+      activeSettings = cacheDb.prepare('SELECT * FROM school_settings WHERE school_id = ? LIMIT 1').get(targetSchoolId) || null;
+    }
+
+    logAudit({
+      actorId: portalUser.id,
+      actorEmail: portalUser.email,
+      schoolId: targetSchoolId,
+      action: 'STAFF_CODE_LOGIN',
+      entity: 'STAFF',
+      entityId: st.id,
+      ipAddress: clientIp,
+      metadata: { staffCode: st.staff_number, schoolSlug: school.slug, roleName: activeRole?.role_name || targetRoleName },
+    });
+
+    return res.json({
+      success: true,
+      token,
+      user: {
+        id: portalUser.id,
+        email: portalUser.email,
+        full_name: portalUser.full_name,
+        phone: portalUser.phone,
+        is_platform_admin: 0,
+        is_active: 1,
+      },
+      roles,
+      activeSchoolId: targetSchoolId,
+      activeRole,
+      activeSchool: {
+        id: school.id,
+        name: school.name,
+        slug: school.slug,
+        type: school.type,
+        status: school.status,
+        state: school.state,
+        lga: school.lga,
+        address: school.address,
+        phone: school.phone,
+        email: st.school_email || school.email,
+        website: school.website,
+        logo_url: school.logo_url,
+      },
+      activeSettings,
+      staffProfile: {
+        id: st.id,
+        staff_number: st.staff_number,
+        job_title: st.job_title,
+        department: st.department,
+      },
+    });
+  } catch (err: any) {
+    console.error('[Staff Code Login Error]', err);
+    return res.status(500).json({
+      error: 'STAFF_LOGIN_FAILED',
+      message: safeClientError(err, 'Unable to sign in with that Staff Login Code. Please try again.'),
+    });
+  }
+});

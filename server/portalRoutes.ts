@@ -1259,17 +1259,35 @@ portalRouter.get(
       fetchPersonalNotifications(schoolId, userId),
     ]);
 
-    const staff = await dbGet(
-      `SELECT id, staff_number, first_name, middle_name, last_name, email, phone, gender, job_title, department, employment_status, date_joined
-       FROM staff
-       WHERE school_id = $1 AND LOWER(COALESCE(email, '')) = $2 AND (is_deleted = 0 OR is_deleted IS NULL)
-       LIMIT 1`,
-      `SELECT id, staff_number, first_name, middle_name, last_name, email, phone, gender, job_title, department, employment_status, date_joined
-       FROM staff
-       WHERE school_id = ? AND LOWER(COALESCE(email, '')) = ? AND (is_deleted = 0 OR is_deleted IS NULL)
-       LIMIT 1`,
-      [schoolId, userEmail]
-    );
+    const staff = userEmail
+      ? await dbGet(
+          `SELECT id, user_id, staff_number, first_name, middle_name, last_name, email, phone, gender, job_title, department, employment_status, date_joined
+           FROM staff
+           WHERE school_id = $1
+             AND (user_id = $2 OR LOWER(COALESCE(email, '')) = $3)
+             AND (is_deleted = 0 OR is_deleted IS NULL)
+           ORDER BY CASE WHEN user_id IS NOT NULL THEN 0 ELSE 1 END
+           LIMIT 1`,
+          `SELECT id, user_id, staff_number, first_name, middle_name, last_name, email, phone, gender, job_title, department, employment_status, date_joined
+           FROM staff
+           WHERE school_id = ?
+             AND (user_id = ? OR LOWER(COALESCE(email, '')) = ?)
+             AND (is_deleted = 0 OR is_deleted IS NULL)
+           ORDER BY CASE WHEN user_id IS NOT NULL THEN 0 ELSE 1 END
+           LIMIT 1`,
+          [schoolId, userId, userEmail]
+        )
+      : await dbGet(
+          `SELECT id, user_id, staff_number, first_name, middle_name, last_name, email, phone, gender, job_title, department, employment_status, date_joined
+           FROM staff
+           WHERE school_id = $1 AND user_id = $2 AND (is_deleted = 0 OR is_deleted IS NULL)
+           LIMIT 1`,
+          `SELECT id, user_id, staff_number, first_name, middle_name, last_name, email, phone, gender, job_title, department, employment_status, date_joined
+           FROM staff
+           WHERE school_id = ? AND user_id = ? AND (is_deleted = 0 OR is_deleted IS NULL)
+           LIMIT 1`,
+          [schoolId, userId]
+        );
 
     let assignedArms: any[] = [];
     if (staff?.id) {
@@ -1379,6 +1397,18 @@ portalRouter.get(
       ),
     ]);
 
+    const recentAdmissionsInquiries = await dbAll(
+      `SELECT id, school_id, student_name, target_class, parent_name, parent_phone, parent_email, message, status, created_at
+       FROM school_admission_inquiries
+       WHERE school_id = $1
+       ORDER BY created_at DESC LIMIT 8`,
+      `SELECT id, school_id, student_name, target_class, parent_name, parent_phone, parent_email, message, status, created_at
+       FROM school_admission_inquiries
+       WHERE school_id = ?
+       ORDER BY created_at DESC LIMIT 8`,
+      [schoolId]
+    );
+
     return res.json({
       success: true,
       school,
@@ -1401,6 +1431,7 @@ portalRouter.get(
       students,
       announcements,
       notifications,
+      recentAdmissionsInquiries,
       stats: {
         assignedClassesCount: assignedArms.length,
         authorizedStudentsCount: students.length,
@@ -1411,6 +1442,7 @@ portalRouter.get(
         confidentialNoticesCount: announcements.filter(
           (a) => a.audience === 'STAFF_ONLY' || a.audience === 'TEACHERS' || Number(a.is_confidential) === 1
         ).length,
+        newInquiriesCount: recentAdmissionsInquiries.filter((i: any) => i.status === 'NEW').length,
         unreadNotificationsCount: notifications.filter((n) => !n.read_at).length,
       },
     });

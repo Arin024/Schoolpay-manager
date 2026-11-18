@@ -359,12 +359,45 @@ publicWebsiteRouter.post('/schools/:slug/inquiries', async (req, res) => {
     [id, school.id, studentName, targetClass, parentName, parentPhone, parentEmail, message]
   );
 
-  notificationService.notifySchoolAdmins(
+  // Publish an internal STAFF_ONLY notice so prospective admissions inquiries appear immediately on both Admin & Staff Notices
+  const noticeId = newId('ann');
+  const noticeTitle = `New Prospective Student Inquiry: ${studentName}${targetClass ? ` (${targetClass})` : ''}`;
+  const noticeBody = [
+    `A prospective family submitted an online admissions inquiry via your school website:`,
+    `• Prospective Student: ${studentName}`,
+    `• Target Class / Level: ${targetClass || 'General Inquiry'}`,
+    `• Parent / Guardian: ${parentName}`,
+    `• Phone / WhatsApp: ${parentPhone}`,
+    parentEmail ? `• Email: ${parentEmail}` : null,
+    message ? `• Notes: ${message}` : null,
+    `• Reference: ${id.toUpperCase()}`,
+  ]
+    .filter(Boolean)
+    .join('\n');
+
+  try {
+    await execWrite(
+      `INSERT INTO school_announcements (
+        id, school_id, title, content, audience, priority, is_confidential, is_published, published_at, created_by_name, is_deleted
+      ) VALUES ($1, $2, $3, $4, 'STAFF_ONLY', 'IMPORTANT', 1, 1, CURRENT_TIMESTAMP, 'Admissions Inquiry Desk', 0)`,
+      `INSERT INTO school_announcements (
+        id, school_id, title, content, audience, priority, is_confidential, is_published, published_at, created_by_name, is_deleted
+      ) VALUES (?, ?, ?, ?, 'STAFF_ONLY', 'IMPORTANT', 1, 1, CURRENT_TIMESTAMP, 'Admissions Inquiry Desk', 0)`,
+      [noticeId, school.id, noticeTitle, noticeBody]
+    );
+  } catch (noticeErr: any) {
+    console.warn('[Inquiry Notice Persistence Warning]', noticeErr?.message);
+  }
+
+  // Notify BOTH School Admins (Owners/Principals/Admins) AND Teaching/School Staff (strictly excluding Parents & Students)
+  notificationService.notifyAnnouncementAudience(
     school.id,
-    'SYSTEM',
+    'STAFF_ONLY',
+    null,
     `New Admission Inquiry: ${studentName}`,
     `${parentName} (${parentPhone}) submitted an admission inquiry${targetClass ? ` for ${targetClass}` : ''}.`,
-    { inquiryId: id, studentName, targetClass }
+    { inquiryId: id, noticeId, studentName, targetClass },
+    true
   );
 
   return res.status(201).json({
@@ -380,7 +413,8 @@ publicWebsiteRouter.post('/schools/:slug/inquiries', async (req, res) => {
       message,
       status: 'NEW',
     },
-    message: `Thank you! Your admission inquiry has been sent to ${school.name}. Reference: ${id.toUpperCase()}`,
+    noticeId,
+    message: `Thank you! Your admission inquiry has been sent to ${school.name} Administration & Admissions Staff. Reference: ${id.toUpperCase()}`,
   });
 });
 

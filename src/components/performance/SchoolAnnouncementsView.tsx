@@ -1,8 +1,14 @@
 import React, { useEffect, useState } from 'react';
-import { Megaphone, Plus, Trash2, Edit2, CheckCircle2, AlertCircle, Lock, X } from 'lucide-react';
+import { Megaphone, Plus, Trash2, Edit2, CheckCircle2, AlertCircle, Lock, X, UserPlus } from 'lucide-react';
 import { api } from '../../services/api.js';
 import { useAuth } from '../../context/AuthContext.js';
-import { AnnouncementAudience, AnnouncementPriority, ClassItem, SchoolAnnouncementItem } from '../../types/index.js';
+import {
+  AnnouncementAudience,
+  AnnouncementPriority,
+  ClassItem,
+  SchoolAdmissionInquiry,
+  SchoolAnnouncementItem,
+} from '../../types/index.js';
 
 interface SchoolAnnouncementsViewProps {
   readOnly?: boolean;
@@ -11,6 +17,7 @@ interface SchoolAnnouncementsViewProps {
 export const SchoolAnnouncementsView: React.FC<SchoolAnnouncementsViewProps> = ({ readOnly = false }) => {
   const { activeSchool } = useAuth();
   const [announcements, setAnnouncements] = useState<SchoolAnnouncementItem[]>([]);
+  const [inquiries, setInquiries] = useState<SchoolAdmissionInquiry[]>([]);
   const [classes, setClasses] = useState<ClassItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [modalOpen, setModalOpen] = useState(false);
@@ -31,12 +38,16 @@ export const SchoolAnnouncementsView: React.FC<SchoolAnnouncementsViewProps> = (
   const loadData = async () => {
     setLoading(true);
     try {
-      const [annRes, clsRes] = await Promise.all([
+      const [annRes, clsRes, inqRes] = await Promise.all([
         api.getAnnouncements(),
         api.getSchoolClasses().catch(() => ({ classes: [] })),
+        (readOnly ? api.getStaffWorkspaceAdmissionsInquiries() : api.getAdmissionInquiries()).catch(() => ({
+          inquiries: [],
+        })),
       ]);
       setAnnouncements(annRes.announcements || []);
       setClasses(clsRes.classes || []);
+      setInquiries(inqRes.inquiries || []);
     } catch (err: any) {
       setFeedback({ type: 'err', text: err?.message || 'Failed to load announcements' });
     } finally {
@@ -150,6 +161,37 @@ export const SchoolAnnouncementsView: React.FC<SchoolAnnouncementsViewProps> = (
           <button type="button" onClick={() => setFeedback(null)}>
             <X className="w-4 h-4" />
           </button>
+        </div>
+      )}
+
+      {inquiries.length > 0 && (
+        <div className="bg-white rounded-2xl border border-blue-200 p-6 space-y-3 text-xs">
+          <div className="flex flex-wrap items-center justify-between gap-2 pb-2 border-b border-slate-100">
+            <h3 className="text-sm font-bold text-slate-900 flex items-center gap-2">
+              <UserPlus className="w-4 h-4 text-blue-600" />
+              <span>Prospective Student Inquiry Notices ({inquiries.length})</span>
+            </h3>
+            <span className="text-[11px] font-semibold text-blue-700 tabular-nums">
+              {inquiries.filter((i) => i.status === 'NEW').length} New
+            </span>
+          </div>
+          <div className="divide-y divide-slate-100">
+            {inquiries.slice(0, 6).map((inq) => (
+              <div key={inq.id} className="py-3 first:pt-0 last:pb-0 space-y-1">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <p className="font-bold text-slate-900 text-sm">
+                    {inq.student_name} {inq.target_class ? `(${inq.target_class})` : ''}
+                  </p>
+                  <span className="font-bold text-blue-700">{inq.status}</span>
+                </div>
+                <p className="text-slate-600">
+                  Parent: <strong>{inq.parent_name}</strong> · <span className="font-mono">{inq.parent_phone}</span>
+                  {inq.parent_email ? ` · ${inq.parent_email}` : ''}
+                </p>
+                {inq.message && <p className="text-slate-700">{inq.message}</p>}
+              </div>
+            ))}
+          </div>
         </div>
       )}
 

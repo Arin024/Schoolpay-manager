@@ -556,16 +556,19 @@ const AppContent: React.FC = () => {
     );
   }
 
+  const isSchoolPortalContext = Boolean(!user && portalSlug && activeView !== 'register');
+
   return (
-    <div className="min-h-screen bg-slate-50 flex flex-col selection:bg-emerald-500 selection:text-white">
+    <div className="min-h-screen bg-slate-50 flex flex-col selection:bg-emerald-500 selection:text-white overflow-x-hidden">
       {/* Universal Top Header */}
       <Header
         onOpenSecuritySettings={() => setIsSecurityModalOpen(true)}
         activeView={activeView}
         setActiveView={(v) => navigateTo(v as AppView)}
+        hideRegisterSchool={isSchoolPortalContext}
       />
 
-      <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-8">
+      <main className="flex-1 max-w-7xl w-full mx-auto px-3 sm:px-6 lg:px-8 py-4 sm:py-8 min-w-0">
         {/* VIEW ROUTER */}
         {activeView === 'privacy' ? (
           <PrivacyPolicyView onBack={() => navigateTo(user ? 'school' : 'login')} />
@@ -1447,7 +1450,10 @@ const AppContent: React.FC = () => {
       <CookieConsentBanner onOpenPrivacyPolicy={() => navigateTo('privacy')} />
 
       {/* Reusable Elegant Footer with Branding & Legal Links */}
-      <Footer onNavigateView={(view) => navigateTo(view as AppView)} />
+      <Footer
+        onNavigateView={(view) => navigateTo(view as AppView)}
+        hideRegisterSchool={isSchoolPortalContext}
+      />
 
       {/* PWA Offline Indicator */}
       <OfflineIndicator />
