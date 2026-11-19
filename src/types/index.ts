@@ -1417,6 +1417,20 @@ export interface PublicSchoolWebsiteData {
   gallery: SchoolWebsiteGalleryItem[];
   events: SchoolCalendarEvent[];
   classes: Array<{ id: string; name: string; level?: string | null }>;
+  cbtSummary?: {
+    activeExamsCount: number;
+    exams: Array<{
+      id: string;
+      title: string;
+      subject_name: string;
+      class_name: string;
+      exam_mode: string;
+      duration_minutes: number;
+      starts_at?: string | null;
+      ends_at?: string | null;
+      total_questions: number;
+    }>;
+  };
   stats: {
     studentsCount: number;
     classesCount: number;
@@ -1496,4 +1510,257 @@ export interface ConfidentialNoticeItem extends SchoolAnnouncementItem {
   is_acknowledged?: boolean;
   is_staff_confidential?: boolean;
 }
+
+// ============================================================================
+// COMPUTER-BASED TESTING (CBT) EXAMINATION ENGINE
+// ============================================================================
+
+export type CbtExamStatus = 'DRAFT' | 'PUBLISHED' | 'CLOSED';
+export type CbtExamMode = 'CA_TEST' | 'TERM_EXAM' | 'MOCK' | 'PRACTICE' | 'ENTRANCE';
+export type CbtQuestionType = 'MCQ' | 'TRUE_FALSE' | 'SHORT_ANSWER';
+
+export interface CbtExamItem {
+  id: string;
+  school_id: string;
+  title: string;
+  description?: string | null;
+  instructions?: string | null;
+  class_id?: string | null;
+  class_name?: string | null;
+  class_arm_id?: string | null;
+  class_arm_name?: string | null;
+  subject_id?: string | null;
+  subject_name: string;
+  academic_session_id?: string | null;
+  term_id?: string | null;
+  linked_examination_id?: string | null;
+  sync_score_target: 'NONE' | 'CA' | 'EXAM';
+  exam_mode: CbtExamMode;
+  duration_minutes: number;
+  total_marks: number;
+  pass_mark_percent: number;
+  max_attempts: number;
+  shuffle_questions: number;
+  shuffle_options: number;
+  show_result_immediately: number;
+  show_correct_answers: number;
+  access_code?: string | null;
+  starts_at?: string | null;
+  ends_at?: string | null;
+  status: CbtExamStatus;
+  created_by?: string | null;
+  created_by_name?: string | null;
+  question_count?: number;
+  attempts_count?: number;
+  completed_count?: number;
+  avg_percentage?: number | null;
+  created_at?: string;
+  updated_at?: string;
+}
+
+export interface CbtQuestionItem {
+  id: string;
+  school_id?: string;
+  cbt_exam_id: string;
+  question_order: number;
+  question_type: CbtQuestionType;
+  question_text: string;
+  question_image_url?: string | null;
+  option_a?: string | null;
+  option_b?: string | null;
+  option_c?: string | null;
+  option_d?: string | null;
+  option_e?: string | null;
+  correct_answer?: string;
+  explanation?: string | null;
+  marks: number;
+}
+
+export interface CbtAnswerEntry {
+  selected?: string;
+  flagged?: boolean;
+  updated_at?: string;
+}
+
+export interface CbtStudentExamItem {
+  id: string;
+  title: string;
+  description?: string | null;
+  instructions?: string | null;
+  subject_name: string;
+  class_id?: string | null;
+  class_name: string;
+  exam_mode: CbtExamMode;
+  duration_minutes: number;
+  total_marks: number;
+  pass_mark_percent: number;
+  question_count: number;
+  max_attempts: number;
+  attempts_used: number;
+  requires_access_code: boolean;
+  starts_at?: string | null;
+  ends_at?: string | null;
+  show_result_immediately: boolean;
+  show_correct_answers: boolean;
+  not_yet_open: boolean;
+  window_closed: boolean;
+  can_start: boolean;
+  active_attempt_id?: string | null;
+  latest_submitted_attempt?: {
+    id: string;
+    status: string;
+    submitted_at?: string | null;
+    score_obtained: number | null;
+    max_score: number | null;
+    percentage: number | null;
+    grade: string | null;
+    passed: boolean | null;
+  } | null;
+}
+
+export interface CbtStudentHistoryItem {
+  id: string;
+  cbt_exam_id: string;
+  exam_title: string;
+  subject_name: string;
+  status: string;
+  submitted_at?: string | null;
+  time_spent_seconds: number;
+  total_questions: number;
+  answered_count: number;
+  score_obtained: number | null;
+  max_score: number | null;
+  percentage: number | null;
+  grade: string | null;
+  passed: boolean | null;
+  can_review: boolean;
+  result_withheld: boolean;
+}
+
+export interface CbtStartSessionResponse {
+  success: boolean;
+  resumed?: boolean;
+  auto_submitted?: boolean;
+  message?: string;
+  server_now?: string;
+  remaining_seconds?: number;
+  exam?: {
+    id: string;
+    title: string;
+    subject_name: string;
+    class_name: string;
+    instructions?: string | null;
+    duration_minutes: number;
+    total_marks: number;
+    show_result_immediately: boolean;
+    show_correct_answers: boolean;
+  };
+  attempt?: {
+    id: string;
+    status: string;
+    started_at?: string;
+    expires_at?: string;
+    tab_switch_count?: number;
+    answers?: Record<string, CbtAnswerEntry>;
+    score_obtained?: number | null;
+    max_score?: number | null;
+    percentage?: number | null;
+    grade?: string | null;
+  };
+  questions?: CbtQuestionItem[];
+}
+
+export interface CbtReviewItem {
+  question_id: string;
+  question_order: number;
+  question_type: CbtQuestionType;
+  question_text: string;
+  question_image_url?: string | null;
+  option_a?: string | null;
+  option_b?: string | null;
+  option_c?: string | null;
+  option_d?: string | null;
+  option_e?: string | null;
+  selected_answer: string | null;
+  correct_answer: string;
+  explanation?: string | null;
+  marks: number;
+  earned_marks: number;
+  is_correct: boolean;
+  flagged: boolean;
+}
+
+export interface CbtExamResultsResponse {
+  success: boolean;
+  exam: CbtExamItem;
+  summary: {
+    total_attempts: number;
+    completed_count: number;
+    in_progress_count: number;
+    passed_count: number;
+    pass_rate_percent: number;
+    average_percentage: number;
+    highest_percentage: number;
+    lowest_percentage: number;
+  };
+  attempts: Array<{
+    id: string;
+    student_id: string;
+    student_name: string;
+    admission_number?: string | null;
+    class_name?: string | null;
+    attempt_number: number;
+    status: string;
+    started_at?: string | null;
+    submitted_at?: string | null;
+    time_spent_seconds: number;
+    total_questions: number;
+    answered_count: number;
+    correct_count: number;
+    wrong_count: number;
+    score_obtained: number;
+    max_score: number;
+    percentage: number;
+    grade?: string | null;
+    passed: boolean;
+    tab_switch_count: number;
+    synced_to_report_card: boolean;
+    synced_at?: string | null;
+  }>;
+  questionAnalytics: Array<{
+    question_id: string;
+    question_number: number;
+    question_text: string;
+    question_type: string;
+    correct_answer: string;
+    marks: number;
+    answered_count: number;
+    correct_count: number;
+    accuracy_percent: number;
+  }>;
+}
+
+export interface CbtParentResultItem {
+  id: string;
+  cbt_exam_id: string;
+  student_id: string;
+  student_name: string;
+  admission_number?: string | null;
+  class_name?: string | null;
+  exam_title: string;
+  subject_name: string;
+  exam_mode: string;
+  status: string;
+  submitted_at?: string | null;
+  time_spent_seconds: number;
+  total_questions: number;
+  correct_count: number;
+  score_obtained: number;
+  max_score: number;
+  percentage: number;
+  grade?: string | null;
+  passed: boolean;
+  can_review: boolean;
+}
+
 

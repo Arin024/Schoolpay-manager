@@ -527,8 +527,9 @@ async function run() {
     await cdp.fillInput('input[type="email"]', 'principal@abca.edu.ng');
     await cdp.fillInput('input[type="password"]', 'Password123!');
     await cdp.clickSubmit();
-    await cdp.waitForText('Shareable School Website & Subdomain Portal');
-    await cdp.waitForText('Copy Subdomain');
+    await cdp.waitForText('Live Shareable School Website & Portal');
+    await cdp.waitForText('Copy Website Link');
+    await cdp.waitForText('Open Live Site');
     await cdp.waitForText('Copy Portal Link');
 
     await cdp.clickButtonByText('Manage School Website');
@@ -540,7 +541,7 @@ async function run() {
     await cdp.fillInputByPlaceholder('Excellence, Discipline & Integrity', 'Knowledge, Character & National Service');
     await cdp.fillInputByPlaceholder('Chief Mrs. Folake Adeyemi', 'Mallam Sani Bello');
     await cdp.clickButtonByText('Save Website & Subdomain');
-    await cdp.waitForText('https://abca-kano.bursariq.com.ng');
+    await cdp.waitForText('/site/abca-kano');
 
     // Publish News Article
     await cdp.clickButtonByText('News & Blog Articles');

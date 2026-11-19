@@ -27,9 +27,11 @@ import {
   Copy,
   KeyRound,
   UserPlus,
+  MonitorCheck,
 } from 'lucide-react';
 import { api } from '../../services/api.js';
 import { useAuth } from '../../context/AuthContext.js';
+import { copyTextToClipboard } from '../../utils/clipboard.js';
 import {
   ConfidentialNoticeItem,
   InvoiceDef,
@@ -48,11 +50,13 @@ import { SchoolBehaviourView } from '../performance/SchoolBehaviourView.js';
 import { SchoolAnnouncementsView } from '../performance/SchoolAnnouncementsView.js';
 import { PrintableReportCardModal } from '../performance/PrintableReportCardModal.js';
 import { LessonNotesStudio } from './LessonNotesStudio.js';
+import { SchoolCBTManagerView } from '../cbt/SchoolCBTManagerView.js';
 
 type TeacherTab =
   | 'overview'
   | 'confidential'
   | 'lesson-notes'
+  | 'cbt'
   | 'timetable'
   | 'requests'
   | 'classes'
@@ -258,10 +262,12 @@ export const TeacherPortalView: React.FC = () => {
     }
   };
 
-  const handleCopyStaffCode = (code: string) => {
-    navigator.clipboard.writeText(code);
-    setCopiedStaffCode(true);
-    setTimeout(() => setCopiedStaffCode(false), 2000);
+  const handleCopyStaffCode = async (code: string) => {
+    const ok = await copyTextToClipboard(code);
+    if (ok) {
+      setCopiedStaffCode(true);
+      setTimeout(() => setCopiedStaffCode(false), 2000);
+    }
   };
 
   const unreadConfidentialCount = confidentialNotices.filter((n) => !n.is_acknowledged && !n.my_read_at).length;
@@ -276,6 +282,7 @@ export const TeacherPortalView: React.FC = () => {
     { key: 'overview', label: 'Staff Overview', icon: LayoutDashboard },
     { key: 'confidential', label: 'Confidential Notices', icon: ShieldAlert, badge: unreadConfidentialCount },
     { key: 'lesson-notes', label: 'Lesson Notes & Plans', icon: BookOpen },
+    { key: 'cbt', label: 'CBT Exams', icon: MonitorCheck },
     { key: 'timetable', label: 'Timetable & Events', icon: Clock },
     { key: 'requests', label: 'Staff Requests', icon: Send },
     { key: 'classes', label: 'Assigned Classes', icon: Building2 },
@@ -1066,6 +1073,7 @@ export const TeacherPortalView: React.FC = () => {
         </div>
       )}
 
+      {tab === 'cbt' && <SchoolCBTManagerView isAdminOverride={false} />}
       {tab === 'performance' && <SchoolPerformanceView readOnly />}
       {tab === 'attendance' && <SchoolAttendanceView readOnly />}
       {tab === 'behaviour' && <SchoolBehaviourView readOnly />}

@@ -20,15 +20,19 @@ import {
   UserPlus,
   AlertCircle,
   X,
+  ExternalLink,
+  MonitorCheck,
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext.js';
 import { api } from '../../services/api.js';
 import { SchoolAdmissionInquiry, SchoolDashboardStats } from '../../types/index.js';
+import { copyTextToClipboard } from '../../utils/clipboard.js';
 
 interface SchoolDashboardOverviewProps {
   onNavigateTab: (tab: any) => void;
   onOpenEnrollModal: () => void;
   onOpenImportModal: () => void;
+  onPreviewLiveWebsite?: (slug: string) => void;
   readOnly?: boolean;
 }
 
@@ -36,6 +40,7 @@ export const SchoolDashboardOverview: React.FC<SchoolDashboardOverviewProps> = (
   onNavigateTab,
   onOpenEnrollModal,
   onOpenImportModal,
+  onPreviewLiveWebsite,
   readOnly = false,
 }) => {
   const { activeSchool, activeSettings } = useAuth();
@@ -44,24 +49,28 @@ export const SchoolDashboardOverview: React.FC<SchoolDashboardOverviewProps> = (
   const [loading, setLoading] = useState(true);
   const [exportError, setExportError] = useState<string | null>(null);
   const [copiedPortalLink, setCopiedPortalLink] = useState(false);
-  const [copiedSubdomain, setCopiedSubdomain] = useState(false);
+  const [copiedWebsiteLink, setCopiedWebsiteLink] = useState(false);
 
   const subdomainSlug = (activeSettings?.portal_subdomain || activeSchool?.slug || 'school').toLowerCase();
-  const subdomainUrl = `https://${subdomainSlug}.bursariq.com.ng`;
+  const liveWebsiteUrl = `${window.location.origin}/site/${subdomainSlug}`;
   const shareablePortalUrl = activeSchool?.slug
     ? `${window.location.origin}/#portal/${activeSchool.slug}`
     : `${window.location.origin}/#login`;
 
-  const handleCopyPortalLink = () => {
-    navigator.clipboard.writeText(shareablePortalUrl);
-    setCopiedPortalLink(true);
-    setTimeout(() => setCopiedPortalLink(false), 2500);
+  const handleCopyPortalLink = async () => {
+    const ok = await copyTextToClipboard(shareablePortalUrl);
+    if (ok) {
+      setCopiedPortalLink(true);
+      setTimeout(() => setCopiedPortalLink(false), 2500);
+    }
   };
 
-  const handleCopySubdomain = () => {
-    navigator.clipboard.writeText(subdomainUrl);
-    setCopiedSubdomain(true);
-    setTimeout(() => setCopiedSubdomain(false), 2500);
+  const handleCopyWebsiteLink = async () => {
+    const ok = await copyTextToClipboard(liveWebsiteUrl);
+    if (ok) {
+      setCopiedWebsiteLink(true);
+      setTimeout(() => setCopiedWebsiteLink(false), 2500);
+    }
   };
 
   useEffect(() => {
@@ -202,34 +211,48 @@ export const SchoolDashboardOverview: React.FC<SchoolDashboardOverviewProps> = (
         </div>
       </div>
 
-      {/* Shareable School Website & Subdomain Links for Parents, Students, Staff & Prospective Families */}
+      {/* Shareable Live School Website & Portal Links */}
       {!readOnly && activeSchool && (
         <div className="bg-slate-900 text-white rounded-2xl p-5 flex flex-col lg:flex-row lg:items-center justify-between gap-4 border border-slate-800 shadow-sm">
           <div className="space-y-1.5 min-w-0">
             <div className="flex items-center gap-2">
               <Link2 className="w-4 h-4 text-emerald-400 shrink-0" />
-              <h3 className="text-sm font-bold text-white">Shareable School Website &amp; Subdomain Portal</h3>
+              <h3 className="text-sm font-bold text-white">Live Shareable School Website &amp; Portal</h3>
             </div>
             <p className="text-xs text-slate-300 max-w-2xl">
-              Visitors see your school&apos;s public website (about, articles, photo gallery, events, and admissions inquiry) alongside dedicated login portals for <strong>Staff, Parents &amp; Students</strong>.
+              Share this live link on WhatsApp, flyers, or social media. Visitors see your school&apos;s website, CBT exam hall, news, gallery, and admissions form alongside <strong>Staff, Parent &amp; Student</strong> portals.
             </p>
             <div className="flex flex-col sm:flex-row sm:items-center gap-2 sm:gap-5 pt-0.5 text-[11px] font-mono">
               <span className="text-emerald-300 break-all select-all">
-                Subdomain: {subdomainUrl}
+                Website Link: {liveWebsiteUrl}
               </span>
               <span className="text-slate-300 break-all select-all">
-                Direct Link: {shareablePortalUrl}
+                Portal Link: {shareablePortalUrl}
               </span>
             </div>
           </div>
           <div className="flex flex-wrap items-center gap-2 shrink-0">
             <button
               type="button"
-              onClick={handleCopySubdomain}
+              onClick={handleCopyWebsiteLink}
               className="px-3.5 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-xs font-bold flex items-center gap-1.5 transition cursor-pointer whitespace-nowrap"
             >
-              {copiedSubdomain ? <Check className="w-4 h-4" /> : <Copy className="w-4 h-4" />}
-              <span>{copiedSubdomain ? 'Subdomain Copied' : 'Copy Subdomain'}</span>
+              {copiedWebsiteLink ? <Check className="w-4 h-4" /> : <Copy className="w-4 h-4" />}
+              <span>{copiedWebsiteLink ? 'Website Link Copied' : 'Copy Website Link'}</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                if (onPreviewLiveWebsite) {
+                  onPreviewLiveWebsite(subdomainSlug);
+                } else {
+                  window.location.href = `/site/${subdomainSlug}`;
+                }
+              }}
+              className="px-3.5 py-2 bg-slate-800 hover:bg-slate-700 text-white rounded-xl text-xs font-bold border border-slate-700 flex items-center gap-1.5 transition cursor-pointer whitespace-nowrap"
+            >
+              <ExternalLink className="w-4 h-4 text-emerald-400" />
+              <span>Open Live Site</span>
             </button>
             <button
               type="button"
@@ -237,7 +260,7 @@ export const SchoolDashboardOverview: React.FC<SchoolDashboardOverviewProps> = (
               className="px-3.5 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-xl text-xs font-semibold border border-slate-700 flex items-center gap-1.5 transition cursor-pointer whitespace-nowrap"
             >
               {copiedPortalLink ? <Check className="w-4 h-4 text-emerald-400" /> : <Copy className="w-4 h-4" />}
-              <span>{copiedPortalLink ? 'Link Copied' : 'Copy Portal Link'}</span>
+              <span>{copiedPortalLink ? 'Portal Copied' : 'Copy Portal Link'}</span>
             </button>
             <button
               type="button"
@@ -381,6 +404,19 @@ export const SchoolDashboardOverview: React.FC<SchoolDashboardOverviewProps> = (
               </span>
               <ArrowUpRight className="w-4 h-4 text-blue-500" />
             </button>
+
+            {!readOnly && (
+              <button
+                onClick={() => onNavigateTab('cbt')}
+                className="w-full py-2.5 px-4 bg-emerald-50 hover:bg-emerald-100 text-emerald-900 rounded-xl text-xs font-bold transition flex items-center justify-between cursor-pointer border border-emerald-200"
+              >
+                <span className="flex items-center gap-2">
+                  <MonitorCheck className="w-4 h-4 text-emerald-700" />
+                  <span>CBT Examination Centre</span>
+                </span>
+                <ArrowUpRight className="w-4 h-4 text-emerald-600" />
+              </button>
+            )}
 
             {!readOnly && (
               <button

@@ -13,12 +13,15 @@ import {
   Image as ImageIcon,
   Mail,
   MapPin,
+  MonitorCheck,
   Newspaper,
   Phone,
   Send,
   ShieldCheck,
   Users,
   X,
+  ArrowLeft,
+  Clock,
 } from 'lucide-react';
 import { api } from '../../services/api.js';
 import {
@@ -28,6 +31,7 @@ import {
   WebsiteThemeAccent,
 } from '../../types/index.js';
 import { LoginForm } from '../auth/LoginForm.js';
+import { copyTextToClipboard } from '../../utils/clipboard.js';
 
 interface PublicSchoolWebsiteProps {
   portalSlug: string;
@@ -36,6 +40,8 @@ interface PublicSchoolWebsiteProps {
   onNavigateRegister: () => void;
   onSelectSchoolPortal: (slug: string) => void;
   onForgotPassword?: () => void;
+  isLoggedInPreview?: boolean;
+  onReturnToDashboard?: () => void;
 }
 
 interface AccentThemePalette {
@@ -109,6 +115,8 @@ export const PublicSchoolWebsite: React.FC<PublicSchoolWebsiteProps> = ({
   onNavigateRegister,
   onSelectSchoolPortal,
   onForgotPassword,
+  isLoggedInPreview = false,
+  onReturnToDashboard,
 }) => {
   const [data, setData] = useState<PublicSchoolWebsiteData | null>(null);
   const [loading, setLoading] = useState(true);
@@ -186,10 +194,23 @@ export const PublicSchoolWebsite: React.FC<PublicSchoolWebsiteProps> = ({
     return list.filter((g) => (g.album || 'Campus Life') === selectedAlbum);
   }, [data?.gallery, selectedAlbum]);
 
-  const handleCopy = (kind: 'subdomain' | 'portal', value: string) => {
-    navigator.clipboard.writeText(value);
-    setCopiedUrl(kind);
-    setTimeout(() => setCopiedUrl(null), 2200);
+  const handleCopy = async (kind: 'subdomain' | 'portal', value: string) => {
+    const ok = await copyTextToClipboard(value);
+    if (ok) {
+      setCopiedUrl(kind);
+      setTimeout(() => setCopiedUrl(null), 2200);
+    }
+  };
+
+  const handleEnterCbtHall = () => {
+    try {
+      sessionStorage.setItem('bursariq_post_login_tab', 'cbt');
+    } catch {}
+    if (isLoggedInPreview && onReturnToDashboard) {
+      onReturnToDashboard();
+      return;
+    }
+    scrollToSection('school-portal-login-card');
   };
 
   const handleInquirySubmit = async (e: React.FormEvent) => {
@@ -279,14 +300,31 @@ export const PublicSchoolWebsite: React.FC<PublicSchoolWebsiteProps> = ({
 
   if (!data) return null;
 
-  const { school, website, urls, settings, posts, gallery, events, classes, stats } = data;
+  const { school, website, urls, settings, posts, gallery, events, classes, stats, cbtSummary } = data;
+  const cleanHandle = urls?.portal_subdomain || settings?.portal_subdomain || school.slug;
+  const liveWebsiteUrl = `${window.location.origin}/site/${cleanHandle}`;
   const shareablePortalUrl = `${window.location.origin}/#portal/${school.slug}`;
-  const shareableSubdomainUrl = urls?.subdomainUrl || `https://${urls?.portal_subdomain || school.slug}.bursariq.com.ng`;
   const activeLightboxItem: SchoolWebsiteGalleryItem | null =
     lightboxIndex !== null && filteredGallery[lightboxIndex] ? filteredGallery[lightboxIndex] : null;
 
   return (
     <div className="space-y-8 sm:space-y-12 pb-10 min-w-0">
+      {isLoggedInPreview && onReturnToDashboard && (
+        <div className="bg-emerald-950 text-white rounded-2xl px-4 py-3 flex flex-wrap items-center justify-between gap-3 border border-emerald-800">
+          <div className="text-xs font-medium text-emerald-100">
+            Live Public Website Preview for <strong className="text-white">{school.name}</strong>
+          </div>
+          <button
+            type="button"
+            onClick={onReturnToDashboard}
+            className="px-3.5 py-1.5 rounded-xl bg-white hover:bg-emerald-50 text-slate-900 text-xs font-bold inline-flex items-center gap-1.5 cursor-pointer"
+          >
+            <ArrowLeft className="w-3.5 h-3.5" />
+            <span>Back to My Dashboard</span>
+          </button>
+        </div>
+      )}
+
       {/* Three-Zone Responsive School Website Bar */}
       <nav
         aria-label="School website navigation"
@@ -331,6 +369,13 @@ export const PublicSchoolWebsite: React.FC<PublicSchoolWebsiteProps> = ({
             className="hover:text-slate-900 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
           >
             Calendar
+          </button>
+          <button
+            type="button"
+            onClick={() => scrollToSection('school-cbt-hall')}
+            className="hover:text-slate-900 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+          >
+            CBT Hall
           </button>
           <button
             type="button"
@@ -453,29 +498,39 @@ export const PublicSchoolWebsite: React.FC<PublicSchoolWebsiteProps> = ({
                   <GraduationCap className="w-4 h-4" />
                   <span>Prospective Student Admissions Form</span>
                 </button>
+                <button
+                  type="button"
+                  onClick={handleEnterCbtHall}
+                  className="px-4 py-2 text-xs font-bold text-white bg-white/15 hover:bg-white/25 border border-white/20 rounded-xl transition-colors inline-flex items-center gap-1.5 cursor-pointer"
+                >
+                  <MonitorCheck className="w-4 h-4 text-emerald-300" />
+                  <span>
+                    Enter CBT Exam Hall{cbtSummary && cbtSummary.activeExamsCount > 0 ? ` (${cbtSummary.activeExamsCount} Live)` : ''}
+                  </span>
+                </button>
               </div>
             </div>
 
-            {/* Shareable School Subdomain & Link Box */}
+            {/* Live Shareable School Website Link Box */}
             <div className="rounded-2xl bg-white/10 border border-white/15 p-3.5 sm:p-4 space-y-3 text-xs min-w-0">
               <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 min-w-0">
                 <div className="min-w-0 flex-1">
                   <p className="text-[11px] font-semibold text-slate-300 flex items-center gap-1.5">
                     <Globe className="w-3.5 h-3.5 text-emerald-300 shrink-0" />
-                    <span>Official Shareable School Subdomain</span>
+                    <span>Official Shareable School Website Link</span>
                   </p>
                   <p className="font-mono text-white font-semibold break-all sm:truncate select-all mt-0.5 text-[11px] sm:text-xs">
-                    {shareableSubdomainUrl}
+                    {liveWebsiteUrl}
                   </p>
                 </div>
                 <div className="flex flex-wrap items-center gap-2 shrink-0">
                   <button
                     type="button"
-                    onClick={() => handleCopy('subdomain', shareableSubdomainUrl)}
+                    onClick={() => handleCopy('subdomain', liveWebsiteUrl)}
                     className="px-3 py-1.5 rounded-lg bg-white text-slate-900 hover:bg-slate-100 font-bold text-xs inline-flex items-center gap-1.5 cursor-pointer whitespace-nowrap shrink-0"
                   >
                     {copiedUrl === 'subdomain' ? <Check className="w-3.5 h-3.5 text-emerald-600" /> : <Copy className="w-3.5 h-3.5" />}
-                    <span>{copiedUrl === 'subdomain' ? 'Copied' : 'Copy Subdomain'}</span>
+                    <span>{copiedUrl === 'subdomain' ? 'Copied' : 'Copy Website Link'}</span>
                   </button>
                   <button
                     type="button"
@@ -514,18 +569,88 @@ export const PublicSchoolWebsite: React.FC<PublicSchoolWebsiteProps> = ({
         </div>
 
         {/* Right Column: Official School Portal Login Card */}
-        <div className="lg:col-span-5 min-w-0 flex flex-col justify-start">
-          <LoginForm
-            onSwitchToRegister={onNavigateRegister}
-            onForgotPassword={onForgotPassword || (() => {})}
-            onSuccess={onAuthSuccess}
-            initialPortalSlug={portalSlug}
-            onPortalSlugChange={(nextSlug) => {
-              if (nextSlug) onSelectSchoolPortal(nextSlug);
-              else onClearPortal();
-            }}
-          />
+        <div id="school-portal-login-card" className="lg:col-span-5 min-w-0 flex flex-col justify-start scroll-mt-24">
+          {isLoggedInPreview && onReturnToDashboard ? (
+            <div className="bg-white rounded-3xl border border-slate-200 p-6 sm:p-8 space-y-4">
+              <div className="flex items-center gap-3">
+                <div className={`w-10 h-10 rounded-xl ${theme.crestBg} text-white flex items-center justify-center shrink-0`}>
+                  <ShieldCheck className="w-5 h-5" />
+                </div>
+                <div>
+                  <h2 className="text-base font-bold text-slate-900">Official School Portal Active</h2>
+                  <p className="text-xs text-slate-500">Visitors sign in here as Staff, Parent, or Student.</p>
+                </div>
+              </div>
+              <p className="text-xs text-slate-600 leading-relaxed">
+                You are currently signed in to your school workspace. Parents, Students (with Admission Number), and Staff (with Staff Login Code) see the dedicated portal sign-in card right here when visiting your website link.
+              </p>
+              <button
+                type="button"
+                onClick={onReturnToDashboard}
+                className="w-full py-2.5 px-4 rounded-xl bg-slate-900 hover:bg-slate-800 text-white text-xs font-bold inline-flex items-center justify-center gap-2 cursor-pointer"
+              >
+                <ArrowLeft className="w-4 h-4" />
+                <span>Return to My Dashboard</span>
+              </button>
+            </div>
+          ) : (
+            <LoginForm
+              onSwitchToRegister={onNavigateRegister}
+              onForgotPassword={onForgotPassword || (() => {})}
+              onSuccess={onAuthSuccess}
+              initialPortalSlug={portalSlug}
+              onPortalSlugChange={(nextSlug) => {
+                if (nextSlug) onSelectSchoolPortal(nextSlug);
+                else onClearPortal();
+              }}
+            />
+          )}
         </div>
+      </section>
+
+      {/* Public CBT Examination Hall Schedule Strip */}
+      <section id="school-cbt-hall" className="scroll-mt-24 bg-white rounded-2xl border border-slate-200 p-5 sm:p-7 space-y-4 min-w-0">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+          <div className="space-y-1">
+            <p className={`text-xs font-bold ${theme.accentText}`}>Digital Examinations</p>
+            <h2 className="text-xl font-bold text-slate-900 tracking-tight flex items-center gap-2">
+              <MonitorCheck className="w-5 h-5 text-emerald-600 shrink-0" />
+              <span>School CBT Examination Hall</span>
+            </h2>
+            <p className="text-xs text-slate-600">
+              Students sign in with their school Admission Number to take scheduled Computer-Based Tests across their assigned class.
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={handleEnterCbtHall}
+            className={`px-4 py-2.5 rounded-xl text-white text-xs font-bold ${theme.buttonBg} ${theme.buttonHover} inline-flex items-center gap-1.5 cursor-pointer shrink-0 self-start sm:self-auto`}
+          >
+            <MonitorCheck className="w-4 h-4" />
+            <span>Student CBT Sign-In</span>
+          </button>
+        </div>
+
+        {cbtSummary && cbtSummary.exams.length > 0 ? (
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3.5 text-xs">
+            {cbtSummary.exams.map((ex) => (
+              <div key={ex.id} className="p-4 rounded-xl bg-slate-50 border border-slate-200 space-y-1.5">
+                <p className="text-[11px] font-bold text-emerald-700 uppercase">
+                  {ex.subject_name} · {ex.class_name}
+                </p>
+                <p className="text-sm font-bold text-slate-900">{ex.title}</p>
+                <p className="text-slate-600 inline-flex items-center gap-2 tabular-nums">
+                  <Clock className="w-3.5 h-3.5 text-slate-400" />
+                  <span>{ex.duration_minutes} mins · {ex.total_questions} question{ex.total_questions === 1 ? '' : 's'}</span>
+                </p>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <p className="text-xs text-slate-500 bg-slate-50 border border-slate-200 rounded-xl p-4">
+            No live public CBT schedule listed right now. Enrolled students can sign in anytime to view their class CBT assessments and past results.
+          </p>
+        )}
       </section>
 
       {/* About, Vision, Mission & Principal's Welcome */}

@@ -578,7 +578,7 @@ async function run() {
     await cdp.fillInput('input[type="email"]', 'admin@brightstar.edu.ng');
     await cdp.fillInput('input[type="password"]', 'Password123!');
     await cdp.clickSubmit();
-    await cdp.waitForText('Shareable School Website & Subdomain Portal');
+    await cdp.waitForText('Live Shareable School Website & Portal');
     await cdp.waitForText(`/#portal/${school1Slug}`);
     await cdp.clickButtonByText('Roles', true);
     await cdp.waitForText('Bulk Generate Logins');

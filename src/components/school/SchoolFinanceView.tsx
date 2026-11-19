@@ -35,6 +35,7 @@ import {
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext.js';
 import { api, safeFetch } from '../../services/api.js';
+import { copyTextToClipboard } from '../../utils/clipboard.js';
 import {
   InvoiceDef,
   PaymentItem,
@@ -376,7 +377,7 @@ export const SchoolFinanceView: React.FC = () => {
       const res = await api.sendDefaulterReminder(studentId, 'ALL', customNote);
       setReminderResult(res);
     } catch (err: any) {
-      alert(err?.message || 'Failed to dispatch reminder');
+      setError(err?.message || 'Failed to dispatch reminder');
     } finally {
       setReminderSending(false);
     }
@@ -2128,9 +2129,9 @@ export const SchoolFinanceView: React.FC = () => {
                   </a>
                   <button
                     type="button"
-                    onClick={() => {
-                      navigator.clipboard.writeText(reminderResult.messageText);
-                      alert('Reminder text copied to clipboard!');
+                    onClick={async () => {
+                      await copyTextToClipboard(reminderResult.messageText);
+                      setSuccessMsg('Reminder text copied to clipboard.');
                     }}
                     className="py-2.5 px-4 bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold rounded-xl text-xs transition cursor-pointer"
                   >

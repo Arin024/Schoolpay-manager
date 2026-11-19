@@ -126,7 +126,7 @@ export const SchoolAcademicSessionsView: React.FC = () => {
       }
       await loadSessions();
     } catch (err: any) {
-      alert(err?.message || 'Failed to add Nigerian terms');
+      setFormError(err?.message || 'Failed to add Nigerian terms');
     } finally {
       setSeedingTermsId(null);
     }
@@ -134,6 +134,17 @@ export const SchoolAcademicSessionsView: React.FC = () => {
 
   return (
     <div className="space-y-6">
+      {formError && !isAddSessionModalOpen && !isAddTermModalOpen && (
+        <div className="p-3.5 rounded-xl bg-rose-50 border border-rose-200 text-rose-800 text-xs flex items-center justify-between gap-2">
+          <span className="flex items-center gap-2 font-medium">
+            <AlertCircle className="w-4 h-4 text-rose-600 shrink-0" />
+            <span>{formError}</span>
+          </span>
+          <button type="button" onClick={() => setFormError(null)} className="cursor-pointer">
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+      )}
       {/* Top Header */}
       <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-6 flex flex-col md:flex-row md:items-center justify-between gap-4">
         <div>

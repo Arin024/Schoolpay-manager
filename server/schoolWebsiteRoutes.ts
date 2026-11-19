@@ -70,18 +70,21 @@ function validateImageUrlInput(val: unknown): { ok: boolean; value: string | nul
 }
 
 function buildPortalUrls(slug: string, portalSubdomain?: string | null) {
-  const sub = normalizeSubdomainSlug(portalSubdomain || slug);
+  const cleanStored = String(portalSubdomain || '').trim().toLowerCase().replace(/[^a-z0-9-]/g, '');
+  const sub = cleanStored || normalizeSubdomainSlug(slug);
   return {
     portal_subdomain: sub,
     subdomainUrl: `https://${sub}.bursariq.com.ng`,
     portalHashUrl: `/#portal/${slug}`,
-    sitePathUrl: `/site/${slug}`,
+    sitePathUrl: `/site/${sub}`,
   };
 }
 
 export async function resolveActiveSchoolByAnyIdentifier(identifier: string): Promise<any | null> {
   const clean = String(identifier || '').trim();
   if (!clean) return null;
+  const cleanLower = clean.toLowerCase();
+  const normalizedInput = normalizeSubdomainSlug(clean);
 
   const pool = getPgPool();
   if (pool) {
@@ -97,10 +100,31 @@ export async function resolveActiveSchoolByAnyIdentifier(identifier: string): Pr
         [clean]
       );
       if (pgRes.rows[0]) return pgRes.rows[0];
+
+      // Fallback for legacy/long school names whose normalized handle differs from raw slug or stored subdomain
+      const allPg = await queryPg(
+        `SELECT s.*, ss.portal_subdomain
+         FROM schools s
+         LEFT JOIN school_settings ss ON ss.school_id = s.id
+         WHERE (s.is_deleted = 0 OR s.is_deleted IS NULL)
+           AND UPPER(COALESCE(s.status, 'TRIAL')) != 'CANCELLED'`,
+        []
+      );
+      const matchedPg = allPg.rows.find((row: any) => {
+        const sub = String(row.portal_subdomain || '').trim().toLowerCase();
+        const slug = String(row.slug || '').trim().toLowerCase();
+        return (
+          (sub && normalizeSubdomainSlug(sub) === normalizedInput) ||
+          (slug && normalizeSubdomainSlug(slug) === normalizedInput) ||
+          (slug && slug.startsWith(`${cleanLower}-`)) ||
+          (sub && sub.startsWith(`${cleanLower}-`))
+        );
+      });
+      if (matchedPg) return matchedPg;
     } catch {}
   }
 
-  return (
+  const exactSqlite =
     cacheDb
       .prepare(
         `SELECT s.*
@@ -110,7 +134,29 @@ export async function resolveActiveSchoolByAnyIdentifier(identifier: string): Pr
            AND UPPER(COALESCE(s.status, 'TRIAL')) != 'CANCELLED'
          LIMIT 1`
       )
-      .get(clean, clean, clean) || null
+      .get(clean, clean, clean) || null;
+  if (exactSqlite) return exactSqlite;
+
+  const allSqlite = cacheDb
+    .prepare(
+      `SELECT s.*, ss.portal_subdomain
+       FROM schools s
+       LEFT JOIN school_settings ss ON ss.school_id = s.id
+       WHERE UPPER(COALESCE(s.status, 'TRIAL')) != 'CANCELLED'`
+    )
+    .all() as any[];
+
+  return (
+    allSqlite.find((row: any) => {
+      const sub = String(row.portal_subdomain || '').trim().toLowerCase();
+      const slug = String(row.slug || '').trim().toLowerCase();
+      return (
+        (sub && normalizeSubdomainSlug(sub) === normalizedInput) ||
+        (slug && normalizeSubdomainSlug(slug) === normalizedInput) ||
+        (slug && slug.startsWith(`${cleanLower}-`)) ||
+        (sub && sub.startsWith(`${cleanLower}-`))
+      );
+    }) || null
   );
 }
 
@@ -294,6 +340,30 @@ publicWebsiteRouter.get('/schools/:slug/website', async (req, res) => {
     [school.id]
   );
 
+  // Strictly sanitized public CBT schedule summary (NEVER exposes questions, answers, or access codes)
+  let publicCbtExams: any[] = [];
+  try {
+    publicCbtExams = await dbAll(
+      `SELECT e.id, e.title, e.subject_name, e.class_name, e.exam_mode, e.duration_minutes,
+              e.starts_at, e.ends_at,
+              (SELECT COUNT(*) FROM cbt_questions q WHERE q.cbt_exam_id = e.id AND (q.is_deleted = 0 OR q.is_deleted IS NULL)) as total_questions
+       FROM cbt_exams e
+       WHERE e.school_id = $1 AND e.status = 'PUBLISHED' AND (e.is_deleted = 0 OR e.is_deleted IS NULL)
+       ORDER BY e.created_at DESC
+       LIMIT 12`,
+      `SELECT e.id, e.title, e.subject_name, e.class_name, e.exam_mode, e.duration_minutes,
+              e.starts_at, e.ends_at,
+              (SELECT COUNT(*) FROM cbt_questions q WHERE q.cbt_exam_id = e.id AND (q.is_deleted = 0 OR q.is_deleted IS NULL)) as total_questions
+       FROM cbt_exams e
+       WHERE e.school_id = ? AND e.status = 'PUBLISHED' AND (e.is_deleted = 0 OR e.is_deleted IS NULL)
+       ORDER BY e.created_at DESC
+       LIMIT 12`,
+      [school.id]
+    );
+  } catch {
+    publicCbtExams = [];
+  }
+
   return res.json({
     success: true,
     school: {
@@ -321,6 +391,20 @@ publicWebsiteRouter.get('/schools/:slug/website', async (req, res) => {
     gallery,
     events,
     classes,
+    cbtSummary: {
+      activeExamsCount: publicCbtExams.length,
+      exams: publicCbtExams.map((e) => ({
+        id: e.id,
+        title: e.title,
+        subject_name: e.subject_name,
+        class_name: e.class_name || 'All Classes',
+        exam_mode: e.exam_mode,
+        duration_minutes: Number(e.duration_minutes || 30),
+        starts_at: e.starts_at || null,
+        ends_at: e.ends_at || null,
+        total_questions: Number(e.total_questions || 0),
+      })),
+    },
     stats: {
       studentsCount: Number(stuCountRow?.c || 0),
       classesCount: classes.length,

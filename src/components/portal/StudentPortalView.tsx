@@ -16,6 +16,7 @@ import {
   Mail,
   Phone,
   Calendar,
+  MonitorCheck,
 } from 'lucide-react';
 import { api } from '../../services/api.js';
 import { useAuth } from '../../context/AuthContext.js';
@@ -23,9 +24,11 @@ import { AcademicSessionItem, ReceiptItem, ReportCardItem, StudentDashboardData 
 import { AttendanceBadge, SeverityBadge, WorkflowStatusBadge } from '../common/StatusBadge.js';
 import { PrintableReportCardModal } from '../performance/PrintableReportCardModal.js';
 import { PrintableReceiptModal } from '../school/PrintableReceiptModal.js';
+import { StudentCBTHallView } from '../cbt/StudentCBTHallView.js';
 
 type StudentTab =
   | 'overview'
+  | 'cbt'
   | 'profile'
   | 'results'
   | 'reports'
@@ -38,7 +41,17 @@ type StudentTab =
 
 export const StudentPortalView: React.FC = () => {
   const { activeSchoolId, user } = useAuth();
-  const [tab, setTab] = useState<StudentTab>('overview');
+  const [tab, setTab] = useState<StudentTab>(() => {
+    try {
+      if (window.sessionStorage.getItem('bursariq_post_login_tab') === 'cbt') {
+        window.sessionStorage.removeItem('bursariq_post_login_tab');
+        return 'cbt';
+      }
+    } catch {
+      // ignore storage restrictions
+    }
+    return 'overview';
+  });
   const [data, setData] = useState<StudentDashboardData | null>(null);
   const [sessions, setSessions] = useState<AcademicSessionItem[]>([]);
   const [selectedSessionId, setSelectedSessionId] = useState('');
@@ -183,6 +196,7 @@ export const StudentPortalView: React.FC = () => {
 
   const navItems: Array<{ key: StudentTab; label: string; icon: any; badge?: number }> = [
     { key: 'overview', label: 'Overview', icon: GraduationCap },
+    { key: 'cbt', label: 'CBT Exams', icon: MonitorCheck },
     { key: 'profile', label: 'My Profile', icon: User },
     { key: 'results', label: 'My Results', icon: BarChart3 },
     { key: 'reports', label: 'My Report Cards', icon: FileText },
@@ -266,6 +280,9 @@ export const StudentPortalView: React.FC = () => {
           })}
         </div>
       </div>
+
+      {/* CBT EXAM HALL */}
+      {tab === 'cbt' && <StudentCBTHallView />}
 
       {/* MY PROFILE (READ-ONLY) */}
       {tab === 'profile' && (

@@ -25,6 +25,7 @@ import {
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext.js';
 import { api } from '../../services/api.js';
+import { copyTextToClipboard } from '../../utils/clipboard.js';
 import { SchoolSubscription, SubscriptionPlan, PlatformInvoice, PlatformPayment } from '../../types/index.js';
 import { SchoolStatusBadge } from '../common/StatusBadge.js';
 import { PrintableSaaSInvoiceModal } from './PrintableSaaSInvoiceModal.js';
@@ -120,7 +121,7 @@ export const SchoolSubscriptionView: React.FC = () => {
       });
       setCheckoutResult(res);
     } catch (err: any) {
-      alert(err.message || 'Failed to initiate Bachs checkout');
+      setBankErrorMsg(err.message || 'Failed to initiate Bachs checkout');
       setIsCheckoutModalOpen(false);
     } finally {
       setCheckoutLoading(false);
@@ -700,9 +701,10 @@ export const SchoolSubscriptionView: React.FC = () => {
                   </span>
                   <button
                     type="button"
-                    onClick={() => {
-                      navigator.clipboard.writeText(platformSettings?.platform_account_number || '2208744650');
-                      alert('Zenith Bank account number copied: ' + (platformSettings?.platform_account_number || '2208744650'));
+                    onClick={async () => {
+                      const acct = platformSettings?.platform_account_number || '2208744650';
+                      await copyTextToClipboard(acct);
+                      setBankSuccessMsg(`Zenith Bank account number copied: ${acct}`);
                     }}
                     className="px-2.5 py-1 bg-emerald-700 hover:bg-emerald-800 text-white rounded-lg text-[10px] font-bold transition shadow-xs cursor-pointer"
                   >
@@ -736,9 +738,10 @@ export const SchoolSubscriptionView: React.FC = () => {
                   </span>
                   <button
                     type="button"
-                    onClick={() => {
-                      navigator.clipboard.writeText(platformSettings?.opay_account_number || '8160754659');
-                      alert('OPay account number copied: ' + (platformSettings?.opay_account_number || '8160754659'));
+                    onClick={async () => {
+                      const acct = platformSettings?.opay_account_number || '8160754659';
+                      await copyTextToClipboard(acct);
+                      setBankSuccessMsg(`OPay account number copied: ${acct}`);
                     }}
                     className="px-2.5 py-1 bg-slate-800 hover:bg-slate-900 text-white rounded-lg text-[10px] font-bold transition shadow-xs cursor-pointer"
                   >

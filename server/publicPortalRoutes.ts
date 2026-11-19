@@ -3,6 +3,7 @@ import crypto from 'node:crypto';
 import {
   cacheDb,
   getPgPool,
+  normalizeSubdomainSlug,
   queryPg,
 } from './db.ts';
 import {
@@ -112,6 +113,8 @@ function makeSafeSlugToken(value: unknown, fallback = 'id'): string {
 async function findActiveSchoolBySlugOrId(identifier: string): Promise<any | null> {
   const clean = String(identifier || '').trim();
   if (!clean) return null;
+  const cleanLower = clean.toLowerCase();
+  const normalizedInput = normalizeSubdomainSlug(clean);
   const pool = getPgPool();
   if (pool) {
     try {
@@ -124,11 +127,30 @@ async function findActiveSchoolBySlugOrId(identifier: string): Promise<any | nul
         [clean]
       );
       if (res.rows[0]) return res.rows[0];
+
+      const allPg = await queryPg(
+        `SELECT s.*, ss.portal_subdomain FROM schools s
+         LEFT JOIN school_settings ss ON ss.school_id = s.id
+         WHERE (s.is_deleted = 0 OR s.is_deleted IS NULL)
+           AND UPPER(COALESCE(s.status, 'TRIAL')) != 'CANCELLED'`,
+        []
+      );
+      const matchedPg = allPg.rows.find((row: any) => {
+        const sub = String(row.portal_subdomain || '').trim().toLowerCase();
+        const slug = String(row.slug || '').trim().toLowerCase();
+        return (
+          (sub && normalizeSubdomainSlug(sub) === normalizedInput) ||
+          (slug && normalizeSubdomainSlug(slug) === normalizedInput) ||
+          (slug && slug.startsWith(`${cleanLower}-`)) ||
+          (sub && sub.startsWith(`${cleanLower}-`))
+        );
+      });
+      if (matchedPg) return matchedPg;
     } catch (err: any) {
       console.warn('[Public School Lookup PG Notice]', err?.message);
     }
   }
-  return (
+  const exactSqlite =
     cacheDb
       .prepare(
         `SELECT s.* FROM schools s
@@ -137,7 +159,28 @@ async function findActiveSchoolBySlugOrId(identifier: string): Promise<any | nul
            AND UPPER(COALESCE(s.status, 'TRIAL')) != 'CANCELLED'
          LIMIT 1`
       )
-      .get(clean, clean, clean) || null
+      .get(clean, clean, clean) || null;
+  if (exactSqlite) return exactSqlite;
+
+  const allSqlite = cacheDb
+    .prepare(
+      `SELECT s.*, ss.portal_subdomain FROM schools s
+       LEFT JOIN school_settings ss ON ss.school_id = s.id
+       WHERE UPPER(COALESCE(s.status, 'TRIAL')) != 'CANCELLED'`
+    )
+    .all() as any[];
+
+  return (
+    allSqlite.find((row: any) => {
+      const sub = String(row.portal_subdomain || '').trim().toLowerCase();
+      const slug = String(row.slug || '').trim().toLowerCase();
+      return (
+        (sub && normalizeSubdomainSlug(sub) === normalizedInput) ||
+        (slug && normalizeSubdomainSlug(slug) === normalizedInput) ||
+        (slug && slug.startsWith(`${cleanLower}-`)) ||
+        (sub && sub.startsWith(`${cleanLower}-`))
+      );
+    }) || null
   );
 }
 

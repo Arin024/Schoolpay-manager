@@ -118,6 +118,9 @@ export const MIGRATION_ORDER = [
   'school_timetable_slots',
   'staff_requests',
   'staff_announcement_reads',
+  'cbt_exams',
+  'cbt_questions',
+  'cbt_attempts',
 ];
 
 /**

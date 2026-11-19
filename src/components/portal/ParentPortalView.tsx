@@ -21,11 +21,13 @@ import {
   Phone,
   Lock,
   Calendar,
+  MonitorCheck,
 } from 'lucide-react';
 import { api } from '../../services/api.js';
 import { useAuth } from '../../context/AuthContext.js';
 import {
   AcademicSessionItem,
+  CbtParentResultItem,
   ParentDashboardData,
   ReceiptItem,
   ReportCardItem,
@@ -38,6 +40,7 @@ import { PrintableReceiptModal } from '../school/PrintableReceiptModal.js';
 type ParentTab =
   | 'overview'
   | 'results'
+  | 'cbt'
   | 'reports'
   | 'attendance'
   | 'behaviour'
@@ -76,6 +79,8 @@ export const ParentPortalView: React.FC = () => {
   const [checkoutProcessing, setCheckoutProcessing] = useState(false);
   const [hostedCheckout, setHostedCheckout] = useState<{ url?: string; reference: string; amountKobo: number } | null>(null);
   const [statusMsg, setStatusMsg] = useState<{ type: 'ok' | 'err'; text: string } | null>(null);
+  const [cbtResults, setCbtResults] = useState<CbtParentResultItem[]>([]);
+  const [cbtLoading, setCbtLoading] = useState(false);
 
   const loadDashboard = async (
     studentId = selectedChildId,
@@ -119,6 +124,30 @@ export const ParentPortalView: React.FC = () => {
   useEffect(() => {
     loadDashboard('', '', '');
   }, [activeSchoolId]);
+
+  useEffect(() => {
+    const activeChildId = selectedChildId || data?.selectedChild?.id;
+    if (!activeChildId) {
+      setCbtResults([]);
+      return;
+    }
+    let cancelled = false;
+    setCbtLoading(true);
+    api
+      .getParentCbtResults(activeChildId)
+      .then((res) => {
+        if (!cancelled) setCbtResults(res.results || []);
+      })
+      .catch(() => {
+        if (!cancelled) setCbtResults([]);
+      })
+      .finally(() => {
+        if (!cancelled) setCbtLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedChildId, data?.selectedChild?.id, activeSchoolId]);
 
   const handleChildChange = (childId: string) => {
     setSelectedChildId(childId);
@@ -362,6 +391,7 @@ export const ParentPortalView: React.FC = () => {
             [
               { key: 'overview', label: 'My Children', icon: Users },
               { key: 'results', label: 'Examination Results', icon: BarChart3 },
+              { key: 'cbt', label: 'CBT Results', icon: MonitorCheck },
               { key: 'reports', label: 'Report Cards', icon: FileText },
               { key: 'attendance', label: 'Attendance History', icon: CalendarCheck },
               { key: 'behaviour', label: 'Behaviour & Remarks', icon: MessageSquare },
@@ -669,6 +699,83 @@ export const ParentPortalView: React.FC = () => {
               </div>
             )}
           </div>
+        </div>
+      )}
+
+      {/* TAB 2B: CHILD CBT RESULTS (READ-ONLY) */}
+      {tab === 'cbt' && (
+        <div className="bg-white rounded-2xl border border-slate-200 p-6 space-y-4">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pb-3 border-b border-slate-100">
+            <div>
+              <h3 className="text-sm font-bold text-slate-900">
+                Computer-Based Test (CBT) Results · {data.selectedChild?.full_name}
+              </h3>
+              <p className="text-xs text-slate-500 mt-0.5">
+                Verified auto-graded CBT examination scores for your ward. Read-only parent view.
+              </p>
+            </div>
+            <span className="text-xs font-semibold text-slate-500 tabular-nums">
+              {cbtResults.length} completed CBT exam(s)
+            </span>
+          </div>
+
+          {cbtLoading ? (
+            <p className="py-10 text-center text-xs text-slate-400">Loading CBT examination records...</p>
+          ) : cbtResults.length === 0 ? (
+            <div className="py-10 text-center space-y-1.5">
+              <MonitorCheck className="w-8 h-8 text-slate-300 mx-auto" />
+              <p className="text-xs font-semibold text-slate-600">No completed CBT exams recorded yet</p>
+              <p className="text-xs text-slate-400">
+                Once {data.selectedChild?.full_name} completes a published school CBT examination, scores appear here automatically.
+              </p>
+            </div>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full text-left text-xs">
+                <thead>
+                  <tr className="border-b border-slate-200 text-slate-500 bg-slate-50/70">
+                    <th className="py-2.5 px-3">CBT Examination</th>
+                    <th className="py-2.5 px-3">Subject</th>
+                    <th className="py-2.5 px-3 text-right">Score</th>
+                    <th className="py-2.5 px-3 text-right">Percentage</th>
+                    <th className="py-2.5 px-3 text-center">Grade</th>
+                    <th className="py-2.5 px-3">Status</th>
+                    <th className="py-2.5 px-3">Submitted</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100">
+                  {cbtResults.map((res) => (
+                    <tr key={res.id}>
+                      <td className="py-2.5 px-3">
+                        <p className="font-semibold text-slate-900">{res.exam_title}</p>
+                        <p className="text-[11px] text-slate-500">{res.class_name || 'All Classes'}</p>
+                      </td>
+                      <td className="py-2.5 px-3 font-medium text-slate-700">{res.subject_name}</td>
+                      <td className="py-2.5 px-3 text-right font-mono font-bold tabular-nums text-slate-900">
+                        {res.score_obtained}/{res.max_score}
+                      </td>
+                      <td className="py-2.5 px-3 text-right font-mono font-bold tabular-nums text-slate-900">
+                        {Number(res.percentage || 0).toFixed(1)}%
+                      </td>
+                      <td className="py-2.5 px-3 text-center font-bold text-emerald-700">
+                        {res.grade || '—'}
+                      </td>
+                      <td className="py-2.5 px-3">
+                        {res.passed ? (
+                          <span className="text-emerald-700 font-semibold">Passed</span>
+                        ) : (
+                          <span className="text-rose-700 font-semibold">Below Pass Mark</span>
+                        )}
+                      </td>
+                      <td className="py-2.5 px-3 font-mono text-[11px] text-slate-500 tabular-nums">
+                        {res.submitted_at ? new Date(res.submitted_at).toLocaleDateString() : '—'}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
         </div>
       )}
 

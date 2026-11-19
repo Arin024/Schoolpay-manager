@@ -147,7 +147,7 @@ export const SchoolParentsView: React.FC<{ readOnly?: boolean }> = ({ readOnly =
       a.remove();
       window.URL.revokeObjectURL(url);
     } catch (err: any) {
-      alert(err?.message || 'Failed to export parents directory');
+      setStatusMessage(err?.message || 'Failed to export parents directory');
     }
   };
 
@@ -158,7 +158,8 @@ export const SchoolParentsView: React.FC<{ readOnly?: boolean }> = ({ readOnly =
       setParentToDelete(null);
       await loadData();
     } catch (err: any) {
-      alert(err?.message || 'Failed to delete parent');
+      setParentToDelete(null);
+      setStatusMessage(err?.message || 'Failed to delete parent');
     }
   };
 

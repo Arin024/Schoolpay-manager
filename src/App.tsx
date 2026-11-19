@@ -31,6 +31,7 @@ import { TeacherPortalView } from './components/portal/TeacherPortalView.js';
 import { PublicSchoolWebsite } from './components/school/PublicSchoolWebsite.js';
 import { SchoolWebsiteManagerView } from './components/school/SchoolWebsiteManagerView.js';
 import { AdminStaffDeskView } from './components/school/AdminStaffDeskView.js';
+import { SchoolCBTManagerView } from './components/cbt/SchoolCBTManagerView.js';
 import { SuperAdminDashboard } from './components/admin/SuperAdminDashboard.js';
 import { OfflineIndicator } from './components/common/OfflineIndicator.js';
 import { NotFoundPage } from './components/common/NotFoundPage.js';
@@ -69,6 +70,7 @@ import {
   Megaphone,
   Globe,
   BookOpen,
+  MonitorCheck,
 } from 'lucide-react';
 import { SchoolStatusBadge } from './components/common/StatusBadge.js';
 
@@ -76,6 +78,7 @@ type AppView = 'school' | 'superadmin' | 'login' | 'register' | 'thank-you' | 'p
 type SchoolTab =
   | 'overview'
   | 'performance'
+  | 'cbt'
   | 'attendance'
   | 'behaviour'
   | 'announcements'
@@ -107,6 +110,7 @@ const BURSAR_ALLOWED_TABS: SchoolTab[] = [
 const ALL_SCHOOL_TABS: SchoolTab[] = [
   'overview',
   'performance',
+  'cbt',
   'attendance',
   'behaviour',
   'announcements',
@@ -137,6 +141,18 @@ function isTabAllowedForRole(tab: SchoolTab, roleName: string | undefined, isSup
   return tab === 'overview';
 }
 
+function parseSitePathSlugFromLocation(): string | null {
+  try {
+    const pathMatch = window.location.pathname.match(/^\/(?:site|s|portal)\/([^/?#]+)/i);
+    if (pathMatch?.[1]) {
+      return decodeURIComponent(pathMatch[1].trim());
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
 function parsePortalSlugFromLocation(): string | null {
   try {
     const rawHash = window.location.hash.replace(/^#\/?/, '');
@@ -144,10 +160,8 @@ function parsePortalSlugFromLocation(): string | null {
       const slug = rawHash.slice('portal/'.length).split(/[/?#]/)[0]?.trim();
       if (slug) return decodeURIComponent(slug);
     }
-    const pathMatch = window.location.pathname.match(/^\/site\/([^/?#]+)/i);
-    if (pathMatch?.[1]) {
-      return decodeURIComponent(pathMatch[1].trim());
-    }
+    const sitePath = parseSitePathSlugFromLocation();
+    if (sitePath) return sitePath;
     const params = new URLSearchParams(window.location.search);
     const qSlug = params.get('portal') || params.get('school');
     return qSlug ? qSlug.trim() : null;
@@ -175,6 +189,7 @@ const AppContent: React.FC = () => {
   const [adminSchoolsList, setAdminSchoolsList] = useState<Array<{ id: string; name: string; state?: string }>>([]);
   const [switchingTargetSchool, setSwitchingTargetSchool] = useState(false);
   const [portalSlug, setPortalSlug] = useState<string | null>(() => parsePortalSlugFromLocation());
+  const [previewWebsiteSlug, setPreviewWebsiteSlug] = useState<string | null>(() => parseSitePathSlugFromLocation());
   const [registeredSchoolName, setRegisteredSchoolName] = useState<string | undefined>(undefined);
   const [openEnrollOnStudentTab, setOpenEnrollOnStudentTab] = useState(false);
   const [openImportOnStudentTab, setOpenImportOnStudentTab] = useState(false);
@@ -280,6 +295,7 @@ const AppContent: React.FC = () => {
         const tabTitles: Record<string, string> = {
           overview: 'Overview Dashboard',
           performance: 'Academic Performance & Report Cards',
+          cbt: 'Computer-Based Testing (CBT) Centre',
           attendance: 'Attendance Monitoring',
           behaviour: 'Behaviour & Remarks',
           announcements: 'School Announcements',
@@ -398,6 +414,13 @@ const AppContent: React.FC = () => {
         return;
       }
 
+      // 1b. Sync public school website preview route on browser Back/Forward
+      const sitePathSlug = parseSitePathSlugFromLocation();
+      setPreviewWebsiteSlug(sitePathSlug);
+      if (sitePathSlug) {
+        return;
+      }
+
       // 2. If state exists in history event
       if (event.state && event.state.view) {
         const nextView: AppView =
@@ -497,6 +520,13 @@ const AppContent: React.FC = () => {
     setActiveView(initialView);
     setSchoolTab(initialTab);
 
+    // Preserve /site/<handle> live website preview URL for logged-in staff/admins without overwriting pathname
+    if (previewWebsiteSlug || parseSitePathSlugFromLocation()) {
+      updatePageSeo(initialView, initialTab, activeSchool?.name);
+      analytics.trackPageView(initialView, window.location.pathname);
+      return;
+    }
+
     // If user is authenticated and on login/register/portal, blank hash, or a disallowed role hash, sanitize URL to dashboard
     if (
       user &&
@@ -523,7 +553,7 @@ const AppContent: React.FC = () => {
 
     updatePageSeo(initialView, initialTab, activeSchool?.name);
     analytics.trackPageView(initialView, window.location.hash);
-  }, [user, isSuperAdmin, activeSchool, activeRole?.role_name, updatePageSeo]);
+  }, [user, isSuperAdmin, activeSchool, activeRole?.role_name, previewWebsiteSlug, updatePageSeo]);
 
   // Handle successful school registration
   const handleRegistrationSuccess = (schoolData: any) => {
@@ -556,7 +586,7 @@ const AppContent: React.FC = () => {
     );
   }
 
-  const isSchoolPortalContext = Boolean(!user && portalSlug && activeView !== 'register');
+  const isSchoolPortalContext = Boolean((!user && portalSlug && activeView !== 'register') || (user && previewWebsiteSlug));
 
   return (
     <div className="min-h-screen bg-slate-50 flex flex-col selection:bg-emerald-500 selection:text-white overflow-x-hidden">
@@ -564,7 +594,10 @@ const AppContent: React.FC = () => {
       <Header
         onOpenSecuritySettings={() => setIsSecurityModalOpen(true)}
         activeView={activeView}
-        setActiveView={(v) => navigateTo(v as AppView)}
+        setActiveView={(v) => {
+          setPreviewWebsiteSlug(null);
+          navigateTo(v as AppView);
+        }}
         hideRegisterSchool={isSchoolPortalContext}
       />
 
@@ -585,6 +618,25 @@ const AppContent: React.FC = () => {
             onGoHome={() => navigateTo(user ? 'school' : 'login')}
             onGoLogin={() => navigateTo('login')}
           />
+        ) : user && previewWebsiteSlug ? (
+          <PublicSchoolWebsite
+            portalSlug={previewWebsiteSlug}
+            isLoggedInPreview={true}
+            onReturnToDashboard={() => {
+              setPreviewWebsiteSlug(null);
+              window.history.replaceState({ view: 'school', schoolTab }, '', `/#${schoolTab}`);
+            }}
+            onClearPortal={() => {
+              setPreviewWebsiteSlug(null);
+              window.history.replaceState({ view: 'school', schoolTab }, '', `/#${schoolTab}`);
+            }}
+            onAuthSuccess={() => setPreviewWebsiteSlug(null)}
+            onNavigateRegister={() => setPreviewWebsiteSlug(null)}
+            onSelectSchoolPortal={(nextSlug) => {
+              setPreviewWebsiteSlug(nextSlug);
+              window.history.replaceState({ previewWebsiteSlug: nextSlug }, '', `/site/${nextSlug}`);
+            }}
+          />
         ) : !user ? (
           portalSlug && activeView !== 'register' ? (
             <PublicSchoolWebsite
@@ -594,11 +646,14 @@ const AppContent: React.FC = () => {
                 window.history.replaceState({ view: 'login' }, '', '/#login');
                 navigateTo('login', undefined, true);
               }}
-              onAuthSuccess={() => navigateTo('school', 'overview')}
+              onAuthSuccess={() => {
+                setPreviewWebsiteSlug(null);
+                navigateTo('school', 'overview');
+              }}
               onNavigateRegister={() => navigateTo('register')}
               onSelectSchoolPortal={(nextSlug) => {
                 setPortalSlug(nextSlug);
-                window.history.replaceState({ view: 'login', portalSlug: nextSlug }, '', `#portal/${nextSlug}`);
+                window.history.replaceState({ view: 'login', portalSlug: nextSlug }, '', `/site/${nextSlug}`);
               }}
               onForgotPassword={handleOpenForgotModal}
             />
@@ -1122,6 +1177,18 @@ const AppContent: React.FC = () => {
               </button>
 
               <button
+                onClick={() => navigateTo('school', 'cbt')}
+                className={`flex items-center gap-2 px-3.5 py-2.5 rounded-xl text-xs font-bold transition cursor-pointer whitespace-nowrap shrink-0 ${
+                  schoolTab === 'cbt'
+                    ? 'bg-slate-900 text-white shadow'
+                    : 'text-slate-600 hover:bg-slate-100 hover:text-slate-900'
+                }`}
+              >
+                <MonitorCheck className="w-4 h-4 text-emerald-400" />
+                <span>CBT Exams</span>
+              </button>
+
+              <button
                 onClick={() => navigateTo('school', 'finance')}
                 className={`flex items-center gap-2 px-3.5 py-2.5 rounded-xl text-xs font-bold transition cursor-pointer whitespace-nowrap shrink-0 ${
                   schoolTab === 'finance'
@@ -1314,9 +1381,14 @@ const AppContent: React.FC = () => {
                   setOpenImportOnStudentTab(true);
                   navigateTo('school', 'students');
                 }}
+                onPreviewLiveWebsite={(slug) => {
+                  setPreviewWebsiteSlug(slug);
+                  window.history.pushState({ previewWebsiteSlug: slug }, '', `/site/${slug}`);
+                }}
               />
             )}
             {schoolTab === 'performance' && <SchoolPerformanceView />}
+            {schoolTab === 'cbt' && <SchoolCBTManagerView isAdminOverride={true} />}
             {schoolTab === 'attendance' && <SchoolAttendanceView />}
             {schoolTab === 'behaviour' && <SchoolBehaviourView />}
             {schoolTab === 'announcements' && <SchoolAnnouncementsView />}
@@ -1333,7 +1405,14 @@ const AppContent: React.FC = () => {
             {schoolTab === 'parents' && <SchoolParentsView />}
             {schoolTab === 'staff' && <SchoolStaffDirectoryView />}
             {schoolTab === 'sessions' && <SchoolAcademicSessionsView />}
-            {schoolTab === 'website' && <SchoolWebsiteManagerView />}
+            {schoolTab === 'website' && (
+              <SchoolWebsiteManagerView
+                onPreviewLiveWebsite={(slug) => {
+                  setPreviewWebsiteSlug(slug);
+                  window.history.pushState({ previewWebsiteSlug: slug }, '', `/site/${slug}`);
+                }}
+              />
+            )}
             {schoolTab === 'lesson-notes' && <AdminStaffDeskView />}
             {schoolTab === 'profile' && <SchoolProfileView />}
             {schoolTab === 'settings' && <SchoolSettingsView />}

@@ -44,6 +44,7 @@ import { portalRouter } from './portalRoutes.ts';
 import { publicPortalRouter, normalizePhoneDigits } from './publicPortalRoutes.ts';
 import { publicWebsiteRouter, schoolWebsiteRouter } from './schoolWebsiteRoutes.ts';
 import { staffWorkspaceRouter } from './staffWorkspaceRoutes.ts';
+import { cbtRouter } from './cbtRoutes.ts';
 import {
   getCurrentNigerianCalendar,
   generateNextAdmissionNumber,
@@ -147,6 +148,9 @@ apiRouter.use('/v1/school/website', schoolWebsiteRouter);
 
 // Mount Dedicated Staff-Only Workspace (Lesson Notes, Confidential Notices, Requests)
 apiRouter.use('/v1/staff-workspace', staffWorkspaceRouter);
+
+// Mount Computer-Based Testing (CBT) Examination Engine (Admin, Staff, Student, Parent)
+apiRouter.use('/v1/cbt', cbtRouter);
 
 // Public Webhook receiver for payment gateways (Bachs, Paystack, Flutterwave, Sandbox)
 apiRouter.post('/v1/webhooks/payments/:provider', handlePaymentWebhook);

@@ -16,6 +16,7 @@ import {
   Trash2,
   Upload,
   X,
+  ExternalLink,
 } from 'lucide-react';
 import { api } from '../../services/api.js';
 import { useAuth } from '../../context/AuthContext.js';
@@ -31,6 +32,7 @@ import {
   WebsiteThemeAccent,
 } from '../../types/index.js';
 import { compressImageFileToDataUrl } from '../../utils/imageUpload.js';
+import { copyTextToClipboard } from '../../utils/clipboard.js';
 
 type ManagerTab = 'branding' | 'posts' | 'gallery' | 'events' | 'timetable' | 'inquiries';
 
@@ -44,8 +46,12 @@ const THEME_ACCENT_OPTIONS: Array<{ value: WebsiteThemeAccent; label: string; sw
 
 const DAYS_OF_WEEK = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
 
-export const SchoolWebsiteManagerView: React.FC = () => {
-  const { activeSchool } = useAuth();
+interface SchoolWebsiteManagerViewProps {
+  onPreviewLiveWebsite?: (slug: string) => void;
+}
+
+export const SchoolWebsiteManagerView: React.FC<SchoolWebsiteManagerViewProps> = ({ onPreviewLiveWebsite }) => {
+  const { activeSchool, refreshMe } = useAuth();
   const [tab, setTab] = useState<ManagerTab>('branding');
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -157,10 +163,12 @@ export const SchoolWebsiteManagerView: React.FC = () => {
     loadAll();
   }, [activeSchool?.id]);
 
-  const handleCopy = (key: string, text: string) => {
-    navigator.clipboard.writeText(text);
-    setCopiedField(key);
-    setTimeout(() => setCopiedField(null), 2200);
+  const handleCopy = async (key: string, text: string) => {
+    const ok = await copyTextToClipboard(text);
+    if (ok) {
+      setCopiedField(key);
+      setTimeout(() => setCopiedField(null), 2200);
+    }
   };
 
   const handleImageUpload = async (
@@ -189,7 +197,8 @@ export const SchoolWebsiteManagerView: React.FC = () => {
       setProfileForm(res.website);
       setUrls(res.urls);
       setSubdomainInput(res.urls?.portal_subdomain || subdomainInput);
-      setFeedback({ type: 'ok', text: res.message || 'School website branding and subdomain updated.' });
+      await refreshMe().catch(() => {});
+      setFeedback({ type: 'ok', text: res.message || 'School website branding and live URL handle updated.' });
     } catch (err: any) {
       setFeedback({ type: 'err', text: err?.message || 'Failed to update school website settings.' });
     } finally {
@@ -425,26 +434,44 @@ export const SchoolWebsiteManagerView: React.FC = () => {
           </div>
         </div>
 
-        {/* Copyable Subdomain & Website Links Strip */}
+        {/* Copyable Live Website & Portal Links Strip */}
         <div className="grid grid-cols-1 md:grid-cols-3 gap-3 text-xs">
           <div className="p-3.5 rounded-xl bg-slate-900 text-white flex items-center justify-between gap-2">
             <div className="min-w-0">
-              <p className="text-[11px] text-slate-300">Official Subdomain Address</p>
-              <p className="font-mono text-emerald-300 font-semibold truncate select-all">{subdomainUrl}</p>
+              <p className="text-[11px] text-emerald-300 font-semibold">Live Shareable Website Link (Recommended)</p>
+              <p className="font-mono text-white font-semibold truncate select-all">{sitePathUrl}</p>
             </div>
-            <button
-              type="button"
-              onClick={() => handleCopy('subdomain', subdomainUrl)}
-              className="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-white text-[11px] font-bold inline-flex items-center gap-1 shrink-0 cursor-pointer"
-            >
-              {copiedField === 'subdomain' ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
-              <span>{copiedField === 'subdomain' ? 'Copied' : 'Copy'}</span>
-            </button>
+            <div className="flex items-center gap-1.5 shrink-0">
+              <button
+                type="button"
+                onClick={() => handleCopy('sitepath', sitePathUrl)}
+                className="px-2.5 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-[11px] font-bold inline-flex items-center gap-1 cursor-pointer"
+              >
+                {copiedField === 'sitepath' ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
+                <span>{copiedField === 'sitepath' ? 'Copied' : 'Copy'}</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  const handle = urls?.portal_subdomain || activeSchool?.slug || '';
+                  if (onPreviewLiveWebsite && handle) {
+                    onPreviewLiveWebsite(handle);
+                  } else if (handle) {
+                    window.location.href = `/site/${handle}`;
+                  }
+                }}
+                className="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-white text-[11px] font-bold inline-flex items-center gap-1 cursor-pointer"
+                title="Open your live public school website"
+              >
+                <ExternalLink className="w-3.5 h-3.5 text-emerald-400" />
+                <span>Open</span>
+              </button>
+            </div>
           </div>
 
           <div className="p-3.5 rounded-xl bg-slate-50 border border-slate-200 flex items-center justify-between gap-2">
             <div className="min-w-0">
-              <p className="text-[11px] text-slate-500">Shareable Portal URL</p>
+              <p className="text-[11px] text-slate-500">Direct Portal Hash Link (Works Everywhere)</p>
               <p className="font-mono text-slate-800 font-semibold truncate select-all">{directPortalUrl}</p>
             </div>
             <button
@@ -459,16 +486,16 @@ export const SchoolWebsiteManagerView: React.FC = () => {
 
           <div className="p-3.5 rounded-xl bg-slate-50 border border-slate-200 flex items-center justify-between gap-2">
             <div className="min-w-0">
-              <p className="text-[11px] text-slate-500">Clean Site Path URL</p>
-              <p className="font-mono text-slate-800 font-semibold truncate select-all">{sitePathUrl}</p>
+              <p className="text-[11px] text-slate-500">Custom Wildcard Host (Requires *.bursariq.com.ng DNS)</p>
+              <p className="font-mono text-slate-600 font-semibold truncate select-all">{subdomainUrl}</p>
             </div>
             <button
               type="button"
-              onClick={() => handleCopy('sitepath', sitePathUrl)}
-              className="px-2.5 py-1.5 rounded-lg bg-white border border-slate-300 hover:bg-slate-100 text-slate-800 text-[11px] font-bold inline-flex items-center gap-1 shrink-0 cursor-pointer"
+              onClick={() => handleCopy('subdomain', subdomainUrl)}
+              className="px-2.5 py-1.5 rounded-lg bg-white border border-slate-300 hover:bg-slate-100 text-slate-700 text-[11px] font-bold inline-flex items-center gap-1 shrink-0 cursor-pointer"
             >
-              {copiedField === 'sitepath' ? <Check className="w-3.5 h-3.5 text-emerald-600" /> : <Copy className="w-3.5 h-3.5" />}
-              <span>{copiedField === 'sitepath' ? 'Copied' : 'Copy'}</span>
+              {copiedField === 'subdomain' ? <Check className="w-3.5 h-3.5 text-emerald-600" /> : <Copy className="w-3.5 h-3.5" />}
+              <span>{copiedField === 'subdomain' ? 'Copied' : 'Copy'}</span>
             </button>
           </div>
         </div>

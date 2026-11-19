@@ -60,6 +60,15 @@ import {
   TimetableSlotItem,
   StaffRequestItem,
   ConfidentialNoticeItem,
+  CbtExamItem,
+  CbtQuestionItem,
+  CbtStudentExamItem,
+  CbtStudentHistoryItem,
+  CbtStartSessionResponse,
+  CbtReviewItem,
+  CbtExamResultsResponse,
+  CbtParentResultItem,
+  CbtAnswerEntry,
 } from '../types/index.js';
 
 const API_BASE = '/api/v1';
@@ -2860,6 +2869,222 @@ export const api = {
       body: JSON.stringify(data),
     });
   },
+
+  // ============================================================================
+  // COMPUTER-BASED TESTING (CBT) EXAMINATION ENGINE
+  // ============================================================================
+
+  async getCbtExams(params?: { class_id?: string; status?: string; search?: string }): Promise<{
+    success: boolean;
+    exams: CbtExamItem[];
+  }> {
+    const query = new URLSearchParams();
+    if (params?.class_id) query.set('class_id', params.class_id);
+    if (params?.status) query.set('status', params.status);
+    if (params?.search) query.set('search', params.search);
+    const qs = query.toString() ? `?${query.toString()}` : '';
+    return safeFetch(`${API_BASE}/cbt/exams${qs}`, {
+      headers: getAuthHeaders(),
+    });
+  },
+
+  async createCbtExam(data: Partial<CbtExamItem>): Promise<{ success: boolean; exam: CbtExamItem }> {
+    return safeFetch(`${API_BASE}/cbt/exams`, {
+      method: 'POST',
+      headers: getAuthHeaders(),
+      body: JSON.stringify(data),
+    });
+  },
+
+  async updateCbtExam(id: string, data: Partial<CbtExamItem>): Promise<{ success: boolean; exam: CbtExamItem }> {
+    return safeFetch(`${API_BASE}/cbt/exams/${id}`, {
+      method: 'PUT',
+      headers: getAuthHeaders(),
+      body: JSON.stringify(data),
+    });
+  },
+
+  async deleteCbtExam(id: string): Promise<{ success: boolean }> {
+    return safeFetch(`${API_BASE}/cbt/exams/${id}`, {
+      method: 'DELETE',
+      headers: getAuthHeaders(),
+    });
+  },
+
+  async getCbtQuestions(examId: string): Promise<{
+    success: boolean;
+    exam: CbtExamItem;
+    questions: CbtQuestionItem[];
+  }> {
+    return safeFetch(`${API_BASE}/cbt/exams/${examId}/questions`, {
+      headers: getAuthHeaders(),
+    });
+  },
+
+  async createCbtQuestion(
+    examId: string,
+    data: Partial<CbtQuestionItem>
+  ): Promise<{ success: boolean; question: CbtQuestionItem; total_marks: number }> {
+    return safeFetch(`${API_BASE}/cbt/exams/${examId}/questions`, {
+      method: 'POST',
+      headers: getAuthHeaders(),
+      body: JSON.stringify(data),
+    });
+  },
+
+  async bulkImportCbtQuestions(
+    examId: string,
+    payload: { raw_text?: string; questions?: Partial<CbtQuestionItem>[] }
+  ): Promise<{
+    success: boolean;
+    importedCount: number;
+    skippedCount: number;
+    errors: string[];
+    total_marks: number;
+    questions: CbtQuestionItem[];
+  }> {
+    return safeFetch(`${API_BASE}/cbt/exams/${examId}/questions/bulk`, {
+      method: 'POST',
+      headers: getAuthHeaders(),
+      body: JSON.stringify(payload),
+    });
+  },
+
+  async updateCbtQuestion(
+    examId: string,
+    questionId: string,
+    data: Partial<CbtQuestionItem>
+  ): Promise<{ success: boolean; question: CbtQuestionItem; total_marks: number }> {
+    return safeFetch(`${API_BASE}/cbt/exams/${examId}/questions/${questionId}`, {
+      method: 'PUT',
+      headers: getAuthHeaders(),
+      body: JSON.stringify(data),
+    });
+  },
+
+  async deleteCbtQuestion(examId: string, questionId: string): Promise<{ success: boolean; total_marks: number }> {
+    return safeFetch(`${API_BASE}/cbt/exams/${examId}/questions/${questionId}`, {
+      method: 'DELETE',
+      headers: getAuthHeaders(),
+    });
+  },
+
+  async getCbtExamResults(examId: string): Promise<CbtExamResultsResponse> {
+    return safeFetch(`${API_BASE}/cbt/exams/${examId}/results`, {
+      headers: getAuthHeaders(),
+    });
+  },
+
+  async exportCbtExamResultsCsv(examId: string): Promise<Blob> {
+    const res = await fetch(`${API_BASE}/cbt/exams/${examId}/results/export`, {
+      headers: getAuthHeaders(),
+    });
+    if (!res.ok) throw new Error('Failed to export CBT results CSV');
+    return res.blob();
+  },
+
+  async syncCbtScoresToReportCard(
+    examId: string,
+    data: { examination_id: string; subject_id?: string; target: 'CA' | 'EXAM' }
+  ): Promise<{
+    success: boolean;
+    syncedCount: number;
+    target: string;
+    targetMax: number;
+    examinationTitle: string;
+    message: string;
+  }> {
+    return safeFetch(`${API_BASE}/cbt/exams/${examId}/sync-scores`, {
+      method: 'POST',
+      headers: getAuthHeaders(),
+      body: JSON.stringify(data),
+    });
+  },
+
+  async resetCbtAttempt(attemptId: string): Promise<{ success: boolean; message: string }> {
+    return safeFetch(`${API_BASE}/cbt/attempts/${attemptId}/reset`, {
+      method: 'POST',
+      headers: getAuthHeaders(),
+    });
+  },
+
+  // Student CBT Exam Hall
+  async getStudentCbtExams(): Promise<{
+    success: boolean;
+    student: { id: string; full_name: string; admission_number?: string; class_id?: string; class_name?: string | null };
+    exams: CbtStudentExamItem[];
+    history: CbtStudentHistoryItem[];
+  }> {
+    return safeFetch(`${API_BASE}/cbt/student/exams`, {
+      headers: getAuthHeaders(),
+    });
+  },
+
+  async startStudentCbtExam(examId: string, accessCode?: string): Promise<CbtStartSessionResponse> {
+    return safeFetch(`${API_BASE}/cbt/student/exams/${examId}/start`, {
+      method: 'POST',
+      headers: getAuthHeaders(),
+      body: JSON.stringify(accessCode ? { access_code: accessCode } : {}),
+    });
+  },
+
+  async saveStudentCbtAnswer(
+    attemptId: string,
+    payload: { question_id?: string; selected?: string; flagged?: boolean; tab_switch_delta?: number }
+  ): Promise<{
+    success: boolean;
+    auto_submitted?: boolean;
+    saved_at?: string;
+    answered_count?: number;
+    tab_switch_count?: number;
+    remaining_seconds?: number;
+    attempt?: any;
+  }> {
+    return safeFetch(`${API_BASE}/cbt/student/attempts/${attemptId}/answer`, {
+      method: 'PUT',
+      headers: getAuthHeaders(),
+      body: JSON.stringify(payload),
+    });
+  },
+
+  async submitStudentCbtAttempt(
+    attemptId: string,
+    payload?: { answers?: Record<string, CbtAnswerEntry>; auto_submitted?: boolean }
+  ): Promise<{
+    success: boolean;
+    result_withheld: boolean;
+    attempt: any;
+    review: CbtReviewItem[] | null;
+  }> {
+    return safeFetch(`${API_BASE}/cbt/student/attempts/${attemptId}/submit`, {
+      method: 'POST',
+      headers: getAuthHeaders(),
+      body: JSON.stringify(payload || {}),
+    });
+  },
+
+  async getStudentCbtAttemptReview(attemptId: string): Promise<{
+    success: boolean;
+    exam: { id: string; title: string; subject_name: string; class_name: string; pass_mark_percent: number };
+    attempt: any;
+    review: CbtReviewItem[] | null;
+  }> {
+    return safeFetch(`${API_BASE}/cbt/student/attempts/${attemptId}/review`, {
+      headers: getAuthHeaders(),
+    });
+  },
+
+  // Parent Read-Only CBT Results
+  async getParentCbtResults(studentId?: string): Promise<{
+    success: boolean;
+    results: CbtParentResultItem[];
+  }> {
+    const qs = studentId ? `?student_id=${encodeURIComponent(studentId)}` : '';
+    return safeFetch(`${API_BASE}/cbt/parent/results${qs}`, {
+      headers: getAuthHeaders(),
+    });
+  },
 };
+
 
 
