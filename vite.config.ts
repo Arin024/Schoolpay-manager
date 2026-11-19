@@ -50,7 +50,7 @@ export default defineConfig(() => {
           clientsClaim: true,
           skipWaiting: true,
           navigateFallback: '/index.html',
-          navigateFallbackDenylist: [/^\/api\/.*/, /^\/v1\/.*/, /^\/health.*/],
+          navigateFallbackDenylist: [/^\/api\/.*/, /^\/v1\/.*/, /^\/auth\/.*/, /^\/health.*/],
           runtimeCaching: [
             {
               urlPattern: /^\/api\/.*/,
@@ -58,6 +58,10 @@ export default defineConfig(() => {
             },
             {
               urlPattern: /^\/v1\/.*/,
+              handler: 'NetworkOnly',
+            },
+            {
+              urlPattern: /^\/auth\/.*/,
               handler: 'NetworkOnly',
             },
           ],

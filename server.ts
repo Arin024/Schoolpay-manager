@@ -190,6 +190,14 @@ async function startServer() {
     next();
   });
 
+  // Prevent edge/carrier/browser proxies from ever caching dynamic API responses or transient errors
+  app.use(['/api', '/api/v1', '/v1', '/health'], (_req, res, next) => {
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+    res.setHeader('Pragma', 'no-cache');
+    res.setHeader('Expires', '0');
+    next();
+  });
+
   // Mount API Router on /api and aliases (/v1, /api/v1) to guarantee zero routing divergence
   app.use('/api', apiRouter);
   app.use('/api/v1', apiRouter);
@@ -332,7 +340,7 @@ async function startServer() {
     });
   }
 
-  app.listen(PORT, '0.0.0.0', () => {
+  const httpServer = app.listen(PORT, '0.0.0.0', () => {
     console.log(`=======================================================`);
     console.log(`  SCHOOL PAY MANAGER - STEP 1 FOUNDATION SERVER`);
     console.log(`  Running on: http://0.0.0.0:${PORT}`);
@@ -340,6 +348,11 @@ async function startServer() {
     console.log(`  Platform Super Admin: SchoolPay28@gmail.com`);
     console.log(`=======================================================`);
   });
+
+  // Align Node HTTP keep-alive timeouts above Cloudflare/Render 60s upstream idle timeout
+  // to prevent spurious 502 / connection-reset errors when proxy reuses pooled sockets.
+  httpServer.keepAliveTimeout = 65_000;
+  httpServer.headersTimeout = 66_000;
 }
 
 startServer().catch((err) => {

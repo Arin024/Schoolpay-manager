@@ -131,6 +131,19 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     initAuth();
   }, []);
 
+  useEffect(() => {
+    const handleOnline = () => {
+      const token =
+        localStorage.getItem('bursariq_session_token') ||
+        localStorage.getItem('schoolpay_session_token');
+      if (token && !user) {
+        initAuth();
+      }
+    };
+    window.addEventListener('online', handleOnline);
+    return () => window.removeEventListener('online', handleOnline);
+  }, [user]);
+
   const completeSessionAuth = async (data: any) => {
     localStorage.setItem('bursariq_session_token', data.token);
     localStorage.setItem('schoolpay_session_token', data.token);

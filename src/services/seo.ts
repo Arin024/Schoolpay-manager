@@ -15,7 +15,7 @@ export interface SeoConfig {
 const DEFAULT_DESCRIPTION =
   'Complete Nigerian school operations, academics, and bursary platform. Manage student records, role-separated Parent/Student/Teacher portals, End-of-Term & Full-Session report cards, attendance, behaviour, and verified tuition receipts.';
 const DEFAULT_OG_IMAGE = '/og-image.png';
-const BASE_URL = 'https://bursariq.com.ng';
+const BASE_URL = 'https://www.bursariq.com.ng';
 
 export function updateSeo(config: Partial<SeoConfig>) {
   const fullTitle = config.title

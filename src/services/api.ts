@@ -72,86 +72,257 @@ import {
 } from '../types/index.js';
 
 const API_BASE = '/api/v1';
+const CANONICAL_PRODUCTION_ORIGIN = 'https://www.bursariq.com.ng';
+
+export type ApiErrorCode = 'OFFLINE' | 'TIMEOUT' | 'SERVER_WAKING' | 'NETWORK_ERROR' | 'HTTP_ERROR';
 
 export class ApiError extends Error {
   status: number;
   data: any;
+  code: ApiErrorCode;
 
-  constructor(status: number, message: string, data?: any) {
+  constructor(status: number, message: string, data?: any, code: ApiErrorCode = 'HTTP_ERROR') {
     super(message);
     this.status = status;
     this.data = data;
+    this.code = code;
     this.name = 'ApiError';
   }
 }
 
-export async function safeFetch<T = any>(url: string, options?: RequestInit): Promise<T> {
-  const headers = new Headers(options?.headers || {});
+/**
+ * Resolves relative API URLs safely.
+ * If a stale cached page or WebView is running on the redirecting apex domain (bursariq.com.ng),
+ * bypass Render's 301/307 edge redirect by calling the canonical primary origin directly
+ * (which already permits https://bursariq.com.ng via CORS).
+ */
+export function resolveRequestUrl(url: string, hostnameOverride?: string): string {
+  if (!url.startsWith('/')) return url;
+  const currentHost =
+    hostnameOverride !== undefined
+      ? hostnameOverride.toLowerCase()
+      : typeof window !== 'undefined' && window.location?.hostname
+      ? window.location.hostname.toLowerCase()
+      : '';
+  if (currentHost === 'bursariq.com.ng') {
+    return `${CANONICAL_PRODUCTION_ORIGIN}${url}`;
+  }
+  return url;
+}
+
+const RETRYABLE_GATEWAY_STATUSES = new Set([408, 502, 503, 504, 520, 522, 524]);
+
+function isSafeRetryablePostPath(url: string): boolean {
+  const lower = url.toLowerCase();
+  return (
+    lower.includes('/auth/login') ||
+    lower.includes('/public/portal/admission-login') ||
+    lower.includes('/public/portal/staff-code-login') ||
+    lower.includes('/public/verify-document') ||
+    lower.includes('/public/resolve-host')
+  );
+}
+
+function waitMs(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function fetchWithTimeout(
+  url: string,
+  options: RequestInit,
+  timeoutMs: number
+): Promise<Response> {
+  const controller = new AbortController();
+  const externalSignal = options.signal;
+
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, timeoutMs);
+
+  const onExternalAbort = () => controller.abort();
+  if (externalSignal) {
+    if (externalSignal.aborted) {
+      clearTimeout(timer);
+      controller.abort();
+    } else {
+      externalSignal.addEventListener('abort', onExternalAbort, { once: true });
+    }
+  }
+
+  try {
+    return await fetch(url, {
+      ...options,
+      signal: controller.signal,
+    });
+  } catch (err: any) {
+    if (timedOut) {
+      const timeoutErr = new Error('REQUEST_TIMEOUT');
+      timeoutErr.name = 'TimeoutError';
+      throw timeoutErr;
+    }
+    throw err;
+  } finally {
+    clearTimeout(timer);
+    if (externalSignal) {
+      externalSignal.removeEventListener('abort', onExternalAbort);
+    }
+  }
+}
+
+export interface SafeFetchOptions extends RequestInit {
+  timeoutMs?: number;
+  maxRetries?: number;
+}
+
+export async function safeFetch<T = any>(url: string, options?: SafeFetchOptions): Promise<T> {
+  const { timeoutMs, maxRetries, ...fetchInit } = options || {};
+  const headers = new Headers(fetchInit.headers || {});
   if (!headers.has('Accept')) {
     headers.set('Accept', 'application/json');
   }
   const mergedOptions: RequestInit = {
-    ...options,
+    ...fetchInit,
     headers,
   };
 
-  let res: Response;
-  try {
-    res = await fetch(url, mergedOptions);
-  } catch (err: any) {
-    throw new ApiError(
-      0,
-      'Unable to connect to the server. Please check your internet connection and try again.',
-      { originalError: err?.message }
-    );
-  }
+  const method = (mergedOptions.method || 'GET').toUpperCase();
+  const isIdempotentRead = method === 'GET' || method === 'HEAD';
+  const isSafeRetryPost = method === 'POST' && isSafeRetryablePostPath(url);
+  const allowedRetries =
+    typeof maxRetries === 'number'
+      ? Math.max(0, maxRetries)
+      : isIdempotentRead
+      ? 2
+      : isSafeRetryPost
+      ? 1
+      : 0;
 
-  const contentType = res.headers.get('content-type') || '';
-  let data: any = null;
+  const resolvedUrl = resolveRequestUrl(url);
 
-  if (contentType.includes('application/json')) {
+  for (let attempt = 0; attempt <= allowedRetries; attempt++) {
+    const isOffline = typeof navigator !== 'undefined' && navigator.onLine === false;
+    if (isOffline) {
+      throw new ApiError(
+        0,
+        'Your device appears to be offline. Please check your mobile data or Wi-Fi connection and try again.',
+        { offline: true },
+        'OFFLINE'
+      );
+    }
+
+    // Give Render cold-start retries slightly longer window so wake-ups succeed seamlessly
+    const attemptTimeoutMs = timeoutMs ?? (attempt === 0 ? 20000 : 35000);
+
+    let res: Response;
     try {
-      data = await res.json();
-    } catch {
-      data = null;
-    }
-  } else {
-    // Non-JSON response (e.g. HTML from 502/503 Cloud Run gateway, cold start, or SPA fallback)
-    const text = await res.text().catch(() => '');
-    if (res.status === 502 || res.status === 503) {
+      res = await fetchWithTimeout(resolvedUrl, mergedOptions, attemptTimeoutMs);
+    } catch (err: any) {
+      // If caller explicitly cancelled the request, rethrow without retrying
+      if (mergedOptions.signal?.aborted) {
+        throw new ApiError(0, 'Request was cancelled.', { aborted: true }, 'NETWORK_ERROR');
+      }
+
+      const isTimeout = err?.name === 'TimeoutError' || err?.message === 'REQUEST_TIMEOUT';
+      const nowOffline = typeof navigator !== 'undefined' && navigator.onLine === false;
+
+      if (!nowOffline && attempt < allowedRetries) {
+        await waitMs(attempt === 0 ? 1200 : 2500);
+        continue;
+      }
+
+      if (nowOffline) {
+        throw new ApiError(
+          0,
+          'Your device lost internet connection. Please reconnect your mobile data or Wi-Fi and try again.',
+          { originalError: err?.message, offline: true },
+          'OFFLINE'
+        );
+      }
+
+      if (isTimeout) {
+        throw new ApiError(
+          408,
+          'The server took too long to respond (it may be waking up or your mobile network is slow). Please tap Try Again.',
+          { originalError: err?.message, timeout: true },
+          'TIMEOUT'
+        );
+      }
+
       throw new ApiError(
-        res.status,
-        'Server is temporarily warming up or restarting. Please try again in a few moments.',
-        { raw: text }
+        0,
+        'Could not reach the BursarIQ server right now. Your network may have briefly dropped or the server is finishing an update — please try again in a few seconds.',
+        { originalError: err?.message },
+        'NETWORK_ERROR'
       );
     }
-    if (res.status === 404) {
+
+    // Retry transient gateway / Render cold-start statuses automatically before surfacing an error
+    if (RETRYABLE_GATEWAY_STATUSES.has(res.status) && attempt < allowedRetries) {
+      await waitMs(attempt === 0 ? 1500 : 3000);
+      continue;
+    }
+
+    const contentType = res.headers.get('content-type') || '';
+    let data: any = null;
+
+    if (contentType.includes('application/json')) {
+      try {
+        data = await res.json();
+      } catch {
+        data = null;
+      }
+    } else {
+      // Non-JSON response (e.g. HTML from 502/503/504 Render gateway, cold start, or proxy page)
+      const text = await res.text().catch(() => '');
+      if (RETRYABLE_GATEWAY_STATUSES.has(res.status)) {
+        throw new ApiError(
+          res.status,
+          'BursarIQ server is finishing a quick restart or waking up. Please wait a few seconds and try again.',
+          { raw: text },
+          'SERVER_WAKING'
+        );
+      }
+      if (res.status === 404) {
+        throw new ApiError(
+          res.status,
+          'The requested API endpoint was not found on this server.',
+          { raw: text },
+          'HTTP_ERROR'
+        );
+      }
+      if (!res.ok) {
+        throw new ApiError(
+          res.status,
+          `Server responded with HTTP ${res.status}. Please try again shortly.`,
+          { raw: text },
+          'HTTP_ERROR'
+        );
+      }
       throw new ApiError(
         res.status,
-        'The requested API endpoint was not found on this server.',
-        { raw: text }
+        'Received an unexpected response from the server. Please reload and try again.',
+        { raw: text },
+        'HTTP_ERROR'
       );
     }
+
     if (!res.ok) {
-      throw new ApiError(
-        res.status,
-        `Server responded with HTTP ${res.status}. Please try again shortly.`,
-        { raw: text }
-      );
+      const errorMsg = data?.message || data?.error || `Request failed with status ${res.status}`;
+      const code: ApiErrorCode = RETRYABLE_GATEWAY_STATUSES.has(res.status) ? 'SERVER_WAKING' : 'HTTP_ERROR';
+      throw new ApiError(res.status, errorMsg, data, code);
     }
-    throw new ApiError(
-      res.status,
-      'Received an unexpected response from the server. Please reload and try again.',
-      { raw: text }
-    );
+
+    return data as T;
   }
 
-  if (!res.ok) {
-    const errorMsg = data?.message || data?.error || `Request failed with status ${res.status}`;
-    throw new ApiError(res.status, errorMsg, data);
-  }
-
-  return data as T;
+  throw new ApiError(
+    0,
+    'Unable to connect to the server after multiple attempts. Please check your connection and try again.',
+    {},
+    'NETWORK_ERROR'
+  );
 }
 
 function getAuthHeaders(schoolId?: string | null): Record<string, string> {

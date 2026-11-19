@@ -22,6 +22,8 @@ import {
   X,
   ArrowLeft,
   Clock,
+  RefreshCw,
+  WifiOff,
 } from 'lucide-react';
 import { api } from '../../services/api.js';
 import {
@@ -120,7 +122,11 @@ export const PublicSchoolWebsite: React.FC<PublicSchoolWebsiteProps> = ({
 }) => {
   const [data, setData] = useState<PublicSchoolWebsiteData | null>(null);
   const [loading, setLoading] = useState(true);
+  const [isSlowLoad, setIsSlowLoad] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [errorStatus, setErrorStatus] = useState<number | null>(null);
+  const [errorCode, setErrorCode] = useState<string | null>(null);
+  const [retryTick, setRetryTick] = useState(0);
 
   // Interactive Filters & Modals
   const [selectedCategory, setSelectedCategory] = useState<string>('ALL');
@@ -146,10 +152,17 @@ export const PublicSchoolWebsite: React.FC<PublicSchoolWebsiteProps> = ({
   useEffect(() => {
     let active = true;
     setLoading(true);
+    setIsSlowLoad(false);
     setError(null);
+    setErrorStatus(null);
+    setErrorCode(null);
     setSelectedCategory('ALL');
     setSelectedAlbum('ALL');
     setInquiryResult(null);
+
+    const slowTimer = window.setTimeout(() => {
+      if (active) setIsSlowLoad(true);
+    }, 4500);
 
     api
       .getPublicSchoolWebsite(portalSlug)
@@ -159,16 +172,33 @@ export const PublicSchoolWebsite: React.FC<PublicSchoolWebsiteProps> = ({
       })
       .catch((err: any) => {
         if (!active) return;
+        setErrorStatus(typeof err?.status === 'number' ? err.status : 0);
+        setErrorCode(err?.code || null);
         setError(err?.message || 'Unable to load this school portal website.');
       })
       .finally(() => {
-        if (active) setLoading(false);
+        window.clearTimeout(slowTimer);
+        if (active) {
+          setLoading(false);
+          setIsSlowLoad(false);
+        }
       });
 
     return () => {
       active = false;
+      window.clearTimeout(slowTimer);
     };
-  }, [portalSlug]);
+  }, [portalSlug, retryTick]);
+
+  // Automatically recover when device regains internet connectivity after an offline/network failure
+  useEffect(() => {
+    if (!error || errorStatus === 404) return;
+    const handleOnline = () => {
+      setRetryTick((t) => t + 1);
+    };
+    window.addEventListener('online', handleOnline);
+    return () => window.removeEventListener('online', handleOnline);
+  }, [error, errorStatus]);
 
   const theme = ACCENT_PALETTES[data?.website?.theme_accent || 'emerald'] || ACCENT_PALETTES.emerald;
 
@@ -259,21 +289,74 @@ export const PublicSchoolWebsite: React.FC<PublicSchoolWebsiteProps> = ({
   if (loading && !data) {
     return (
       <div className="space-y-8 py-8">
-        <div className="bg-white rounded-2xl border border-slate-200 p-10 text-center space-y-3">
-          <div className="w-12 h-12 rounded-xl bg-slate-100 mx-auto animate-pulse" />
-          <p className="text-sm font-semibold text-slate-600">Loading Official School Website...</p>
+        <div className="bg-white rounded-2xl border border-slate-200 p-8 sm:p-10 text-center space-y-4">
+          <div className="w-12 h-12 rounded-xl bg-emerald-50 border border-emerald-200 mx-auto flex items-center justify-center">
+            <RefreshCw className="w-5 h-5 text-emerald-600 animate-spin" />
+          </div>
+          <div className="space-y-1.5">
+            <p className="text-sm font-semibold text-slate-700">Loading Official School Website...</p>
+            {isSlowLoad && (
+              <p className="text-xs text-slate-500 max-w-md mx-auto">
+                Connecting to the school server. On mobile networks or after a quick server wake-up, this can take a few extra seconds.
+              </p>
+            )}
+          </div>
+          {isSlowLoad && (
+            <div className="pt-1">
+              <button
+                type="button"
+                onClick={() => setRetryTick((t) => t + 1)}
+                className="px-4 py-2 bg-slate-900 hover:bg-slate-800 text-white rounded-xl text-xs font-bold inline-flex items-center gap-1.5 cursor-pointer"
+              >
+                <RefreshCw className="w-3.5 h-3.5" />
+                <span>Retry Connection</span>
+              </button>
+            </div>
+          )}
         </div>
       </div>
     );
   }
 
   if (error && !data) {
+    const isNotFound = errorStatus === 404;
+    const isOfflineErr = errorCode === 'OFFLINE' || (typeof navigator !== 'undefined' && navigator.onLine === false);
     return (
       <div className="space-y-8 py-6">
-        <div className="bg-white rounded-2xl border border-rose-200 p-8 text-center space-y-4">
-          <h2 className="text-xl font-bold text-slate-900">School Portal Not Found</h2>
+        <div
+          className={`bg-white rounded-2xl border p-8 text-center space-y-4 ${
+            isNotFound ? 'border-rose-200' : 'border-amber-200'
+          }`}
+        >
+          {!isNotFound && (
+            <div className="w-12 h-12 rounded-2xl bg-amber-50 border border-amber-200 text-amber-600 mx-auto flex items-center justify-center">
+              <WifiOff className="w-6 h-6" />
+            </div>
+          )}
+          <h2 className="text-xl font-bold text-slate-900">
+            {isNotFound
+              ? 'School Portal Not Found'
+              : isOfflineErr
+              ? 'No Internet Connection'
+              : 'Temporary Connection Issue'}
+          </h2>
           <p className="text-sm text-slate-600 max-w-lg mx-auto">{error}</p>
+          {!isNotFound && (
+            <p className="text-xs text-slate-500 max-w-md mx-auto">
+              This page will automatically reload once your connection stabilizes, or you can tap Try Again below.
+            </p>
+          )}
           <div className="flex flex-wrap justify-center gap-3">
+            {!isNotFound && (
+              <button
+                type="button"
+                onClick={() => setRetryTick((t) => t + 1)}
+                className="px-5 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold inline-flex items-center gap-1.5 cursor-pointer"
+              >
+                <RefreshCw className="w-3.5 h-3.5" />
+                <span>Try Again</span>
+              </button>
+            )}
             <button
               type="button"
               onClick={onClearPortal}

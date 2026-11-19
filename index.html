@@ -5,6 +5,45 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
     <title>BursarIQ - School Operations, Academics, Portals &amp; Bursary for Nigerian Schools</title>
     <script>
+      // Canonical Host & Stale Apex Service Worker Self-Healer:
+      // Production primary host is www.bursariq.com.ng; apex bursariq.com.ng 301/307-redirects at Render edge.
+      // If a cached PWA Service Worker ever serves index.html on apex bursariq.com.ng, relative /api/* POSTs
+      // hit a cross-origin 307 redirect and get aborted by browser CORS rules. Immediately purge any apex SW
+      // and redirect seamlessly to https://www.bursariq.com.ng preserving the exact path/query/hash.
+      (function () {
+        try {
+          if (window.location && window.location.hostname === 'bursariq.com.ng') {
+            if ('serviceWorker' in navigator && navigator.serviceWorker.getRegistrations) {
+              navigator.serviceWorker.getRegistrations().then(function (regs) {
+                regs.forEach(function (r) { r.unregister().catch(function () {}); });
+              }).catch(function () {});
+            }
+            if ('caches' in window && caches.keys) {
+              caches.keys().then(function (keys) {
+                keys.forEach(function (k) { caches.delete(k).catch(function () {}); });
+              }).catch(function () {});
+            }
+            var targetUrl =
+              'https://www.bursariq.com.ng' +
+              (window.location.pathname || '/') +
+              (window.location.search || '') +
+              (window.location.hash || '');
+            if (navigator.onLine !== false) {
+              window.location.replace(targetUrl);
+            } else {
+              window.addEventListener(
+                'online',
+                function () {
+                  window.location.replace(targetUrl);
+                },
+                { once: true }
+              );
+            }
+          }
+        } catch (_e) {}
+      })();
+    </script>
+    <script>
       // Suppress and handle benign Vite dev server HMR WebSocket close warnings in cloud iframe environments
       (function () {
         const OrigWebSocket = window.WebSocket;
@@ -72,11 +111,11 @@
     </script>
     <meta name="description" content="Complete multi-tenant school management, academics, and bursary platform for Nigerian schools. Run role-separated Parent, Student, Teacher & Admin portals, End-of-Term and Full-Session report cards, attendance, behaviour, and reconciled tuition billing." />
     <meta name="author" content="Arinzechukwu Christian" />
-    <link rel="canonical" href="https://bursariq.com.ng/" />
+    <link rel="canonical" href="https://www.bursariq.com.ng/" />
     <meta property="og:title" content="BursarIQ - School Operations, Academics, Portals & Bursary" />
     <meta property="og:description" content="Complete multi-tenant school management, academics, and bursary platform for Nigerian schools. Role-separated portals, End-of-Term & Full-Session report cards, attendance, behaviour, and verified tuition receipts." />
     <meta property="og:type" content="website" />
-    <meta property="og:url" content="https://bursariq.com.ng/" />
+    <meta property="og:url" content="https://www.bursariq.com.ng/" />
     <meta property="og:site_name" content="BursarIQ" />
     <meta property="og:image" content="/og-image.png" />
     <meta property="og:image:width" content="1200" />
@@ -112,7 +151,7 @@
       "name": "BursarIQ",
       "applicationCategory": "BusinessApplication, EducationalApplication",
       "operatingSystem": "All",
-      "url": "https://bursariq.com.ng",
+      "url": "https://www.bursariq.com.ng",
       "description": "All-in-one Nigerian school operations, role-separated portals, End-of-Term & Full-Session report cards, attendance, behaviour, and bursary platform.",
       "offers": {
         "@type": "Offer",
