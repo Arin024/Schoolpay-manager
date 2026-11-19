@@ -73,6 +73,7 @@ import {
 
 const API_BASE = '/api/v1';
 const CANONICAL_PRODUCTION_ORIGIN = 'https://www.bursariq.com.ng';
+const APEX_PRODUCTION_ORIGIN = 'https://bursariq.com.ng';
 
 export type ApiErrorCode = 'OFFLINE' | 'TIMEOUT' | 'SERVER_WAKING' | 'NETWORK_ERROR' | 'HTTP_ERROR';
 
@@ -92,9 +93,8 @@ export class ApiError extends Error {
 
 /**
  * Resolves relative API URLs safely.
- * If a stale cached page or WebView is running on the redirecting apex domain (bursariq.com.ng),
- * bypass Render's 301/307 edge redirect by calling the canonical primary origin directly
- * (which already permits https://bursariq.com.ng via CORS).
+ * If a page is running on apex bursariq.com.ng while Render redirects apex -> www,
+ * routes directly to https://www.bursariq.com.ng (which allows https://bursariq.com.ng via CORS).
  */
 export function resolveRequestUrl(url: string, hostnameOverride?: string): string {
   if (!url.startsWith('/')) return url;
@@ -108,6 +108,28 @@ export function resolveRequestUrl(url: string, hostnameOverride?: string): strin
     return `${CANONICAL_PRODUCTION_ORIGIN}${url}`;
   }
   return url;
+}
+
+/**
+ * Computes an alternate canonical origin URL if the current bursariq.com.ng / www.bursariq.com.ng
+ * host hits a Render edge redirect during a domain switch, guaranteeing zero login failures
+ * regardless of whether apex or www is set as primary on Render.
+ */
+export function getAlternateOriginUrl(url: string, attemptedUrl: string, hostnameOverride?: string): string | null {
+  if (!url.startsWith('/')) return null;
+  const currentHost =
+    hostnameOverride !== undefined
+      ? hostnameOverride.toLowerCase()
+      : typeof window !== 'undefined' && window.location?.hostname
+      ? window.location.hostname.toLowerCase()
+      : '';
+  if (currentHost === 'www.bursariq.com.ng' && !attemptedUrl.startsWith(APEX_PRODUCTION_ORIGIN)) {
+    return `${APEX_PRODUCTION_ORIGIN}${url}`;
+  }
+  if (currentHost === 'bursariq.com.ng' && attemptedUrl.startsWith(CANONICAL_PRODUCTION_ORIGIN)) {
+    return url; // Fall back to same-origin apex if Render primary was switched to apex
+  }
+  return null;
 }
 
 const RETRYABLE_GATEWAY_STATUSES = new Set([408, 502, 503, 504, 520, 522, 524]);
@@ -199,7 +221,7 @@ export async function safeFetch<T = any>(url: string, options?: SafeFetchOptions
       ? 1
       : 0;
 
-  const resolvedUrl = resolveRequestUrl(url);
+  let activeUrl = resolveRequestUrl(url);
 
   for (let attempt = 0; attempt <= allowedRetries; attempt++) {
     // Give Render cold-start retries slightly longer window so wake-ups succeed seamlessly
@@ -209,7 +231,7 @@ export async function safeFetch<T = any>(url: string, options?: SafeFetchOptions
     try {
       // NEVER short-circuit on navigator.onLine === false: many Android browsers falsely report
       // offline while 4G/Wi-Fi data is fully working. Always attempt the real network request first.
-      res = await fetchWithTimeout(resolvedUrl, mergedOptions, attemptTimeoutMs);
+      res = await fetchWithTimeout(activeUrl, mergedOptions, attemptTimeoutMs);
     } catch (err: any) {
       // If caller explicitly cancelled the request, rethrow without retrying
       if (mergedOptions.signal?.aborted) {
@@ -219,6 +241,12 @@ export async function safeFetch<T = any>(url: string, options?: SafeFetchOptions
       const isTimeout = err?.name === 'TimeoutError' || err?.message === 'REQUEST_TIMEOUT';
 
       if (attempt < allowedRetries) {
+        // If a non-timeout network/CORS abort occurred on bursariq.com.ng / www.bursariq.com.ng,
+        // automatically fail over to the sibling host on the retry attempt.
+        if (!isTimeout) {
+          const altUrl = getAlternateOriginUrl(url, activeUrl);
+          if (altUrl) activeUrl = altUrl;
+        }
         await waitMs(attempt === 0 ? 1200 : 2500);
         continue;
       }

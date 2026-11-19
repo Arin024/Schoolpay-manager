@@ -5,30 +5,37 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
     <title>BursarIQ - School Operations, Academics, Portals &amp; Bursary for Nigerian Schools</title>
     <script>
-      // Canonical Host & Stale Apex Service Worker Self-Healer:
-      // Production primary host is www.bursariq.com.ng; apex bursariq.com.ng 301/307-redirects at Render edge.
-      // If a cached PWA Service Worker ever serves index.html on apex bursariq.com.ng, relative /api/* POSTs
-      // hit a cross-origin 307 redirect and get aborted by browser CORS rules. Immediately purge any apex SW
-      // and redirect seamlessly to https://www.bursariq.com.ng preserving the exact path/query/hash.
+      // Smart Canonical Host & Stale Service Worker Self-Healer:
+      // Probes /api/health with redirect:'manual'. Only if Render is actively edge-redirecting
+      // apex bursariq.com.ng -> www.bursariq.com.ng does it purge any stale apex SW and redirect
+      // to https://www.bursariq.com.ng. If Render serves apex directly, zero redirect occurs (no loop risk).
       (function () {
         try {
-          if (window.location && window.location.hostname === 'bursariq.com.ng') {
-            if ('serviceWorker' in navigator && navigator.serviceWorker.getRegistrations) {
-              navigator.serviceWorker.getRegistrations().then(function (regs) {
-                regs.forEach(function (r) { r.unregister().catch(function () {}); });
-              }).catch(function () {});
-            }
-            if ('caches' in window && caches.keys) {
-              caches.keys().then(function (keys) {
-                keys.forEach(function (k) { caches.delete(k).catch(function () {}); });
-              }).catch(function () {});
-            }
-            var targetUrl =
-              'https://www.bursariq.com.ng' +
-              (window.location.pathname || '/') +
-              (window.location.search || '') +
-              (window.location.hash || '');
-            window.location.replace(targetUrl);
+          if (window.location && window.location.hostname === 'bursariq.com.ng' && window.fetch) {
+            fetch('/api/health', { method: 'GET', redirect: 'manual', cache: 'no-store' })
+              .then(function (res) {
+                var isEdgeRedirect =
+                  res.type === 'opaqueredirect' ||
+                  (res.status >= 300 && res.status < 400);
+                if (!isEdgeRedirect) return;
+                if ('serviceWorker' in navigator && navigator.serviceWorker.getRegistrations) {
+                  navigator.serviceWorker.getRegistrations().then(function (regs) {
+                    regs.forEach(function (r) { r.unregister().catch(function () {}); });
+                  }).catch(function () {});
+                }
+                if ('caches' in window && caches.keys) {
+                  caches.keys().then(function (keys) {
+                    keys.forEach(function (k) { caches.delete(k).catch(function () {}); });
+                  }).catch(function () {});
+                }
+                var targetUrl =
+                  'https://www.bursariq.com.ng' +
+                  (window.location.pathname || '/') +
+                  (window.location.search || '') +
+                  (window.location.hash || '');
+                window.location.replace(targetUrl);
+              })
+              .catch(function () {});
           }
         } catch (_e) {}
       })();

@@ -1,10 +1,10 @@
 import assert from 'node:assert/strict';
-import { ApiError, resolveRequestUrl, safeFetch } from '../src/services/api.ts';
+import { ApiError, getAlternateOriginUrl, resolveRequestUrl, safeFetch } from '../src/services/api.ts';
 
 async function runTests() {
   console.log('=== BursarIQ Network Resilience & Apex-Domain Self-Healing Test Suite ===');
 
-  // 1. Apex domain URL resolution (prevents Render 301/307 CORS preflight aborts)
+  // 1. Apex/WWW bidirectional API URL resolution (prevents Render 301/307 CORS preflight aborts in EITHER primary config)
   assert.equal(
     resolveRequestUrl('/api/v1/auth/login', 'bursariq.com.ng'),
     'https://www.bursariq.com.ng/api/v1/auth/login',
@@ -25,7 +25,17 @@ async function runTests() {
     'https://www.bursariq.com.ng/api/health',
     'Already-absolute URLs must remain unchanged'
   );
-  console.log('[PASS] 1. Apex-to-WWW API URL resolution');
+  assert.equal(
+    getAlternateOriginUrl('/api/v1/auth/login', 'https://www.bursariq.com.ng/api/v1/auth/login', 'bursariq.com.ng'),
+    '/api/v1/auth/login',
+    'If Render switches primary to apex, bursariq.com.ng must fall back to same-origin relative URL'
+  );
+  assert.equal(
+    getAlternateOriginUrl('/api/v1/auth/login', '/api/v1/auth/login', 'www.bursariq.com.ng'),
+    'https://bursariq.com.ng/api/v1/auth/login',
+    'If Render switches primary to apex, www.bursariq.com.ng must fail over to https://bursariq.com.ng'
+  );
+  console.log('[PASS] 1. Bidirectional Apex <-> WWW API URL resolution & failover');
 
   const originalFetch = globalThis.fetch;
   const originalNavigator = Object.getOwnPropertyDescriptor(globalThis, 'navigator');
