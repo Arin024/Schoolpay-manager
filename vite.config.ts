@@ -45,12 +45,12 @@ export default defineConfig(() => {
         },
                 workbox: {
           maximumFileSizeToCacheInBytes: 5 * 1024 * 1024,
-          globPatterns: ['**/*.{js,css,html,ico,png,svg,woff,woff2}'],
+          // Cache hashed static assets, NOT index.html, so browsers always fetch fresh HTML online
+          globPatterns: ['**/*.{js,css,ico,png,svg,woff,woff2}'],
           cleanupOutdatedCaches: true,
           clientsClaim: true,
           skipWaiting: true,
-          navigateFallback: '/index.html',
-          navigateFallbackDenylist: [/^\/api\/.*/, /^\/v1\/.*/, /^\/auth\/.*/, /^\/health.*/],
+          navigateFallback: null,
           runtimeCaching: [
             {
               urlPattern: /^\/api\/.*/,
@@ -63,6 +63,21 @@ export default defineConfig(() => {
             {
               urlPattern: /^\/auth\/.*/,
               handler: 'NetworkOnly',
+            },
+            {
+              urlPattern: ({ request }) => request.mode === 'navigate',
+              handler: 'NetworkFirst',
+              options: {
+                cacheName: 'bursariq-pages-v2',
+                networkTimeoutSeconds: 4,
+                expiration: {
+                  maxEntries: 20,
+                  maxAgeSeconds: 60 * 60 * 24,
+                },
+                cacheableResponse: {
+                  statuses: [200],
+                },
+              },
             },
           ],
         },
