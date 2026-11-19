@@ -648,7 +648,9 @@ const AppContent: React.FC = () => {
               }}
               onAuthSuccess={() => {
                 setPreviewWebsiteSlug(null);
-                navigateTo('school', 'overview');
+                setPortalSlug(null);
+                window.history.replaceState({ view: 'school', schoolTab: 'overview' }, '', '/#overview');
+                navigateTo('school', 'overview', true);
               }}
               onNavigateRegister={() => navigateTo('register')}
               onSelectSchoolPortal={(nextSlug) => {

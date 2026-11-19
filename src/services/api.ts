@@ -202,21 +202,13 @@ export async function safeFetch<T = any>(url: string, options?: SafeFetchOptions
   const resolvedUrl = resolveRequestUrl(url);
 
   for (let attempt = 0; attempt <= allowedRetries; attempt++) {
-    const isOffline = typeof navigator !== 'undefined' && navigator.onLine === false;
-    if (isOffline) {
-      throw new ApiError(
-        0,
-        'Your device appears to be offline. Please check your mobile data or Wi-Fi connection and try again.',
-        { offline: true },
-        'OFFLINE'
-      );
-    }
-
     // Give Render cold-start retries slightly longer window so wake-ups succeed seamlessly
     const attemptTimeoutMs = timeoutMs ?? (attempt === 0 ? 20000 : 35000);
 
     let res: Response;
     try {
+      // NEVER short-circuit on navigator.onLine === false: many Android browsers falsely report
+      // offline while 4G/Wi-Fi data is fully working. Always attempt the real network request first.
       res = await fetchWithTimeout(resolvedUrl, mergedOptions, attemptTimeoutMs);
     } catch (err: any) {
       // If caller explicitly cancelled the request, rethrow without retrying
@@ -225,20 +217,10 @@ export async function safeFetch<T = any>(url: string, options?: SafeFetchOptions
       }
 
       const isTimeout = err?.name === 'TimeoutError' || err?.message === 'REQUEST_TIMEOUT';
-      const nowOffline = typeof navigator !== 'undefined' && navigator.onLine === false;
 
-      if (!nowOffline && attempt < allowedRetries) {
+      if (attempt < allowedRetries) {
         await waitMs(attempt === 0 ? 1200 : 2500);
         continue;
-      }
-
-      if (nowOffline) {
-        throw new ApiError(
-          0,
-          'Your device lost internet connection. Please reconnect your mobile data or Wi-Fi and try again.',
-          { originalError: err?.message, offline: true },
-          'OFFLINE'
-        );
       }
 
       if (isTimeout) {
@@ -247,6 +229,16 @@ export async function safeFetch<T = any>(url: string, options?: SafeFetchOptions
           'The server took too long to respond (it may be waking up or your mobile network is slow). Please tap Try Again.',
           { originalError: err?.message, timeout: true },
           'TIMEOUT'
+        );
+      }
+
+      const browserReportsOffline = typeof navigator !== 'undefined' && navigator.onLine === false;
+      if (browserReportsOffline) {
+        throw new ApiError(
+          0,
+          'Could not reach the BursarIQ server and your browser reports no internet connection. Please check mobile data/Wi-Fi and try again.',
+          { originalError: err?.message, offline: true },
+          'OFFLINE'
         );
       }
 
@@ -325,8 +317,42 @@ export async function safeFetch<T = any>(url: string, options?: SafeFetchOptions
   );
 }
 
+const memoryStorageFallback = new Map<string, string>();
+
+export function safeStorageGet(key: string): string | null {
+  try {
+    const val = typeof localStorage !== 'undefined' ? localStorage.getItem(key) : null;
+    if (val !== null) return val;
+  } catch {
+    // Fallback for restricted WebViews / Private mode
+  }
+  return memoryStorageFallback.get(key) ?? null;
+}
+
+export function safeStorageSet(key: string, value: string): void {
+  memoryStorageFallback.set(key, value);
+  try {
+    if (typeof localStorage !== 'undefined') {
+      localStorage.setItem(key, value);
+    }
+  } catch {
+    // Keep in-memory fallback active even if storage quota/privacy blocks localStorage
+  }
+}
+
+export function safeStorageRemove(key: string): void {
+  memoryStorageFallback.delete(key);
+  try {
+    if (typeof localStorage !== 'undefined') {
+      localStorage.removeItem(key);
+    }
+  } catch {
+    // Ignore restricted storage errors
+  }
+}
+
 function getAuthHeaders(schoolId?: string | null): Record<string, string> {
-  const token = localStorage.getItem('bursariq_session_token') || localStorage.getItem('schoolpay_session_token');
+  const token = safeStorageGet('bursariq_session_token') || safeStorageGet('schoolpay_session_token');
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
   };
@@ -335,7 +361,8 @@ function getAuthHeaders(schoolId?: string | null): Record<string, string> {
     headers['Authorization'] = `Bearer ${token}`;
   }
 
-  const effectiveSchoolId = schoolId || localStorage.getItem('bursariq_active_school') || localStorage.getItem('schoolpay_active_school');
+  const effectiveSchoolId =
+    schoolId || safeStorageGet('bursariq_active_school') || safeStorageGet('schoolpay_active_school');
   if (effectiveSchoolId) {
     headers['X-School-Id'] = effectiveSchoolId;
   }

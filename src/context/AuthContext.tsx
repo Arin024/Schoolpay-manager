@@ -1,6 +1,6 @@
 import React, { createContext, useContext, useState, useEffect } from 'react';
 import { User, School, SchoolSettings, UserRole } from '../types/index.js';
-import { api, ApiError } from '../services/api.js';
+import { api, ApiError, safeStorageGet, safeStorageRemove, safeStorageSet } from '../services/api.js';
 
 interface AuthContextType {
   user: User | null;
@@ -56,7 +56,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [isLoading, setIsLoading] = useState<boolean>(true);
 
   const initAuth = async () => {
-    const token = localStorage.getItem('bursariq_session_token') || localStorage.getItem('schoolpay_session_token');
+    const token = safeStorageGet('bursariq_session_token') || safeStorageGet('schoolpay_session_token');
     if (!token) {
       setIsLoading(false);
       return;
@@ -69,15 +69,15 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       setImpersonatedBy(data.impersonatedBy || null);
       
       // Authoritative school tenant priority: server activeSchoolId > server first role > stored
-      const schoolIdToUse = data.activeSchoolId || (data.roles && data.roles[0]?.school_id) || localStorage.getItem('bursariq_active_school') || null;
+      const schoolIdToUse = data.activeSchoolId || (data.roles && data.roles[0]?.school_id) || safeStorageGet('bursariq_active_school') || null;
 
       setActiveSchoolId(schoolIdToUse);
       if (schoolIdToUse) {
-        localStorage.setItem('bursariq_active_school', schoolIdToUse);
-        localStorage.setItem('schoolpay_active_school', schoolIdToUse);
+        safeStorageSet('bursariq_active_school', schoolIdToUse);
+        safeStorageSet('schoolpay_active_school', schoolIdToUse);
       } else {
-        localStorage.removeItem('bursariq_active_school');
-        localStorage.removeItem('schoolpay_active_school');
+        safeStorageRemove('bursariq_active_school');
+        safeStorageRemove('schoolpay_active_school');
       }
 
       setActiveSchool(data.activeSchool || null);
@@ -106,12 +106,12 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       // ONLY wipe session if server explicitly returns HTTP 401 Unauthorized
       if (err instanceof ApiError && err.status === 401) {
         console.warn('Session has genuinely expired (HTTP 401), logging out:', err.message);
-        localStorage.removeItem('bursariq_session_token');
-        localStorage.removeItem('bursariq_active_school');
-        localStorage.removeItem('bursariq_admin_original_token');
-        localStorage.removeItem('schoolpay_session_token');
-        localStorage.removeItem('schoolpay_active_school');
-        localStorage.removeItem('schoolpay_admin_original_token');
+        safeStorageRemove('bursariq_session_token');
+        safeStorageRemove('bursariq_active_school');
+        safeStorageRemove('bursariq_admin_original_token');
+        safeStorageRemove('schoolpay_session_token');
+        safeStorageRemove('schoolpay_active_school');
+        safeStorageRemove('schoolpay_admin_original_token');
         setUser(null);
         setRoles([]);
         setActiveRole(null);
@@ -134,8 +134,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   useEffect(() => {
     const handleOnline = () => {
       const token =
-        localStorage.getItem('bursariq_session_token') ||
-        localStorage.getItem('schoolpay_session_token');
+        safeStorageGet('bursariq_session_token') ||
+        safeStorageGet('schoolpay_session_token');
       if (token && !user) {
         initAuth();
       }
@@ -145,16 +145,16 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   }, [user]);
 
   const completeSessionAuth = async (data: any) => {
-    localStorage.setItem('bursariq_session_token', data.token);
-    localStorage.setItem('schoolpay_session_token', data.token);
+    safeStorageSet('bursariq_session_token', data.token);
+    safeStorageSet('schoolpay_session_token', data.token);
 
     setUser(data.user);
     setRoles(data.roles || []);
     setActiveRole(data.activeRole || null);
 
     if (data.activeSchoolId) {
-      localStorage.setItem('bursariq_active_school', data.activeSchoolId);
-      localStorage.setItem('schoolpay_active_school', data.activeSchoolId);
+      safeStorageSet('bursariq_active_school', data.activeSchoolId);
+      safeStorageSet('schoolpay_active_school', data.activeSchoolId);
       setActiveSchoolId(data.activeSchoolId);
 
       if (data.activeSchool) {

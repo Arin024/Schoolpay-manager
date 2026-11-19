@@ -28,17 +28,7 @@
               (window.location.pathname || '/') +
               (window.location.search || '') +
               (window.location.hash || '');
-            if (navigator.onLine !== false) {
-              window.location.replace(targetUrl);
-            } else {
-              window.addEventListener(
-                'online',
-                function () {
-                  window.location.replace(targetUrl);
-                },
-                { once: true }
-              );
-            }
+            window.location.replace(targetUrl);
           }
         } catch (_e) {}
       })();

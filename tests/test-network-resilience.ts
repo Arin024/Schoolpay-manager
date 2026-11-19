@@ -156,21 +156,40 @@ async function runTests() {
     assert.equal(timeoutErr.code, 'TIMEOUT');
     console.log('[PASS] 6. Stalled request cleanly aborts with TIMEOUT (408)');
 
-    // 7. Offline device immediately throws accurate OFFLINE error
+    // 7a. False-offline Android Chrome bug: navigator.onLine === false while 4G data works MUST still send fetch & succeed!
     setOnline(false);
+    globalThis.fetch = (async () => {
+      return new Response(JSON.stringify({ token: 'tok_android_ok', success: true }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    }) as any;
+    const falseOfflineRes = await safeFetch('/api/v1/auth/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email: 'admin@test.ng', password: 'ok' }),
+      timeoutMs: 1000,
+      maxRetries: 0,
+    });
+    assert.equal(falseOfflineRes.token, 'tok_android_ok', 'Must NOT short-circuit when navigator.onLine is falsely false');
+    console.log('[PASS] 7a. False navigator.onLine=false (Android bug) still executes login & succeeds');
+
+    // 7b. Truly offline device (fetch actually throws AND navigator.onLine === false) throws OFFLINE ApiError
+    globalThis.fetch = (async () => {
+      throw new TypeError('Failed to fetch');
+    }) as any;
     let offlineErr: any = null;
     try {
-      await safeFetch('/api/v1/public/schools/demo/website', { timeoutMs: 500 });
+      await safeFetch('/api/v1/public/schools/demo/website', { timeoutMs: 500, maxRetries: 0 });
     } catch (e) {
       offlineErr = e;
     }
     assert.ok(offlineErr instanceof ApiError);
     assert.equal(offlineErr.status, 0);
     assert.equal(offlineErr.code, 'OFFLINE');
-    assert.ok(offlineErr.message.toLowerCase().includes('offline'));
-    console.log('[PASS] 7. Offline detection throws accurate OFFLINE ApiError immediately');
+    console.log('[PASS] 7b. True offline failure throws accurate OFFLINE ApiError after attempting fetch');
 
-    console.log('ALL 7 NETWORK RESILIENCE & APEX SELF-HEALING TESTS PASSED!');
+    console.log('ALL 8 NETWORK RESILIENCE & FALSE-OFFLINE ANDROID TESTS PASSED!');
   } finally {
     globalThis.fetch = originalFetch;
     if (originalNavigator) {

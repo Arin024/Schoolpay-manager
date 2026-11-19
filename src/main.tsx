@@ -25,7 +25,6 @@ if (isRedirectingApexHost) {
       if (!registration) return;
       let lastCheck = Date.now();
       const checkForUpdate = () => {
-        if (navigator.onLine === false) return;
         const now = Date.now();
         if (now - lastCheck < 60_000) return;
         lastCheck = now;
