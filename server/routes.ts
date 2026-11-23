@@ -63,6 +63,11 @@ import {
 } from './accessControl.ts';
 import { handlePaymentWebhook, handleBachsWebhook, handleBachsDemoCheckout, handleBachsDemoCheckoutComplete } from './webhookHandler.ts';
 import { sanitizeCsvCell, safeClientError } from './securityUtils.ts';
+import {
+  resolveInstitutionProfile,
+  NUC_5_POINT_SCALE,
+  NBTE_4_POINT_SCALE,
+} from '../src/utils/institutionMode.ts';
 
 export const apiRouter = express.Router();
 
@@ -195,6 +200,11 @@ apiRouter.post(['/v1/auth/register-school', '/v1/auth/register'], async (req, re
     answer2,
     recoveryEmail,
     recoveryPhone,
+    institutionCategory,
+    academicCycleType,
+    cycleLabels,
+    gradingMode,
+    terminology,
   } = req.body;
 
   // 1. Input Validation
@@ -330,6 +340,42 @@ apiRouter.post(['/v1/auth/register-school', '/v1/auth/register'], async (req, re
   const subId = `sub_${crypto.randomBytes(6).toString('hex')}`;
   const subEnd = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
 
+  const instProfile = resolveInstitutionProfile(
+    { type: schoolType },
+    {
+      institution_category: institutionCategory || undefined,
+      academic_cycle_type: academicCycleType || undefined,
+      cycle_labels_json: Array.isArray(cycleLabels) ? JSON.stringify(cycleLabels) : typeof cycleLabels === 'string' ? cycleLabels : undefined,
+      grading_mode: gradingMode || undefined,
+      terminology_json: terminology ? (typeof terminology === 'string' ? terminology : JSON.stringify(terminology)) : undefined,
+    }
+  );
+  const nigeriaCal = getCurrentNigerianCalendar();
+  const initialActivePeriod = instProfile.isTertiary
+    ? (instProfile.cycleLabels[0] || '1st Semester')
+    : instProfile.cycleType === 'SEMESTER'
+      ? (instProfile.cycleLabels[0] || '1st Semester')
+      : instProfile.cycleType === 'TRIMESTER'
+        ? (instProfile.cycleLabels[0] || '1st Trimester')
+        : nigeriaCal.termShort;
+  const cycleLabelsJson = JSON.stringify(instProfile.cycleLabels);
+  const terminologyJson = JSON.stringify(instProfile.labels);
+  const defaultHeroSubtitle = instProfile.isTertiary
+    ? `Advancing higher education, applied research, and professional excellence in ${lga ? `${lga}, ` : ''}${state}.`
+    : `Preparing confident, disciplined, and academically distinguished learners in ${lga ? `${lga}, ` : ''}${state}.`;
+  const defaultAboutBody = instProfile.isTertiary
+    ? `${schoolName.trim()} delivers accredited academic programmes, structured semester assessments, digital course management, and transparent bursary operations.`
+    : `${schoolName.trim()} is committed to strong academic standards, moral character, structured continuous assessment, and transparent family partnerships.`;
+  const defaultVision = instProfile.isTertiary
+    ? `To produce globally competitive graduates, researchers, and professionals equipped for leadership and societal impact.`
+    : `To raise globally competitive, morally grounded students equipped for lifelong excellence.`;
+  const defaultMission = instProfile.isTertiary
+    ? `To deliver rigorous higher education supported by dedicated faculty, modern CBT assessment, and transparent digital academic transcripts.`
+    : `To deliver structured NERDC-aligned instruction supported by dedicated staff and transparent digital school records.`;
+  const defaultAdmissionsSummary = instProfile.isTertiary
+    ? `Admissions are open across eligible departments and programmes. Prospective applicants can submit an inquiry below or contact the Admissions Registry.`
+    : `Admissions are open across eligible classes. Submit an inquiry below or visit our Admissions Office.`;
+
   // STEP 1: Authoritative Neon PostgreSQL Persistence First
   if (pool) {
     let pgClient: any = null;
@@ -354,13 +400,28 @@ apiRouter.post(['/v1/auth/register-school', '/v1/auth/register'], async (req, re
         [schoolId, schoolName.trim(), slug, schoolType, address || '', state, lga, phone, schoolEmail.toLowerCase(), req.body.website || null]
       );
 
-      // 2. School Settings (with active Nigerian academic session & term)
-      const nigeriaCal = getCurrentNigerianCalendar();
+      // 2. School Settings (with active Nigerian academic session, term/semester & institution profile)
       await pgClient.query(
-        `INSERT INTO school_settings (id, school_id, currency, currency_symbol, current_academic_session, current_term, payment_notification_email, payment_notification_sms, portal_subdomain)
-          VALUES ($1, $2, 'NGN', '₦', $3, $4, $5, 0, $6)
+        `INSERT INTO school_settings (
+            id, school_id, currency, currency_symbol, current_academic_session, current_term,
+            payment_notification_email, payment_notification_sms, portal_subdomain,
+            institution_category, academic_cycle_type, cycle_labels_json, grading_mode, terminology_json
+          )
+          VALUES ($1, $2, 'NGN', '₦', $3, $4, $5, 0, $6, $7, $8, $9, $10, $11)
           ON CONFLICT (id) DO NOTHING`,
-        [settingsId, schoolId, nigeriaCal.sessionName, nigeriaCal.termShort, schoolEmail.toLowerCase(), portalSubdomain]
+        [
+          settingsId,
+          schoolId,
+          nigeriaCal.sessionName,
+          initialActivePeriod,
+          schoolEmail.toLowerCase(),
+          portalSubdomain,
+          instProfile.category,
+          instProfile.cycleType,
+          cycleLabelsJson,
+          instProfile.gradingMode,
+          terminologyJson,
+        ]
       );
 
       // 2b. Default Branded School Website Profile
@@ -376,13 +437,13 @@ apiRouter.post(['/v1/auth/register-school', '/v1/auth/register'], async (req, re
           schoolId,
           `Excellence in Nigerian ${schoolType} Education`,
           `Welcome to ${schoolName.trim()}`,
-          `Preparing confident, disciplined, and academically distinguished learners in ${lga ? `${lga}, ` : ''}${state}.`,
+          defaultHeroSubtitle,
           `About ${schoolName.trim()}`,
-          `${schoolName.trim()} is committed to strong academic standards, moral character, structured continuous assessment, and transparent family partnerships.`,
-          `To raise globally competitive, morally grounded students equipped for lifelong excellence.`,
-          `To deliver structured NERDC-aligned instruction supported by dedicated staff and transparent digital school records.`,
+          defaultAboutBody,
+          defaultVision,
+          defaultMission,
           `Integrity · Academic Rigour · Discipline · Innovation · Community`,
-          `Admissions are open across eligible classes. Submit an inquiry below or visit our Admissions Office.`,
+          defaultAdmissionsSummary,
         ]
       );
 
@@ -441,6 +502,25 @@ apiRouter.post(['/v1/auth/register-school', '/v1/auth/register'], async (req, re
         [subId, schoolId, subEnd, subEnd]
       );
 
+      // 5b. Seed Tertiary-appropriate academic grading scale & CA/Exam split (after users row exists for updated_by FK)
+      if (instProfile.isTertiary) {
+        const tertiaryScale = (instProfile.gradingMode === 'GPA_4' ? NBTE_4_POINT_SCALE : NUC_5_POINT_SCALE).map((b) => ({
+          grade: b.grade,
+          min: b.min,
+          max: b.max,
+          remark: b.remark,
+        }));
+        await pgClient.query(
+          `INSERT INTO school_academic_settings (
+             id, school_id, ca_max_score, exam_max_score, grading_scale_json,
+             missing_score_policy, show_class_position, students_can_view_fees, teachers_can_view_fees,
+             require_review_before_approve, updated_by, created_at, updated_at
+           ) VALUES ($1, $2, 30, 70, $3, 'EXCLUDE', 0, 1, 0, 0, $4, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+           ON CONFLICT (school_id) DO NOTHING`,
+          [`acad_set_${schoolId}`, schoolId, JSON.stringify(tertiaryScale), userId]
+        );
+      }
+
       // Verify all records committed
       const vSch = await pgClient.query('SELECT id FROM schools WHERE id = $1', [schoolId]);
       const vUsr = await pgClient.query('SELECT id FROM users WHERE id = $1', [userId]);
@@ -484,18 +564,38 @@ apiRouter.post(['/v1/auth/register-school', '/v1/auth/register'], async (req, re
     `).run(
       schoolId, schoolName.trim(), slug, schoolType, address || '', state, lga, phone, schoolEmail.toLowerCase(), req.body.website || null
     );
-    const localNigeriaCal = getCurrentNigerianCalendar();
     cacheDb.prepare(`
-      INSERT INTO school_settings (id, school_id, currency, currency_symbol, current_academic_session, current_term, payment_notification_email, payment_notification_sms, portal_subdomain)
-      VALUES (?, ?, 'NGN', '₦', ?, ?, ?, 0, ?)
+      INSERT INTO school_settings (
+        id, school_id, currency, currency_symbol, current_academic_session, current_term,
+        payment_notification_email, payment_notification_sms, portal_subdomain,
+        institution_category, academic_cycle_type, cycle_labels_json, grading_mode, terminology_json
+      )
+      VALUES (?, ?, 'NGN', '₦', ?, ?, ?, 0, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET
         currency = excluded.currency,
         currency_symbol = excluded.currency_symbol,
         current_academic_session = excluded.current_academic_session,
         current_term = excluded.current_term,
         payment_notification_email = excluded.payment_notification_email,
-        portal_subdomain = excluded.portal_subdomain
-    `).run(settingsId, schoolId, localNigeriaCal.sessionName, localNigeriaCal.termShort, schoolEmail.toLowerCase(), portalSubdomain);
+        portal_subdomain = excluded.portal_subdomain,
+        institution_category = excluded.institution_category,
+        academic_cycle_type = excluded.academic_cycle_type,
+        cycle_labels_json = excluded.cycle_labels_json,
+        grading_mode = excluded.grading_mode,
+        terminology_json = excluded.terminology_json
+    `).run(
+      settingsId,
+      schoolId,
+      nigeriaCal.sessionName,
+      initialActivePeriod,
+      schoolEmail.toLowerCase(),
+      portalSubdomain,
+      instProfile.category,
+      instProfile.cycleType,
+      cycleLabelsJson,
+      instProfile.gradingMode,
+      terminologyJson
+    );
     cacheDb.prepare(`
       INSERT OR IGNORE INTO school_website_profiles (
         id, school_id, tagline, hero_title, hero_subtitle, theme_accent,
@@ -507,13 +607,13 @@ apiRouter.post(['/v1/auth/register-school', '/v1/auth/register'], async (req, re
       schoolId,
       `Excellence in Nigerian ${schoolType} Education`,
       `Welcome to ${schoolName.trim()}`,
-      `Preparing confident, disciplined, and academically distinguished learners in ${lga ? `${lga}, ` : ''}${state}.`,
+      defaultHeroSubtitle,
       `About ${schoolName.trim()}`,
-      `${schoolName.trim()} is committed to strong academic standards, moral character, structured continuous assessment, and transparent family partnerships.`,
-      `To raise globally competitive, morally grounded students equipped for lifelong excellence.`,
-      `To deliver structured NERDC-aligned instruction supported by dedicated staff and transparent digital school records.`,
+      defaultAboutBody,
+      defaultVision,
+      defaultMission,
       `Integrity · Academic Rigour · Discipline · Innovation · Community`,
-      `Admissions are open across eligible classes. Submit an inquiry below or visit our Admissions Office.`
+      defaultAdmissionsSummary
     );
     cacheDb.prepare(`
       INSERT INTO users (
@@ -566,6 +666,21 @@ apiRouter.post(['/v1/auth/register-school', '/v1/auth/register'], async (req, re
         trial_end_date = excluded.trial_end_date,
         amount_paid = excluded.amount_paid
     `).run(subId, schoolId, subEnd, subEnd);
+    if (instProfile.isTertiary) {
+      const tertiaryScale = (instProfile.gradingMode === 'GPA_4' ? NBTE_4_POINT_SCALE : NUC_5_POINT_SCALE).map((b) => ({
+        grade: b.grade,
+        min: b.min,
+        max: b.max,
+        remark: b.remark,
+      }));
+      cacheDb.prepare(`
+        INSERT OR IGNORE INTO school_academic_settings (
+          id, school_id, ca_max_score, exam_max_score, grading_scale_json,
+          missing_score_policy, show_class_position, students_can_view_fees, teachers_can_view_fees,
+          require_review_before_approve, updated_by, created_at, updated_at
+        ) VALUES (?, ?, 30, 70, ?, 'EXCLUDE', 0, 1, 0, 0, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+      `).run(`acad_set_${schoolId}`, schoolId, JSON.stringify(tertiaryScale), userId);
+    }
   } catch (sqErr) {
     console.warn('[Registration Local Cache Notice]', sqErr);
   }
@@ -614,9 +729,17 @@ apiRouter.post(['/v1/auth/register-school', '/v1/auth/register'], async (req, re
     school_id: schoolId,
     currency: 'NGN',
     currency_symbol: '₦',
-    current_academic_session: '2024/2025',
-    current_term: '1st Term',
+    current_academic_session: nigeriaCal.sessionName,
+    current_term: initialActivePeriod,
     payment_notification_email: schoolEmail.toLowerCase(),
+    payment_notification_sms: 0,
+    portal_subdomain: portalSubdomain,
+    allow_partial_payments: 1,
+    institution_category: instProfile.category,
+    academic_cycle_type: instProfile.cycleType,
+    cycle_labels_json: cycleLabelsJson,
+    grading_mode: instProfile.gradingMode,
+    terminology_json: terminologyJson,
   };
 
   return res.status(201).json({
@@ -1206,15 +1329,34 @@ apiRouter.get('/v1/auth/me', requireAuth, async (req: AuthenticatedRequest, res)
           activeSettings = setRes.rows[0];
           try {
             cacheDb.prepare(`
-              INSERT INTO school_settings (id, school_id, currency, currency_symbol, current_academic_session, current_term)
-              VALUES (?, ?, ?, ?, ?, ?)
+              INSERT INTO school_settings (
+                id, school_id, currency, currency_symbol, current_academic_session, current_term,
+                portal_subdomain, institution_category, academic_cycle_type,
+                cycle_labels_json, grading_mode, terminology_json
+              )
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
               ON CONFLICT(id) DO UPDATE SET
                 current_academic_session = excluded.current_academic_session,
-                current_term = excluded.current_term
+                current_term = excluded.current_term,
+                portal_subdomain = COALESCE(excluded.portal_subdomain, school_settings.portal_subdomain),
+                institution_category = COALESCE(excluded.institution_category, school_settings.institution_category),
+                academic_cycle_type = COALESCE(excluded.academic_cycle_type, school_settings.academic_cycle_type),
+                cycle_labels_json = COALESCE(excluded.cycle_labels_json, school_settings.cycle_labels_json),
+                grading_mode = COALESCE(excluded.grading_mode, school_settings.grading_mode),
+                terminology_json = COALESCE(excluded.terminology_json, school_settings.terminology_json)
             `).run(
-              activeSettings.id, activeSettings.school_id, activeSettings.currency || 'NGN',
-              activeSettings.currency_symbol || '₦', activeSettings.current_academic_session || '2024/2025',
-              activeSettings.current_term || '1st Term'
+              activeSettings.id,
+              activeSettings.school_id,
+              activeSettings.currency || 'NGN',
+              activeSettings.currency_symbol || '₦',
+              activeSettings.current_academic_session || '2024/2025',
+              activeSettings.current_term || '1st Term',
+              activeSettings.portal_subdomain || null,
+              activeSettings.institution_category || 'K12',
+              activeSettings.academic_cycle_type || 'TERM',
+              activeSettings.cycle_labels_json || null,
+              activeSettings.grading_mode || 'PERCENTAGE',
+              activeSettings.terminology_json || null
             );
           } catch {}
         }
@@ -1655,7 +1797,38 @@ apiRouter.put(
       payment_notification_email,
       payment_notification_sms,
       allow_partial_payments,
+      institution_category,
+      academic_cycle_type,
+      cycle_labels_json,
+      cycle_labels,
+      grading_mode,
+      terminology_json,
+      terminology,
     } = req.body;
+
+    const cleanCategory =
+      institution_category === 'TERTIARY' || institution_category === 'K12'
+        ? institution_category
+        : null;
+    const cleanCycleType =
+      academic_cycle_type === 'SEMESTER' || academic_cycle_type === 'TRIMESTER' || academic_cycle_type === 'TERM'
+        ? academic_cycle_type
+        : null;
+    const cleanGradingMode =
+      grading_mode === 'GPA_5' || grading_mode === 'GPA_4' || grading_mode === 'PERCENTAGE'
+        ? grading_mode
+        : null;
+    const serializedCycleLabels = Array.isArray(cycle_labels)
+      ? JSON.stringify(cycle_labels.map((s: any) => String(s || '').trim()).filter(Boolean))
+      : typeof cycle_labels_json === 'string' && cycle_labels_json.trim()
+        ? cycle_labels_json.trim()
+        : null;
+    const serializedTerminology =
+      terminology && typeof terminology === 'object'
+        ? JSON.stringify(terminology)
+        : typeof terminology_json === 'string' && terminology_json.trim()
+          ? terminology_json.trim()
+          : null;
 
     const pool = getPgPool();
     if (pool) {
@@ -1666,15 +1839,25 @@ apiRouter.put(
              payment_notification_email = $3,
              payment_notification_sms = $4,
              allow_partial_payments = $5,
+             institution_category = COALESCE($6, institution_category),
+             academic_cycle_type = COALESCE($7, academic_cycle_type),
+             cycle_labels_json = COALESCE($8, cycle_labels_json),
+             grading_mode = COALESCE($9, grading_mode),
+             terminology_json = COALESCE($10, terminology_json),
              updated_at = CURRENT_TIMESTAMP
-         WHERE school_id = $6`,
+         WHERE school_id = $11`,
         [
           current_academic_session || '2024/2025',
           current_term || '1st Term',
           payment_notification_email || null,
           payment_notification_sms ? 1 : 0,
           allow_partial_payments !== undefined ? (allow_partial_payments ? 1 : 0) : 1,
-          schoolId
+          cleanCategory,
+          cleanCycleType,
+          serializedCycleLabels,
+          cleanGradingMode,
+          serializedTerminology,
+          schoolId,
         ]
       );
     }
@@ -1686,6 +1869,11 @@ apiRouter.put(
           payment_notification_email = ?,
           payment_notification_sms = ?,
           allow_partial_payments = ?,
+          institution_category = COALESCE(?, institution_category),
+          academic_cycle_type = COALESCE(?, academic_cycle_type),
+          cycle_labels_json = COALESCE(?, cycle_labels_json),
+          grading_mode = COALESCE(?, grading_mode),
+          terminology_json = COALESCE(?, terminology_json),
           updated_at = CURRENT_TIMESTAMP
       WHERE school_id = ?
     `).run(
@@ -1694,6 +1882,11 @@ apiRouter.put(
       payment_notification_email || null,
       payment_notification_sms ? 1 : 0,
       allow_partial_payments !== undefined ? (allow_partial_payments ? 1 : 0) : 1,
+      cleanCategory,
+      cleanCycleType,
+      serializedCycleLabels,
+      cleanGradingMode,
+      serializedTerminology,
       schoolId
     );
 
@@ -1705,7 +1898,13 @@ apiRouter.put(
       entity: 'SCHOOL_SETTINGS',
       entityId: schoolId,
       ipAddress: req.ip || '127.0.0.1',
-      metadata: { current_academic_session, current_term },
+      metadata: {
+        current_academic_session,
+        current_term,
+        institution_category: cleanCategory,
+        academic_cycle_type: cleanCycleType,
+        grading_mode: cleanGradingMode,
+      },
     });
 
     let settings: any = null;
@@ -1716,7 +1915,7 @@ apiRouter.put(
     if (!settings) {
       settings = cacheDb.prepare('SELECT * FROM school_settings WHERE school_id = ?').get(schoolId);
     }
-    return res.json({ success: true, message: 'School settings saved', settings });
+    return res.json({ success: true, message: 'Institution settings saved successfully', settings });
   }
 );
 
@@ -2426,6 +2625,21 @@ function inferNigerianClassLevel(className: string, explicitLevel?: string | nul
   }
   if (/sss?|senior\s*sec/i.test(lower)) {
     return 'Senior Secondary';
+  }
+  if (/\b(?:pgd|msc|m\.sc|mba|m\.a|phd|ph\.d|postgraduate|masters|doctorate)\b/i.test(lower)) {
+    return 'Postgraduate';
+  }
+  if (/\bhnd\b|higher\s*national\s*diploma/i.test(lower)) {
+    return 'Higher National Diploma';
+  }
+  if (/\bnd\s*[1-3]\b|national\s*diploma/i.test(lower)) {
+    return 'National Diploma';
+  }
+  if (/\b[1-6]00\s*(?:level|l)\b|undergraduate/i.test(lower)) {
+    return 'Undergraduate';
+  }
+  if (/\b(?:year\s*[1-5]|nce\s*[1-3]|chew|jchew|diploma|nursing|midwifery)\b/i.test(lower)) {
+    return 'College / Diploma';
   }
   return 'General';
 }
@@ -3680,6 +3894,24 @@ const NIGERIAN_CLASS_PRESETS = {
     { name: 'SSS 2', level: 'Senior Secondary', description: 'Senior Secondary School 2', arms: ['Science', 'Art', 'Commercial'] },
     { name: 'SSS 3', level: 'Senior Secondary', description: 'Senior Secondary School 3 (WAEC / NECO)', arms: ['Science', 'Art', 'Commercial'] },
   ],
+  UNIVERSITY: [
+    { name: '100 Level', level: 'Undergraduate', description: 'Year 1 Undergraduate Level', arms: ['Computer Science', 'Accounting', 'Business Administration', 'General Studies'] },
+    { name: '200 Level', level: 'Undergraduate', description: 'Year 2 Undergraduate Level', arms: ['Computer Science', 'Accounting', 'Business Administration', 'General Studies'] },
+    { name: '300 Level', level: 'Undergraduate', description: 'Year 3 Undergraduate Level', arms: ['Computer Science', 'Accounting', 'Business Administration'] },
+    { name: '400 Level', level: 'Undergraduate', description: 'Final Year Undergraduate Level', arms: ['Computer Science', 'Accounting', 'Business Administration'] },
+    { name: '500 Level', level: 'Undergraduate', description: 'Professional / 5-Year Degree Level', arms: ['Engineering', 'Law', 'Health Sciences'] },
+  ],
+  POLYTECHNIC: [
+    { name: 'ND 1', level: 'National Diploma', description: 'National Diploma Year 1', arms: ['Computer Science', 'Accountancy', 'Business Admin', 'Science Lab Tech'] },
+    { name: 'ND 2', level: 'National Diploma', description: 'National Diploma Year 2', arms: ['Computer Science', 'Accountancy', 'Business Admin', 'Science Lab Tech'] },
+    { name: 'HND 1', level: 'Higher National Diploma', description: 'Higher National Diploma Year 1', arms: ['Computer Science', 'Accountancy', 'Business Admin', 'Science Lab Tech'] },
+    { name: 'HND 2', level: 'Higher National Diploma', description: 'Higher National Diploma Year 2', arms: ['Computer Science', 'Accountancy', 'Business Admin', 'Science Lab Tech'] },
+  ],
+  COLLEGE: [
+    { name: 'Year 1 (100L)', level: 'College / Diploma', description: 'First Year Programme Level', arms: ['Community Health', 'Public Health', 'Health Info Mgmt', 'General'] },
+    { name: 'Year 2 (200L)', level: 'College / Diploma', description: 'Second Year Programme Level', arms: ['Community Health', 'Public Health', 'Health Info Mgmt', 'General'] },
+    { name: 'Year 3 (300L)', level: 'College / Diploma', description: 'Final Year Programme Level', arms: ['Community Health', 'Public Health', 'Health Info Mgmt', 'General'] },
+  ],
 };
 
 // GET /api/v1/school/classes (Returns classes with arms and student totals)
@@ -3810,7 +4042,13 @@ apiRouter.post(
         ? NIGERIAN_CLASS_PRESETS.PRIMARY
         : mode === 'K12'
           ? [...NIGERIAN_CLASS_PRESETS.PRIMARY, ...NIGERIAN_CLASS_PRESETS.SECONDARY]
-          : NIGERIAN_CLASS_PRESETS.SECONDARY;
+          : mode === 'UNIVERSITY'
+            ? NIGERIAN_CLASS_PRESETS.UNIVERSITY
+            : mode === 'POLYTECHNIC'
+              ? NIGERIAN_CLASS_PRESETS.POLYTECHNIC
+              : mode === 'COLLEGE'
+                ? NIGERIAN_CLASS_PRESETS.COLLEGE
+                : NIGERIAN_CLASS_PRESETS.SECONDARY;
 
     const pool = getPgPool();
     let pgClient: any = null;

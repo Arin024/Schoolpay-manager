@@ -70,7 +70,7 @@ async function fetchStudentPublishedScores(
 ) {
   let pgSql = `
     SELECT ss.*,
-           sub.name as subject_name, sub.code as subject_code,
+           sub.name as subject_name, sub.code as subject_code, COALESCE(sub.credit_units, 3) as credit_units,
            ex.title as exam_title, ex.exam_type, ex.ca_max_score, ex.exam_max_score, ex.total_max_score, ex.published_at as exam_published_at,
            ses.name as session_name, t.name as term_name
     FROM student_scores ss
@@ -86,7 +86,7 @@ async function fetchStudentPublishedScores(
   `;
   let sqSql = `
     SELECT ss.*,
-           sub.name as subject_name, sub.code as subject_code,
+           sub.name as subject_name, sub.code as subject_code, COALESCE(sub.credit_units, 3) as credit_units,
            ex.title as exam_title, ex.exam_type, ex.ca_max_score, ex.exam_max_score, ex.total_max_score, ex.published_at as exam_published_at,
            ses.name as session_name, t.name as term_name
     FROM student_scores ss

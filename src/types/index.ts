@@ -6,7 +6,12 @@ export type SchoolType =
   | 'Secondary'
   | 'Comprehensive / K-12'
   | 'Vocational / Technical'
-  | 'International';
+  | 'International'
+  | 'University'
+  | 'Polytechnic'
+  | 'College of Education'
+  | 'College of Health / Nursing'
+  | 'Monotechnic / Institute';
 
 export type RoleName =
   | 'SUPER_ADMIN'
@@ -57,6 +62,11 @@ export interface SchoolSettings {
   payment_notification_sms: number;
   portal_subdomain?: string | null;
   allow_partial_payments: number;
+  institution_category?: 'K12' | 'TERTIARY' | string | null;
+  academic_cycle_type?: 'TERM' | 'SEMESTER' | 'TRIMESTER' | string | null;
+  cycle_labels_json?: string | null;
+  grading_mode?: 'PERCENTAGE' | 'GPA_5' | 'GPA_4' | string | null;
+  terminology_json?: string | null;
 }
 
 export interface UserRole {
@@ -772,6 +782,7 @@ export interface SubjectItem {
   school_id: string;
   name: string;
   code: string;
+  credit_units?: number | null;
   department?: string | null;
   class_id?: string | null;
   class_name?: string | null;
@@ -872,6 +883,20 @@ export interface ReportCardBreakdown {
   promotion_status?: string | null;
   passMark?: number;
   gradingScale?: GradingScaleBand[];
+  gradingMode?: 'PERCENTAGE' | 'GPA_5' | 'GPA_4';
+  gpa?: number | null;
+  cgpa?: number | null;
+  gpa_scale_max?: number | null;
+  total_credit_units?: number | null;
+  total_grade_points?: number | null;
+  academic_standing?: string | null;
+  institution_profile?: {
+    category: 'K12' | 'TERTIARY';
+    isTertiary: boolean;
+    cycleType: 'TERM' | 'SEMESTER' | 'TRIMESTER';
+    gradingMode: 'PERCENTAGE' | 'GPA_5' | 'GPA_4';
+    labels: Record<string, string>;
+  } | null;
   overall_grade?: { grade: string; remark: string };
   terms?: Array<{ id: string; name: string }>;
   term_averages?: Array<{
@@ -881,11 +906,16 @@ export interface ReportCardBreakdown {
     total_score: number;
     average_score: number;
     grade: string;
+    gpa?: number | null;
+    credit_units?: number | null;
   }>;
   subjects: Array<{
     subject_id: string;
     subject_name: string;
     subject_code?: string;
+    credit_units?: number | null;
+    grade_point?: number | null;
+    quality_points?: number | null;
     ca_score?: number | null;
     exam_score?: number | null;
     ca_max_score?: number;
@@ -1410,6 +1440,11 @@ export interface PublicSchoolWebsiteData {
     portal_subdomain: string;
     current_academic_session: string;
     current_term: string;
+    institution_category?: string | null;
+    academic_cycle_type?: string | null;
+    cycle_labels_json?: string | null;
+    grading_mode?: string | null;
+    terminology_json?: string | null;
   };
   urls: SchoolWebsiteUrls;
   website: SchoolWebsiteProfile;

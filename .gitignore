@@ -16,3 +16,5 @@ bun.lock*
 server.js
 cookies.txt
 .aistudio/
+public/assets/aistudio/
+

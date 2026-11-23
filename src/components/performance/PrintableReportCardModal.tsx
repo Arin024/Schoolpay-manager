@@ -26,6 +26,21 @@ export const PrintableReportCardModal: React.FC<PrintableReportCardModalProps> =
 
   const breakdown: ReportCardBreakdown | null = reportCard.breakdown || null;
   const isSessionReport = (breakdown?.report_type || reportCard.report_type) === 'SESSION';
+  const gradingMode = breakdown?.gradingMode || 'PERCENTAGE';
+  const isGpaMode = gradingMode === 'GPA_5' || gradingMode === 'GPA_4';
+  const gpaScaleMax = breakdown?.gpa_scale_max || (gradingMode === 'GPA_4' ? 4.0 : gradingMode === 'GPA_5' ? 5.0 : null);
+  const instProfile = breakdown?.institution_profile;
+  const isTertiary = Boolean(instProfile?.isTertiary || isGpaMode);
+
+  const labelCycle = instProfile?.labels?.cycle || (isTertiary ? 'Semester' : 'Term');
+  const labelCyclePlural = instProfile?.labels?.cyclePlural || (isTertiary ? 'Semesters' : 'Terms');
+  const labelClass = instProfile?.labels?.classLabel || (isTertiary ? 'Level / Programme' : 'Class');
+  const labelSubject = instProfile?.labels?.subject || (isTertiary ? 'Course' : 'Subject');
+  const labelSubjectPlural = instProfile?.labels?.subjectPlural || (isTertiary ? 'Courses' : 'Subjects');
+  const labelStudentId = instProfile?.labels?.studentId || (isTertiary ? 'Matric Number' : 'Admission Number');
+  const labelStaff = instProfile?.labels?.staff || (isTertiary ? 'Academic Adviser / HOD' : 'Class Teacher');
+  const labelHead = instProfile?.labels?.head || (isTertiary ? 'Registrar / Provost' : 'Principal / Head of School');
+
   const schoolName = breakdown?.school?.name || 'Official Academic Report';
   const schoolLocation = [breakdown?.school?.address, breakdown?.school?.lga, breakdown?.school?.state]
     .filter(Boolean)
@@ -35,10 +50,12 @@ export const PrintableReportCardModal: React.FC<PrintableReportCardModalProps> =
   const className = breakdown?.student?.class_name || reportCard.class_name || 'Unassigned';
   const sessionName = breakdown?.sessionName || reportCard.session_name || '—';
   const termName = isSessionReport
-    ? 'Annual Cumulative Summary'
+    ? isTertiary
+      ? 'Full-Session Academic Transcript'
+      : 'Annual Cumulative Summary'
     : breakdown?.termName || reportCard.term_name || '—';
   const verificationCode = breakdown?.verificationCode || reportCard.verification_code || 'PENDING';
-  const showPosition = breakdown?.showClassPosition ?? true;
+  const showPosition = breakdown?.showClassPosition ?? !isTertiary;
   const classPos = breakdown?.class_position ?? reportCard.class_position;
   const classSize = breakdown?.class_size ?? reportCard.class_size;
   const totalScore = Number(breakdown?.total_score ?? reportCard.total_score ?? 0);
@@ -57,6 +74,21 @@ export const PrintableReportCardModal: React.FC<PrintableReportCardModalProps> =
   const principalRemark = breakdown?.principal_remark ?? reportCard.principal_remark;
   const generatedStamp = breakdown?.published_at || reportCard.published_at || new Date().toISOString();
 
+  const gpaValue = isSessionReport
+    ? breakdown?.cgpa ?? breakdown?.gpa ?? null
+    : breakdown?.gpa ?? null;
+  const totalCreditUnits = breakdown?.total_credit_units ?? null;
+  const totalGradePoints = breakdown?.total_grade_points ?? null;
+  const academicStanding = breakdown?.academic_standing || null;
+
+  const docHeading = isSessionReport
+    ? isTertiary
+      ? 'Official Full-Session Academic Transcript'
+      : 'Full-Session Cumulative Annual Report Card'
+    : isTertiary
+      ? `Official ${labelCycle} Statement of Result`
+      : `Official End-of-${labelCycle} Report Card`;
+
   return (
     <div className="fixed inset-0 z-50 overflow-y-auto bg-slate-900/65 backdrop-blur-xs flex items-start sm:items-center justify-center p-4 print:p-0 print:bg-white print:static print:block print:overflow-visible">
       <div className="relative w-full max-w-5xl bg-white rounded-2xl shadow-2xl border border-slate-200 overflow-hidden my-6 print:my-0 print:border-none print:shadow-none print:w-full print:max-w-none print:rounded-none">
@@ -64,11 +96,7 @@ export const PrintableReportCardModal: React.FC<PrintableReportCardModalProps> =
         <div className="flex items-center justify-between px-6 py-4 bg-slate-900 text-white print:hidden">
           <div className="flex items-center gap-2.5 flex-wrap">
             <FileText className="w-5 h-5 text-emerald-400 shrink-0" />
-            <span className="font-semibold text-sm">
-              {isSessionReport
-                ? 'Full-Session Cumulative Annual Report Card'
-                : 'Official End-of-Term Report Card'}
-            </span>
+            <span className="font-semibold text-sm">{docHeading}</span>
             <WorkflowStatusBadge status={reportCard.status} />
             {breakdown?.isLiveGenerated && (
               <span className="text-[11px] text-slate-300 font-medium">
@@ -98,7 +126,7 @@ export const PrintableReportCardModal: React.FC<PrintableReportCardModalProps> =
 
         {/* Printable Document Body */}
         <div className="p-6 sm:p-8 space-y-6 text-xs text-slate-800 print:p-4 print:space-y-4">
-          {/* School Letterhead */}
+          {/* Institution Letterhead */}
           <div className="border-b border-slate-200 pb-5 flex flex-col sm:flex-row sm:items-start justify-between gap-4">
             <div>
               <h2 className="text-xl font-bold text-slate-900 tracking-tight">{schoolName}</h2>
@@ -111,9 +139,7 @@ export const PrintableReportCardModal: React.FC<PrintableReportCardModalProps> =
             </div>
             <div className="sm:text-right space-y-1">
               <p className="text-[11px] font-semibold uppercase tracking-wider text-slate-500">
-                {isSessionReport
-                  ? 'Full-Session Cumulative Annual Report'
-                  : 'End-of-Term Academic Report'}
+                {docHeading}
               </p>
               <p className="font-bold text-slate-900 text-sm">
                 {sessionName} · {termName}
@@ -130,38 +156,78 @@ export const PrintableReportCardModal: React.FC<PrintableReportCardModalProps> =
             <div>
               <p className="text-[11px] text-slate-500">Student Name</p>
               <p className="font-bold text-slate-900 text-sm mt-0.5">{studentName}</p>
-              <p className="font-mono text-[11px] text-slate-500">{admissionNo}</p>
+              <p className="font-mono text-[11px] text-slate-500">
+                {labelStudentId}: {admissionNo}
+              </p>
             </div>
             <div>
-              <p className="text-[11px] text-slate-500">Class</p>
+              <p className="text-[11px] text-slate-500">{labelClass}</p>
               <p className="font-bold text-slate-900 text-sm mt-0.5">{className}</p>
               <p className="text-[11px] text-slate-500 tabular-nums">
-                {subjectsCount} Subject(s)
+                {subjectsCount} {labelSubject}(s)
+                {isGpaMode && totalCreditUnits !== null ? ` · ${totalCreditUnits} Credit Unit(s)` : ''}
                 {isSessionReport && (breakdown?.terms_count ?? termAverages.length) > 0
-                  ? ` · ${breakdown?.terms_count ?? termAverages.length} Term(s)`
+                  ? ` · ${breakdown?.terms_count ?? termAverages.length} ${labelCycle}(s)`
                   : ''}
               </p>
             </div>
+
+            {isGpaMode ? (
+              <div>
+                <p className="text-[11px] text-slate-500">
+                  {isSessionReport ? 'Cumulative CGPA' : `${labelCycle} GPA`} ({gpaScaleMax?.toFixed(1)} Scale)
+                </p>
+                <p className="font-bold text-emerald-700 text-base mt-0.5 tabular-nums">
+                  {gpaValue !== null && gpaValue !== undefined ? Number(gpaValue).toFixed(2) : '0.00'}{' '}
+                  <span className="text-xs font-semibold text-slate-500">/ {gpaScaleMax?.toFixed(2)}</span>
+                </p>
+                <p className="text-[11px] text-slate-500 tabular-nums">
+                  Avg: {averageScore.toFixed(1)}% · TQP: {totalGradePoints !== null ? Number(totalGradePoints).toFixed(2) : '0.00'}
+                </p>
+              </div>
+            ) : (
+              <div>
+                <p className="text-[11px] text-slate-500">
+                  {isSessionReport ? 'Annual Cumulative Average' : 'Total & Average'}
+                </p>
+                <p className="font-bold text-slate-900 text-sm mt-0.5 tabular-nums">
+                  {averageScore.toFixed(1)}% ({overallGrade?.grade || '—'})
+                </p>
+                <p className="text-[11px] text-slate-500 tabular-nums">
+                  Aggregate: {totalScore.toFixed(1)} · {overallGrade?.remark || ''}
+                </p>
+              </div>
+            )}
+
             <div>
               <p className="text-[11px] text-slate-500">
-                {isSessionReport ? 'Annual Cumulative Average' : 'Total & Average'}
+                {isGpaMode && academicStanding
+                  ? 'Academic Standing'
+                  : isSessionReport && promotionStatus
+                    ? 'Promotion Standing'
+                    : showPosition
+                      ? `${labelClass} Standing`
+                      : 'Report Status'}
               </p>
-              <p className="font-bold text-slate-900 text-sm mt-0.5 tabular-nums">
-                {averageScore.toFixed(1)}% ({overallGrade?.grade || '—'})
-              </p>
-              <p className="text-[11px] text-slate-500 tabular-nums">
-                Aggregate: {totalScore.toFixed(1)} · {overallGrade?.remark || ''}
-              </p>
-            </div>
-            <div>
-              <p className="text-[11px] text-slate-500">
-                {isSessionReport && promotionStatus
-                  ? 'Promotion Standing'
-                  : showPosition
-                  ? 'Class Standing'
-                  : 'Report Status'}
-              </p>
-              {isSessionReport && promotionStatus ? (
+              {isGpaMode && academicStanding ? (
+                <div className="mt-0.5 space-y-0.5">
+                  <p className="font-bold text-slate-900 text-sm">{academicStanding}</p>
+                  {isSessionReport && promotionStatus ? (
+                    <span
+                      className={`inline-flex items-center gap-1 px-2 py-0.5 rounded border text-[10px] font-bold ${
+                        PROMOTION_BADGE_MAP[promotionStatus] || PROMOTION_BADGE_MAP.PENDING
+                      }`}
+                    >
+                      <Award className="w-3 h-3" />
+                      <span>{promotionStatus}</span>
+                    </span>
+                  ) : (
+                    <p className="text-[11px] text-slate-500">
+                      {gradingMode === 'GPA_4' ? 'NBTE 4.00 Classification' : 'NUC 5.00 Classification'}
+                    </p>
+                  )}
+                </div>
+              ) : isSessionReport && promotionStatus ? (
                 <div className="mt-0.5 space-y-0.5">
                   <span
                     className={`inline-flex items-center gap-1 px-2 py-0.5 rounded border text-[11px] font-bold ${
@@ -182,7 +248,7 @@ export const PrintableReportCardModal: React.FC<PrintableReportCardModalProps> =
                   <p className="font-bold text-emerald-700 text-sm mt-0.5 tabular-nums">
                     Position {classPos} of {classSize || '—'}
                   </p>
-                  <p className="text-[11px] text-slate-500">Class Cohort Ranking</p>
+                  <p className="text-[11px] text-slate-500">Cohort Ranking</p>
                 </>
               ) : (
                 <>
@@ -195,11 +261,11 @@ export const PrintableReportCardModal: React.FC<PrintableReportCardModalProps> =
             </div>
           </div>
 
-          {/* Term-by-Term Progression Strip for Full-Session Cumulative Reports */}
+          {/* Cycle-by-Cycle Progression Strip for Full-Session Cumulative Reports */}
           {isSessionReport && termAverages.length > 0 && (
             <div className="space-y-2">
-              <h3 className="font-bold text-slate-900 text-xs uppercase tracking-wider text-slate-500">
-                Term-by-Term Performance Progression
+              <h3 className="font-bold text-xs uppercase tracking-wider text-slate-500">
+                {labelCycle}-by-{labelCycle} Performance Progression
               </h3>
               <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
                 {termAverages.map((ta) => (
@@ -208,51 +274,90 @@ export const PrintableReportCardModal: React.FC<PrintableReportCardModalProps> =
                     className="p-3 rounded-xl border border-slate-200 bg-slate-50/70 space-y-0.5"
                   >
                     <p className="text-[11px] text-slate-500">{ta.term_name}</p>
-                    <p className="text-sm font-bold text-slate-900 tabular-nums">
-                      {ta.subjects_count > 0 ? `${Number(ta.average_score || 0).toFixed(1)}%` : '—'}
-                      {ta.subjects_count > 0 && ta.grade ? (
-                        <span className="ml-1.5 text-xs font-semibold text-emerald-700">({ta.grade})</span>
-                      ) : null}
-                    </p>
-                    <p className="text-[10px] text-slate-400 tabular-nums">
-                      {ta.subjects_count > 0 ? `${ta.subjects_count} subject(s) · Total ${Number(ta.total_score || 0).toFixed(1)}` : 'No published scores'}
-                    </p>
+                    {isGpaMode ? (
+                      <>
+                        <p className="text-sm font-bold text-slate-900 tabular-nums">
+                          {ta.subjects_count > 0 && ta.gpa !== null && ta.gpa !== undefined
+                            ? `GPA ${Number(ta.gpa).toFixed(2)}`
+                            : '—'}
+                          {ta.subjects_count > 0 ? (
+                            <span className="ml-1.5 text-[11px] font-semibold text-emerald-700">
+                              ({Number(ta.average_score || 0).toFixed(1)}%)
+                            </span>
+                          ) : null}
+                        </p>
+                        <p className="text-[10px] text-slate-400 tabular-nums">
+                          {ta.subjects_count > 0
+                            ? `${ta.subjects_count} ${labelSubject.toLowerCase()}(s) · ${ta.credit_units ?? 0} units`
+                            : 'No published scores'}
+                        </p>
+                      </>
+                    ) : (
+                      <>
+                        <p className="text-sm font-bold text-slate-900 tabular-nums">
+                          {ta.subjects_count > 0 ? `${Number(ta.average_score || 0).toFixed(1)}%` : '—'}
+                          {ta.subjects_count > 0 && ta.grade ? (
+                            <span className="ml-1.5 text-xs font-semibold text-emerald-700">({ta.grade})</span>
+                          ) : null}
+                        </p>
+                        <p className="text-[10px] text-slate-400 tabular-nums">
+                          {ta.subjects_count > 0
+                            ? `${ta.subjects_count} subject(s) · Total ${Number(ta.total_score || 0).toFixed(1)}`
+                            : 'No published scores'}
+                        </p>
+                      </>
+                    )}
                   </div>
                 ))}
                 <div className="p-3 rounded-xl border border-emerald-200 bg-emerald-50/70 space-y-0.5">
-                  <p className="text-[11px] text-emerald-800 font-semibold">Annual Cumulative</p>
+                  <p className="text-[11px] text-emerald-800 font-semibold">
+                    {isGpaMode ? 'Cumulative CGPA' : 'Annual Cumulative'}
+                  </p>
                   <p className="text-sm font-bold text-emerald-950 tabular-nums">
-                    {averageScore.toFixed(1)}% ({overallGrade?.grade || '—'})
+                    {isGpaMode && gpaValue !== null
+                      ? `${Number(gpaValue).toFixed(2)} / ${gpaScaleMax?.toFixed(2)}`
+                      : `${averageScore.toFixed(1)}% (${overallGrade?.grade || '—'})`}
                   </p>
                   <p className="text-[10px] text-emerald-700 tabular-nums">
-                    Aggregate: {totalScore.toFixed(1)}
+                    {isGpaMode
+                      ? `${totalCreditUnits ?? 0} Total Units · ${academicStanding || ''}`
+                      : `Aggregate: ${totalScore.toFixed(1)}`}
                   </p>
                 </div>
               </div>
             </div>
           )}
 
-          {/* Subject Breakdown Table */}
+          {/* Subject / Course Breakdown Table */}
           <div>
             <h3 className="font-bold text-slate-900 text-sm mb-2">
-              {isSessionReport ? 'Cumulative Subject Performance Breakdown' : 'Academic Subject Breakdown'}
+              {isSessionReport
+                ? `Cumulative ${labelSubject} Performance Breakdown`
+                : `Academic ${labelSubject} Breakdown`}
             </h3>
             {subjects.length === 0 ? (
-              <p className="text-slate-500 italic py-4">No subject scores included in this report snapshot.</p>
+              <p className="text-slate-500 italic py-4">
+                No {labelSubject.toLowerCase()} scores included in this report snapshot.
+              </p>
             ) : isSessionReport ? (
               <div className="overflow-x-auto border border-slate-200 rounded-xl print:overflow-visible">
                 <table className="w-full text-left text-xs">
                   <thead>
                     <tr className="bg-slate-50 text-slate-600 border-b border-slate-200 font-semibold">
-                      <th className="py-2.5 px-3">Subject</th>
+                      <th className="py-2.5 px-3">{labelSubject}</th>
+                      {isGpaMode && <th className="py-2.5 px-3 text-right whitespace-nowrap">Units</th>}
                       {sessionTerms.map((t) => (
                         <th key={t.id} className="py-2.5 px-3 text-right whitespace-nowrap">
                           {t.name}
                         </th>
                       ))}
-                      <th className="py-2.5 px-3 text-right whitespace-nowrap">Annual Total</th>
-                      <th className="py-2.5 px-3 text-right whitespace-nowrap">Annual Avg</th>
+                      {!isGpaMode && <th className="py-2.5 px-3 text-right whitespace-nowrap">Annual Total</th>}
+                      <th className="py-2.5 px-3 text-right whitespace-nowrap">
+                        {isGpaMode ? 'Avg Score' : 'Annual Avg'}
+                      </th>
                       <th className="py-2.5 px-3 text-center">Grade</th>
+                      {isGpaMode && <th className="py-2.5 px-3 text-right">GP</th>}
+                      {isGpaMode && <th className="py-2.5 px-3 text-right">QP</th>}
                       <th className="py-2.5 px-3">Remark</th>
                     </tr>
                   </thead>
@@ -265,6 +370,11 @@ export const PrintableReportCardModal: React.FC<PrintableReportCardModalProps> =
                             <span className="ml-1.5 text-[10px] font-mono text-slate-400">{sub.subject_code}</span>
                           ) : null}
                         </td>
+                        {isGpaMode && (
+                          <td className="py-2.5 px-3 text-right tabular-nums font-semibold text-slate-700">
+                            {sub.credit_units ?? 3}
+                          </td>
+                        )}
                         {sessionTerms.map((t) => {
                           const ts = sub.term_scores?.find((item) => item.term_id === t.id);
                           return (
@@ -275,11 +385,13 @@ export const PrintableReportCardModal: React.FC<PrintableReportCardModalProps> =
                             </td>
                           );
                         })}
-                        <td className="py-2.5 px-3 text-right tabular-nums font-semibold text-slate-700">
-                          {sub.cumulative_total !== undefined
-                            ? Number(sub.cumulative_total).toFixed(1)
-                            : sub.total_score ?? '—'}
-                        </td>
+                        {!isGpaMode && (
+                          <td className="py-2.5 px-3 text-right tabular-nums font-semibold text-slate-700">
+                            {sub.cumulative_total !== undefined
+                              ? Number(sub.cumulative_total).toFixed(1)
+                              : sub.total_score ?? '—'}
+                          </td>
+                        )}
                         <td className="py-2.5 px-3 text-right font-bold tabular-nums text-slate-900">
                           {sub.cumulative_average !== undefined
                             ? `${Number(sub.cumulative_average).toFixed(1)}%`
@@ -288,6 +400,20 @@ export const PrintableReportCardModal: React.FC<PrintableReportCardModalProps> =
                         <td className="py-2.5 px-3 text-center font-bold text-slate-900">
                           {sub.grade || '—'}
                         </td>
+                        {isGpaMode && (
+                          <td className="py-2.5 px-3 text-right tabular-nums text-slate-700">
+                            {sub.grade_point !== null && sub.grade_point !== undefined
+                              ? Number(sub.grade_point).toFixed(2)
+                              : '—'}
+                          </td>
+                        )}
+                        {isGpaMode && (
+                          <td className="py-2.5 px-3 text-right tabular-nums font-bold text-slate-900">
+                            {sub.quality_points !== null && sub.quality_points !== undefined
+                              ? Number(sub.quality_points).toFixed(2)
+                              : '—'}
+                          </td>
+                        )}
                         <td className="py-2.5 px-3 text-slate-600">
                           {sub.subject_remark || sub.grade_remark || '—'}
                         </td>
@@ -301,11 +427,14 @@ export const PrintableReportCardModal: React.FC<PrintableReportCardModalProps> =
                 <table className="w-full text-left text-xs">
                   <thead>
                     <tr className="bg-slate-50 text-slate-600 border-b border-slate-200 font-semibold">
-                      <th className="py-2.5 px-3">Subject</th>
+                      <th className="py-2.5 px-3">{labelSubject}</th>
+                      {isGpaMode && <th className="py-2.5 px-3 text-right">Units</th>}
                       <th className="py-2.5 px-3 text-right">CA</th>
                       <th className="py-2.5 px-3 text-right">Exam</th>
                       <th className="py-2.5 px-3 text-right">Total</th>
                       <th className="py-2.5 px-3 text-center">Grade</th>
+                      {isGpaMode && <th className="py-2.5 px-3 text-right">GP</th>}
+                      {isGpaMode && <th className="py-2.5 px-3 text-right">QP</th>}
                       <th className="py-2.5 px-3">Remark</th>
                     </tr>
                   </thead>
@@ -318,6 +447,11 @@ export const PrintableReportCardModal: React.FC<PrintableReportCardModalProps> =
                             <span className="ml-1.5 text-[10px] font-mono text-slate-400">{sub.subject_code}</span>
                           ) : null}
                         </td>
+                        {isGpaMode && (
+                          <td className="py-2.5 px-3 text-right tabular-nums font-semibold text-slate-700">
+                            {sub.credit_units ?? 3}
+                          </td>
+                        )}
                         <td className="py-2.5 px-3 text-right tabular-nums text-slate-600">
                           {sub.ca_score ?? '—'}
                           {sub.ca_max_score ? <span className="text-[10px] text-slate-400">/{sub.ca_max_score}</span> : null}
@@ -332,12 +466,45 @@ export const PrintableReportCardModal: React.FC<PrintableReportCardModalProps> =
                         <td className="py-2.5 px-3 text-center font-bold text-slate-900">
                           {sub.grade || '—'}
                         </td>
+                        {isGpaMode && (
+                          <td className="py-2.5 px-3 text-right tabular-nums text-slate-700">
+                            {sub.grade_point !== null && sub.grade_point !== undefined
+                              ? Number(sub.grade_point).toFixed(2)
+                              : '—'}
+                          </td>
+                        )}
+                        {isGpaMode && (
+                          <td className="py-2.5 px-3 text-right tabular-nums font-bold text-slate-900">
+                            {sub.quality_points !== null && sub.quality_points !== undefined
+                              ? Number(sub.quality_points).toFixed(2)
+                              : '—'}
+                          </td>
+                        )}
                         <td className="py-2.5 px-3 text-slate-600">
                           {sub.subject_remark || sub.grade_remark || '—'}
                         </td>
                       </tr>
                     ))}
                   </tbody>
+                  {isGpaMode && (
+                    <tfoot>
+                      <tr className="bg-slate-50 border-t border-slate-200 font-bold text-slate-900">
+                        <td className="py-2.5 px-3">Totals / {labelCycle} GPA</td>
+                        <td className="py-2.5 px-3 text-right tabular-nums">{totalCreditUnits ?? 0}</td>
+                        <td colSpan={3} className="py-2.5 px-3 text-right text-slate-500 font-medium">
+                          Avg: {averageScore.toFixed(1)}%
+                        </td>
+                        <td className="py-2.5 px-3 text-center text-emerald-700">
+                          {gpaValue !== null ? Number(gpaValue).toFixed(2) : '0.00'}
+                        </td>
+                        <td className="py-2.5 px-3 text-right text-slate-500 font-medium">TQP</td>
+                        <td className="py-2.5 px-3 text-right tabular-nums">
+                          {totalGradePoints !== null ? Number(totalGradePoints).toFixed(2) : '0.00'}
+                        </td>
+                        <td className="py-2.5 px-3 text-emerald-800">{academicStanding || ''}</td>
+                      </tr>
+                    </tfoot>
+                  )}
                 </table>
               </div>
             )}
@@ -347,7 +514,7 @@ export const PrintableReportCardModal: React.FC<PrintableReportCardModalProps> =
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-6 pt-2">
             <div className="p-4 rounded-xl border border-slate-200 bg-slate-50/60 space-y-2">
               <h4 className="font-bold text-slate-900">
-                {isSessionReport ? 'Annual Attendance Summary' : 'Attendance Summary'}
+                {isSessionReport ? 'Session Attendance Summary' : 'Attendance Summary'}
               </h4>
               {attendance && attendance.totalDays > 0 ? (
                 <div className="grid grid-cols-4 gap-2 text-center pt-1">
@@ -372,13 +539,15 @@ export const PrintableReportCardModal: React.FC<PrintableReportCardModalProps> =
                 <p className="text-slate-500 italic">
                   {isSessionReport
                     ? 'No published attendance records for this session.'
-                    : 'No published attendance records for this term.'}
+                    : `No published attendance records for this ${labelCycle.toLowerCase()}.`}
                 </p>
               )}
             </div>
 
             <div className="p-4 rounded-xl border border-slate-200 bg-slate-50/60 space-y-2">
-              <h4 className="font-bold text-slate-900">Behaviour &amp; Conduct</h4>
+              <h4 className="font-bold text-slate-900">
+                {isTertiary ? 'Academic Conduct & Honours' : 'Behaviour & Conduct'}
+              </h4>
               {behaviour && behaviour.totalRecords > 0 ? (
                 <div className="space-y-1.5">
                   <p className="text-slate-600 tabular-nums">
@@ -404,35 +573,38 @@ export const PrintableReportCardModal: React.FC<PrintableReportCardModalProps> =
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-6 pt-2">
             <div className="p-4 rounded-xl border border-slate-200 space-y-1">
               <p className="text-[11px] font-semibold text-slate-500 uppercase tracking-wider">
-                Class Teacher Remark {teacherAuthor ? `(${teacherAuthor})` : ''}
+                {labelStaff} Remark {teacherAuthor ? `(${teacherAuthor})` : ''}
               </p>
               <p className="text-slate-800 leading-relaxed">
-                {teacherRemark || 'No class teacher remark recorded.'}
+                {teacherRemark || `No ${labelStaff.toLowerCase()} remark recorded.`}
               </p>
             </div>
             <div className="p-4 rounded-xl border border-slate-200 space-y-1">
               <p className="text-[11px] font-semibold text-slate-500 uppercase tracking-wider">
-                Principal / Head of School Remark
+                {labelHead} Remark
               </p>
               <p className="text-slate-800 leading-relaxed">
                 {principalRemark ||
                   (isSessionReport
-                    ? 'Approved for annual academic session record.'
-                    : 'Approved for term record.')}
+                    ? 'Approved for official academic session transcript.'
+                    : `Approved for ${labelCycle.toLowerCase()} record.`)}
               </p>
             </div>
           </div>
 
-          {/* Nigerian Grading Scale Key */}
+          {/* Grading Scale Key */}
           {gradingScale.length > 0 && (
             <div className="p-3.5 rounded-xl border border-slate-200 bg-slate-50/50 space-y-1.5">
               <p className="text-[10px] font-semibold uppercase tracking-wider text-slate-500">
-                Grading Scale Key
+                {isGpaMode
+                  ? `${gradingMode === 'GPA_4' ? 'NBTE 4.00' : 'NUC 5.00'} Grading & Grade Point Scale Key`
+                  : 'Grading Scale Key'}
               </p>
               <div className="flex flex-wrap gap-x-4 gap-y-1 text-[11px] text-slate-700 tabular-nums">
-                {gradingScale.map((g, i) => (
+                {gradingScale.map((g: any, i: number) => (
                   <span key={`${g.grade}-${i}`}>
-                    <strong className="text-slate-900">{g.grade}</strong>: {g.min}–{g.max}% ({g.remark})
+                    <strong className="text-slate-900">{g.grade}</strong>: {g.min}–{g.max}%
+                    {typeof g.points === 'number' ? ` (${g.points.toFixed(g.points % 1 === 0 ? 1 : 2)} GP)` : ''} ({g.remark})
                   </span>
                 ))}
               </div>
@@ -449,7 +621,7 @@ export const PrintableReportCardModal: React.FC<PrintableReportCardModalProps> =
             </div>
             <div className="sm:text-right pt-4 sm:pt-0">
               <div className="w-48 border-b border-slate-400 mb-1 sm:ml-auto" />
-              <p className="font-semibold text-slate-700">Principal / Authorized Signature &amp; Stamp</p>
+              <p className="font-semibold text-slate-700">{labelHead} Signature &amp; Stamp</p>
             </div>
           </div>
         </div>
@@ -457,4 +629,3 @@ export const PrintableReportCardModal: React.FC<PrintableReportCardModalProps> =
     </div>
   );
 };
-

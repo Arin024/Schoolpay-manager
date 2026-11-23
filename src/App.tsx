@@ -73,6 +73,7 @@ import {
   MonitorCheck,
 } from 'lucide-react';
 import { SchoolStatusBadge } from './components/common/StatusBadge.js';
+import { resolveInstitutionProfile } from './utils/institutionMode.js';
 
 type AppView = 'school' | 'superadmin' | 'login' | 'register' | 'thank-you' | 'privacy' | 'terms' | '404';
 type SchoolTab =
@@ -184,6 +185,8 @@ const AppContent: React.FC = () => {
     exitSchoolWorkspace,
     logout,
   } = useAuth();
+  const instProfile = resolveInstitutionProfile(activeSchool, activeSettings);
+  const { labels: instLabels, isTertiary } = instProfile;
   const [activeView, setActiveView] = useState<AppView>('school');
   const [schoolTab, setSchoolTab] = useState<SchoolTab>('overview');
   const [adminSchoolsList, setAdminSchoolsList] = useState<Array<{ id: string; name: string; state?: string }>>([]);
@@ -666,14 +669,14 @@ const AppContent: React.FC = () => {
             <div className="text-center max-w-3xl mx-auto pt-4 pb-2">
               <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-emerald-100 text-emerald-800 text-xs font-bold uppercase tracking-wider mb-4 border border-emerald-200">
                 <ShieldCheck className="w-4 h-4 text-emerald-600" />
-                <span>Built for Nigerian Schools • Instant School Website &amp; Portal</span>
+                <span>Built for K-12 Schools &amp; Higher Institutions • Instant Website &amp; Portal</span>
               </div>
               <h1 className="text-3xl sm:text-5xl font-extrabold text-slate-900 tracking-tight leading-tight">
-                One complete school platform.<br className="hidden sm:inline" />
+                One complete institutional platform.<br className="hidden sm:inline" />
                 <span className="text-emerald-700">Website, academics, staff desk &amp; bursary.</span>
               </h1>
               <p className="mt-3 text-sm sm:text-base text-slate-600 max-w-2xl mx-auto">
-                The all-in-one digital operating system for Nigerian schools (bursariq.com.ng). Every school receives a shareable public school website &amp; subdomain with news articles and photo gallery, a private Staff Workspace with Nigerian NERDC lesson notes and confidential circulars, Parent/Student portals, report cards, and reconciled fee billing.
+                The all-in-one digital operating system for Nigerian Primary &amp; Secondary Schools, Universities, Polytechnics, and Colleges (bursariq.com.ng). Run 3 Terms or Semesters, percentage report cards or NUC/NBTE GPA &amp; CGPA transcripts, CBT exams, staff workspaces, and reconciled fee billing.
               </p>
 
               {/* Primary Call-To-Action (Above The Fold) */}
@@ -686,7 +689,7 @@ const AppContent: React.FC = () => {
                   }}
                   className="px-6 py-3 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-extrabold text-xs sm:text-sm shadow-lg shadow-emerald-950/20 transition cursor-pointer flex items-center gap-2"
                 >
-                  <span>Register School (30-Day Free Trial)</span>
+                  <span>Register School / Institution (30-Day Free Trial)</span>
                   <ArrowRight className="w-4 h-4" />
                 </button>
               </div>
@@ -760,10 +763,10 @@ const AppContent: React.FC = () => {
               {/* Pillar 1: Who it is designed for & Core Mission */}
               <div className="text-center max-w-3xl mx-auto space-y-2">
                 <h2 className="text-2xl font-black text-slate-900 tracking-tight">
-                  Everything Your School Needs Across Every Stakeholder
+                  Built for Every Nigerian School &amp; Higher Institution
                 </h2>
                 <p className="text-sm text-slate-600 leading-relaxed">
-                  Designed for Nigerian Nursery &amp; Primary Schools, Secondary Colleges, and K-12 Academies. Replace disconnected spreadsheets, paper result sheets, and payment mix-ups with dedicated portals where Administrators manage official school records, Teachers track classes and report cards, Parents monitor children&apos;s results and fees, and Students view published grades safely.
+                  Tailored for Nursery &amp; Primary Schools, Secondary Academies, Universities, Polytechnics, Colleges of Education, and Colleges of Health. Customize Terms or Semesters, Classes or Levels &amp; Departments, and Percentage Report Cards or 5.0/4.0 GPA &amp; CGPA Academic Transcripts.
                 </p>
               </div>
 
@@ -773,9 +776,9 @@ const AppContent: React.FC = () => {
                   <div className="w-10 h-10 rounded-xl bg-emerald-100 text-emerald-800 flex items-center justify-center font-bold">
                     <Users className="w-5 h-5 text-emerald-700" />
                   </div>
-                  <h3 className="font-bold text-slate-900 text-base">Role-Separated School Portals</h3>
+                  <h3 className="font-bold text-slate-900 text-base">Role-Separated Institutional Portals</h3>
                   <p className="text-xs text-slate-600 leading-relaxed">
-                    Every school gets a branded portal link for Proprietors, Admins, Bursars, Teachers, Parents, and Students. Students sign in with their Admission Number and Parents with their Phone Number—never sharing admin logins.
+                    Every institution gets a branded portal link for Admins, Bursars, Teachers/Lecturers, Parents/Sponsors, and Students. Students sign in with their Admission or Matric Number—never sharing admin logins.
                   </p>
                 </div>
 
@@ -783,9 +786,9 @@ const AppContent: React.FC = () => {
                   <div className="w-10 h-10 rounded-xl bg-blue-100 text-blue-800 flex items-center justify-center font-bold">
                     <BarChart3 className="w-5 h-5 text-blue-700" />
                   </div>
-                  <h3 className="font-bold text-slate-900 text-base">End-of-Term &amp; Full-Session Report Cards</h3>
+                  <h3 className="font-bold text-slate-900 text-base">Report Cards &amp; GPA / CGPA Transcripts</h3>
                   <p className="text-xs text-slate-600 leading-relaxed">
-                    Record CA and Examination scores across First, Second, and Third Terms, publish approved grades without draft leakage, and generate printable End-of-Term and Cumulative Annual Report Cards with promotion standing.
+                    Support 3-Term K-12 report cards or 2-Semester / Trimester Higher Institution transcripts with Credit Units, NUC 5.0 &amp; NBTE 4.0 GPA/CGPA computation, and verified authenticity codes.
                   </p>
                 </div>
 
@@ -1235,7 +1238,7 @@ const AppContent: React.FC = () => {
                 }`}
               >
                 <Building2 className="w-4 h-4 text-emerald-400" />
-                <span>Classes &amp; Arms</span>
+                <span>{instLabels.classPlural}</span>
               </button>
 
               <button
@@ -1247,7 +1250,7 @@ const AppContent: React.FC = () => {
                 }`}
               >
                 <Users className="w-4 h-4 text-emerald-400" />
-                <span>Parents</span>
+                <span>{isTertiary ? 'Sponsors / Guardians' : 'Parents'}</span>
               </button>
 
               <button
@@ -1259,7 +1262,7 @@ const AppContent: React.FC = () => {
                 }`}
               >
                 <Briefcase className="w-4 h-4 text-emerald-400" />
-                <span>Staff Directory</span>
+                <span>{isTertiary ? 'Lecturers & Staff' : 'Staff Directory'}</span>
               </button>
 
               <button
@@ -1271,7 +1274,7 @@ const AppContent: React.FC = () => {
                 }`}
               >
                 <Calendar className="w-4 h-4 text-emerald-400" />
-                <span>Sessions &amp; Terms</span>
+                <span>Sessions &amp; {instLabels.cyclePlural}</span>
               </button>
 
               <button
@@ -1295,7 +1298,7 @@ const AppContent: React.FC = () => {
                 }`}
               >
                 <BookOpen className="w-4 h-4 text-emerald-400" />
-                <span>Lesson Notes &amp; Staff Desk</span>
+                <span>{isTertiary ? 'Lecture Notes & Desk' : 'Lesson Notes & Staff Desk'}</span>
               </button>
 
               <button

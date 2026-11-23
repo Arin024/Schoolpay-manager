@@ -227,11 +227,21 @@ export async function validateSessionPg(
       if (setRes.rows.length > 0) {
         const st = setRes.rows[0];
         cacheDb.prepare(`
-          INSERT INTO school_settings (id, school_id, currency, currency_symbol, current_academic_session, current_term, payment_notification_email)
-          VALUES (?, ?, ?, ?, ?, ?, ?)
+          INSERT INTO school_settings (
+            id, school_id, currency, currency_symbol, current_academic_session, current_term,
+            payment_notification_email, portal_subdomain, institution_category, academic_cycle_type,
+            cycle_labels_json, grading_mode, terminology_json
+          )
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
           ON CONFLICT(school_id) DO UPDATE SET
             current_academic_session = COALESCE(excluded.current_academic_session, school_settings.current_academic_session),
-            current_term = COALESCE(excluded.current_term, school_settings.current_term)
+            current_term = COALESCE(excluded.current_term, school_settings.current_term),
+            portal_subdomain = COALESCE(excluded.portal_subdomain, school_settings.portal_subdomain),
+            institution_category = COALESCE(excluded.institution_category, school_settings.institution_category),
+            academic_cycle_type = COALESCE(excluded.academic_cycle_type, school_settings.academic_cycle_type),
+            cycle_labels_json = COALESCE(excluded.cycle_labels_json, school_settings.cycle_labels_json),
+            grading_mode = COALESCE(excluded.grading_mode, school_settings.grading_mode),
+            terminology_json = COALESCE(excluded.terminology_json, school_settings.terminology_json)
         `).run(
           st.id,
           st.school_id,
@@ -239,7 +249,13 @@ export async function validateSessionPg(
           st.currency_symbol || '₦',
           st.current_academic_session || '2024/2025',
           st.current_term || '1st Term',
-          st.payment_notification_email || null
+          st.payment_notification_email || null,
+          st.portal_subdomain || null,
+          st.institution_category || 'K12',
+          st.academic_cycle_type || 'TERM',
+          st.cycle_labels_json || null,
+          st.grading_mode || 'PERCENTAGE',
+          st.terminology_json || null
         );
       }
     }

@@ -3,7 +3,7 @@ import { Building2, MapPin, Phone, Mail, Globe, Shield, Save, CheckCircle2, Aler
 import { useAuth } from '../../context/AuthContext.js';
 import { api } from '../../services/api.js';
 import { SchoolStatusBadge } from '../common/StatusBadge.js';
-import { NIGERIAN_STATES, SCHOOL_TYPES } from '../../constants/index.js';
+import { NIGERIAN_STATES, K12_SCHOOL_TYPES, TERTIARY_SCHOOL_TYPES } from '../../constants/index.js';
 
 export const SchoolProfileView: React.FC = () => {
   const { activeSchool, activeSchoolId, activeRole, setActiveSchool, refreshMe } = useAuth();
@@ -197,9 +197,16 @@ export const SchoolProfileView: React.FC = () => {
                 onChange={handleChange}
                 className="w-full px-3.5 py-2.5 text-sm bg-slate-50 focus:bg-white border border-slate-300 focus:border-emerald-500 rounded-xl disabled:bg-slate-100 disabled:text-slate-500 transition"
               >
-                {SCHOOL_TYPES.map((t) => (
-                  <option key={t} value={t}>{t}</option>
-                ))}
+                <optgroup label="Basic & Secondary Schools (K-12)">
+                  {K12_SCHOOL_TYPES.map((t) => (
+                    <option key={t} value={t}>{t}</option>
+                  ))}
+                </optgroup>
+                <optgroup label="Higher Institutions / Tertiary">
+                  {TERTIARY_SCHOOL_TYPES.map((t) => (
+                    <option key={t} value={t}>{t}</option>
+                  ))}
+                </optgroup>
               </select>
             </div>
 

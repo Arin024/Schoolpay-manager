@@ -412,6 +412,16 @@ export const api = {
     ownerEmail: string;
     password: string;
     website?: string;
+    question1?: string;
+    answer1?: string;
+    question2?: string;
+    answer2?: string;
+    recoveryEmail?: string;
+    institutionCategory?: 'K12' | 'TERTIARY';
+    academicCycleType?: 'TERM' | 'SEMESTER' | 'TRIMESTER';
+    cycleLabels?: string[];
+    gradingMode?: 'PERCENTAGE' | 'GPA_5' | 'GPA_4';
+    terminology?: Record<string, string>;
   }) {
     return safeFetch(`${API_BASE}/auth/register-school`, {
       method: 'POST',
@@ -856,7 +866,7 @@ export const api = {
     });
   },
 
-  async bulkSetupClasses(mode: 'SECONDARY' | 'PRIMARY' | 'K12'): Promise<{
+  async bulkSetupClasses(mode: 'SECONDARY' | 'PRIMARY' | 'K12' | 'UNIVERSITY' | 'POLYTECHNIC' | 'COLLEGE'): Promise<{
     success: boolean;
     createdClassesCount: number;
     createdArmsCount: number;
@@ -2093,7 +2103,7 @@ export const api = {
     });
   },
 
-  async createSubject(data: { name: string; code?: string; department?: string; class_id?: string; status?: string }): Promise<{ success: boolean; subject: SubjectItem }> {
+  async createSubject(data: { name: string; code?: string; department?: string; class_id?: string; credit_units?: number; status?: string }): Promise<{ success: boolean; subject: SubjectItem }> {
     return safeFetch(`${API_BASE}/school/subjects`, {
       method: 'POST',
       headers: getAuthHeaders(),

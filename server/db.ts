@@ -387,6 +387,14 @@ export async function initDatabase() {
             await client.query(mig008Sql);
             console.log('[Neon PostgreSQL] Verified/applied migration 008_cbt_examinations.sql');
           }
+
+          // Execute idempotent 009_higher_institution_support.sql migration on Neon PostgreSQL before hydration
+          const mig009Path = path.resolve(process.cwd(), 'migrations/009_higher_institution_support.sql');
+          if (fs.existsSync(mig009Path)) {
+            const mig009Sql = fs.readFileSync(mig009Path, 'utf8');
+            await client.query(mig009Sql);
+            console.log('[Neon PostgreSQL] Verified/applied migration 009_higher_institution_support.sql');
+          }
         } finally {
           client.release();
         }
@@ -996,6 +1004,11 @@ function migrateStep4Columns() {
       bachs_webhook_secret: 'TEXT',
       bachs_enabled: 'INTEGER DEFAULT 1',
       webhook_secret: 'TEXT',
+      institution_category: "TEXT DEFAULT 'K12'",
+      academic_cycle_type: "TEXT DEFAULT 'TERM'",
+      cycle_labels_json: 'TEXT',
+      grading_mode: "TEXT DEFAULT 'PERCENTAGE'",
+      terminology_json: 'TEXT',
     };
 
     for (const [col, colType] of Object.entries(requiredSettingsCols)) {
@@ -1004,6 +1017,17 @@ function migrateStep4Columns() {
           db.exec(`ALTER TABLE school_settings ADD COLUMN ${col} ${colType};`);
         } catch (e) {}
       }
+    }
+  }
+
+  // 2b. Ensure subjects table supports course credit_units for Higher Institutions (additive, default 3)
+  const subjectsTableExists = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='subjects'").get();
+  if (subjectsTableExists) {
+    const subCols = db.prepare('PRAGMA table_info(subjects)').all().map((c: any) => c.name);
+    if (!subCols.includes('credit_units')) {
+      try {
+        db.exec('ALTER TABLE subjects ADD COLUMN credit_units INTEGER DEFAULT 3;');
+      } catch (e) {}
     }
   }
 

@@ -14,6 +14,7 @@ import {
 import { api } from '../../services/api.js';
 import { useAuth } from '../../context/AuthContext.js';
 import { LessonNoteItem, LessonNoteStatus } from '../../types/index.js';
+import { resolveInstitutionProfile } from '../../utils/institutionMode.js';
 
 interface LessonNotesStudioProps {
   isAdminMode?: boolean;
@@ -33,7 +34,11 @@ export const LessonNotesStudio: React.FC<LessonNotesStudioProps> = ({
   classes = [],
   subjects = [],
 }) => {
-  const { activeSchool } = useAuth();
+  const { activeSchool, activeSettings } = useAuth();
+  const profile = resolveInstitutionProfile(activeSchool, activeSettings);
+  const { isTertiary, labels, cycleLabels } = profile;
+  const defaultPeriod = activeSettings?.current_term || cycleLabels[0] || '1st Term';
+
   const [notes, setNotes] = useState<LessonNoteItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [statusFilter, setStatusFilter] = useState<string>('ALL');
@@ -48,9 +53,9 @@ export const LessonNotesStudio: React.FC<LessonNotesStudioProps> = ({
   const [form, setForm] = useState({
     subject_name: '',
     class_name: '',
-    term_name: '1st Term',
+    term_name: defaultPeriod,
     week_number: 1,
-    duration_minutes: 40,
+    duration_minutes: isTertiary ? 60 : 40,
     topic: '',
     sub_topic: '',
     behavioural_objectives: '',
@@ -74,7 +79,7 @@ export const LessonNotesStudio: React.FC<LessonNotesStudioProps> = ({
       const res = await api.getLessonNotes(filter === 'ALL' ? undefined : filter);
       setNotes(res.lessonNotes || []);
     } catch (err: any) {
-      setFeedback({ type: 'err', text: err?.message || 'Failed to load lesson notes' });
+      setFeedback({ type: 'err', text: err?.message || `Failed to load ${labels.lessonNotes.toLowerCase()}` });
     } finally {
       setLoading(false);
     }
@@ -89,9 +94,9 @@ export const LessonNotesStudio: React.FC<LessonNotesStudioProps> = ({
     setForm({
       subject_name: subjects[0]?.name || '',
       class_name: classes[0]?.name || '',
-      term_name: '1st Term',
+      term_name: defaultPeriod,
       week_number: 1,
-      duration_minutes: 40,
+      duration_minutes: isTertiary ? 60 : 40,
       topic: '',
       sub_topic: '',
       behavioural_objectives: '',
@@ -109,7 +114,9 @@ export const LessonNotesStudio: React.FC<LessonNotesStudioProps> = ({
     if (!form.subject_name.trim() || !form.class_name.trim() || !form.topic.trim()) {
       setFeedback({
         type: 'err',
-        text: 'Enter Subject, Class, and Lesson Topic before generating a Nigerian NERDC Lesson Plan.',
+        text: isTertiary
+          ? 'Enter Course, Level, and Lecture Topic before generating a Lecture Note & Course Outline.'
+          : 'Enter Subject, Class, and Lesson Topic before generating a Nigerian NERDC Lesson Plan.',
       });
       return;
     }
@@ -140,7 +147,11 @@ export const LessonNotesStudio: React.FC<LessonNotesStudioProps> = ({
       setEditorOpen(true);
       setFeedback({
         type: 'ok',
-        text: res.message || 'NERDC-aligned Nigerian lesson note generated. Review, edit, or submit to Principal.',
+        text:
+          res.message ||
+          (isTertiary
+            ? 'Structured lecture note & course outline generated. Review, edit, or submit for review.'
+            : 'NERDC-aligned Nigerian lesson note generated. Review, edit, or submit to Principal.'),
       });
     } catch (err: any) {
       setFeedback({ type: 'err', text: err?.message || 'Failed to generate lesson plan draft.' });
@@ -235,15 +246,23 @@ export const LessonNotesStudio: React.FC<LessonNotesStudioProps> = ({
             <h3 className="text-base font-bold text-slate-900 flex items-center gap-2">
               <BookOpen className="w-5 h-5 text-emerald-600" />
               <span>
-                {isAdminMode
-                  ? 'Staff Lesson Notes & NERDC Curriculum Review Desk'
-                  : 'Nigerian NERDC Lesson Notes & Lesson Plan Studio'}
+                {isTertiary
+                  ? isAdminMode
+                    ? `Faculty ${labels.lessonNotes} & Curriculum Review Desk`
+                    : `${labels.lessonNotes} Studio`
+                  : isAdminMode
+                    ? 'Staff Lesson Notes & NERDC Curriculum Review Desk'
+                    : 'Nigerian NERDC Lesson Notes & Lesson Plan Studio'}
               </span>
             </h3>
             <p className="text-slate-500 mt-0.5">
-              {isAdminMode
-                ? 'Review, approve, or request revisions on submitted staff lesson plans. Strictly hidden from parents and students.'
-                : 'Auto-generate structured NERDC-aligned lesson notes or author your own weekly notes and submit to Principal/Admin for approval.'}
+              {isTertiary
+                ? isAdminMode
+                  ? 'Review, approve, or request revisions on submitted lecturer course outlines and lecture notes.'
+                  : 'Generate structured weekly lecture outlines and course notes, then submit to HOD / Academic Registry for approval.'
+                : isAdminMode
+                  ? 'Review, approve, or request revisions on submitted staff lesson plans. Strictly hidden from parents and students.'
+                  : 'Auto-generate structured NERDC-aligned lesson notes or author your own weekly notes and submit to Principal/Admin for approval.'}
             </p>
           </div>
           <button
@@ -255,7 +274,13 @@ export const LessonNotesStudio: React.FC<LessonNotesStudioProps> = ({
             className="px-4 py-2.5 bg-slate-900 hover:bg-slate-800 text-white rounded-xl font-bold inline-flex items-center gap-1.5 cursor-pointer self-start whitespace-nowrap shrink-0"
           >
             <FileText className="w-4 h-4 text-emerald-400" />
-            <span>{editorOpen ? 'Hide Lesson Editor' : 'Write / Generate Lesson Note'}</span>
+            <span>
+              {editorOpen
+                ? 'Hide Editor'
+                : isTertiary
+                  ? 'Write / Generate Lecture Note'
+                  : 'Write / Generate Lesson Note'}
+            </span>
           </button>
         </div>
 
@@ -314,10 +339,14 @@ export const LessonNotesStudio: React.FC<LessonNotesStudioProps> = ({
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-4 border-b border-slate-100">
             <div>
               <h4 className="text-sm font-bold text-slate-900">
-                {editingNoteId ? 'Edit Lesson Note' : 'New Nigerian NERDC Lesson Plan'}
+                {editingNoteId
+                  ? `Edit ${isTertiary ? 'Lecture Note' : 'Lesson Note'}`
+                  : isTertiary
+                    ? 'New Structured Lecture Note / Course Outline'
+                    : 'New Nigerian NERDC Lesson Plan'}
               </h4>
               <p className="text-slate-500 mt-0.5">
-                Fill Subject, Class, and Topic, then click Auto-Generate NERDC Plan or write manually below.
+                Fill {labels.subject}, {labels.classLabel}, and Topic, then click Auto-Generate or write manually below.
               </p>
             </div>
             <button
@@ -327,19 +356,25 @@ export const LessonNotesStudio: React.FC<LessonNotesStudioProps> = ({
               className="px-4 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl font-bold inline-flex items-center gap-1.5 cursor-pointer disabled:opacity-60 whitespace-nowrap shrink-0"
             >
               <Sparkles className="w-4 h-4" />
-              <span>{generating ? 'Generating Plan...' : 'Auto-Generate NERDC Lesson Plan'}</span>
+              <span>
+                {generating
+                  ? 'Generating Plan...'
+                  : isTertiary
+                    ? 'Auto-Generate Lecture Outline'
+                    : 'Auto-Generate NERDC Lesson Plan'}
+              </span>
             </button>
           </div>
 
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
             <div>
-              <label className="block font-semibold text-slate-700 mb-1">Subject *</label>
+              <label className="block font-semibold text-slate-700 mb-1">{labels.subject} *</label>
               <input
                 type="text"
                 list="nerdc-subject-options"
                 value={form.subject_name}
                 onChange={(e) => setForm({ ...form, subject_name: e.target.value })}
-                placeholder="e.g. Basic Science or Mathematics"
+                placeholder={isTertiary ? 'e.g. CSC 101 - Intro to Computing' : 'e.g. Basic Science or Mathematics'}
                 className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl"
               />
               <datalist id="nerdc-subject-options">
@@ -350,13 +385,13 @@ export const LessonNotesStudio: React.FC<LessonNotesStudioProps> = ({
             </div>
 
             <div>
-              <label className="block font-semibold text-slate-700 mb-1">Class *</label>
+              <label className="block font-semibold text-slate-700 mb-1">{labels.classLabel} *</label>
               <input
                 type="text"
                 list="nerdc-class-options"
                 value={form.class_name}
                 onChange={(e) => setForm({ ...form, class_name: e.target.value })}
-                placeholder="e.g. JSS 2 or SSS 1"
+                placeholder={isTertiary ? 'e.g. 100 Level or ND 1' : 'e.g. JSS 2 or SSS 1'}
                 className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl"
               />
               <datalist id="nerdc-class-options">
@@ -367,15 +402,17 @@ export const LessonNotesStudio: React.FC<LessonNotesStudioProps> = ({
             </div>
 
             <div>
-              <label className="block font-semibold text-slate-700 mb-1">Term</label>
+              <label className="block font-semibold text-slate-700 mb-1">{labels.cycle}</label>
               <select
                 value={form.term_name}
                 onChange={(e) => setForm({ ...form, term_name: e.target.value })}
                 className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl"
               >
-                <option value="1st Term">1st Term</option>
-                <option value="2nd Term">2nd Term</option>
-                <option value="3rd Term">3rd Term</option>
+                {Array.from(new Set([form.term_name, ...cycleLabels].filter(Boolean))).map((cycleOpt) => (
+                  <option key={cycleOpt} value={cycleOpt}>
+                    {cycleOpt}
+                  </option>
+                ))}
               </select>
             </div>
 
@@ -454,7 +491,11 @@ export const LessonNotesStudio: React.FC<LessonNotesStudioProps> = ({
                 rows={2}
                 value={form.instructional_materials}
                 onChange={(e) => setForm({ ...form, instructional_materials: e.target.value })}
-                placeholder="NERDC approved textbook, charts, chalkboard/whiteboard..."
+                placeholder={
+                  isTertiary
+                    ? 'Recommended course textbooks, lecture slides, journal references, tutorial sheets...'
+                    : 'NERDC approved textbook, charts, chalkboard/whiteboard...'
+                }
                 className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl"
               />
             </div>

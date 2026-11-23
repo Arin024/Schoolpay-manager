@@ -25,6 +25,7 @@ import {
 } from 'lucide-react';
 import { api } from '../../services/api.js';
 import { useAuth } from '../../context/AuthContext.js';
+import { resolveInstitutionProfile } from '../../utils/institutionMode.js';
 import {
   AcademicSessionItem,
   CbtParentResultItem,
@@ -53,7 +54,9 @@ type ParentTab =
   | 'notifications';
 
 export const ParentPortalView: React.FC = () => {
-  const { activeSchoolId, user } = useAuth();
+  const { activeSchoolId, activeSchool, activeSettings, user } = useAuth();
+  const instProfile = resolveInstitutionProfile(activeSchool, activeSettings);
+  const { labels: instLabels, isTertiary } = instProfile;
   const [tab, setTab] = useState<ParentTab>('overview');
   const [data, setData] = useState<ParentDashboardData | null>(null);
   const [sessions, setSessions] = useState<AcademicSessionItem[]>([]);
@@ -375,7 +378,7 @@ export const ParentPortalView: React.FC = () => {
               }}
               className="px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl"
             >
-              <option value="">All Terms</option>
+              <option value="">All {instLabels.cyclePlural}</option>
               {(selectedSessionObj?.terms || sessions.flatMap((s) => s.terms || [])).map((t) => (
                 <option key={t.id} value={t.id}>
                   {t.name}
@@ -389,10 +392,10 @@ export const ParentPortalView: React.FC = () => {
         <div className="flex flex-wrap items-center gap-1.5 pt-3 border-t border-slate-100">
           {(
             [
-              { key: 'overview', label: 'My Children', icon: Users },
+              { key: 'overview', label: isTertiary ? 'My Ward(s)' : 'My Children', icon: Users },
               { key: 'results', label: 'Examination Results', icon: BarChart3 },
               { key: 'cbt', label: 'CBT Results', icon: MonitorCheck },
-              { key: 'reports', label: 'Report Cards', icon: FileText },
+              { key: 'reports', label: isTertiary ? 'Results & Transcripts' : 'Report Cards', icon: FileText },
               { key: 'attendance', label: 'Attendance History', icon: CalendarCheck },
               { key: 'behaviour', label: 'Behaviour & Remarks', icon: MessageSquare },
               { key: 'timetable', label: 'Timetable & Calendar', icon: Calendar },

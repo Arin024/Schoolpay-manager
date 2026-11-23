@@ -27,6 +27,7 @@ import { useAuth } from '../../context/AuthContext.js';
 import { api } from '../../services/api.js';
 import { SchoolAdmissionInquiry, SchoolDashboardStats } from '../../types/index.js';
 import { copyTextToClipboard } from '../../utils/clipboard.js';
+import { resolveInstitutionProfile } from '../../utils/institutionMode.js';
 
 interface SchoolDashboardOverviewProps {
   onNavigateTab: (tab: any) => void;
@@ -44,6 +45,8 @@ export const SchoolDashboardOverview: React.FC<SchoolDashboardOverviewProps> = (
   readOnly = false,
 }) => {
   const { activeSchool, activeSettings } = useAuth();
+  const instProfile = resolveInstitutionProfile(activeSchool, activeSettings);
+  const { labels: instLabels, isTertiary } = instProfile;
   const [stats, setStats] = useState<SchoolDashboardStats | null>(null);
   const [inquiries, setInquiries] = useState<SchoolAdmissionInquiry[]>([]);
   const [loading, setLoading] = useState(true);
@@ -134,7 +137,7 @@ export const SchoolDashboardOverview: React.FC<SchoolDashboardOverviewProps> = (
           </p>
         </div>
 
-        {/* Classes & Arms */}
+        {/* Classes / Levels */}
         <div
           onClick={() => (!readOnly ? onNavigateTab('classes') : undefined)}
           className={`bg-white p-5 rounded-2xl border border-slate-200/90 shadow-sm transition group ${
@@ -142,18 +145,22 @@ export const SchoolDashboardOverview: React.FC<SchoolDashboardOverviewProps> = (
           }`}
         >
           <div className="flex items-center justify-between text-slate-500 mb-2">
-            <span className="text-[11px] font-bold uppercase tracking-wider text-slate-400">Academic Classes</span>
+            <span className="text-[11px] font-bold uppercase tracking-wider text-slate-400">
+              {instLabels.classPlural}
+            </span>
             <div className="w-8 h-8 rounded-xl bg-blue-50 text-blue-700 flex items-center justify-center group-hover:scale-110 transition">
               <Building2 className="w-4 h-4" />
             </div>
           </div>
-          <p className="text-2xl sm:text-3xl font-black text-slate-900 tracking-tight">
+          <p className="text-2xl sm:text-3xl font-black text-slate-900 tracking-tight tabular-nums">
             {loading ? '...' : stats?.totalClasses ?? 0}
           </p>
-          <p className="text-[11px] text-slate-500 font-medium mt-1">Levels &amp; Streams</p>
+          <p className="text-[11px] text-slate-500 font-medium mt-1">
+            {isTertiary ? 'Levels & Departments' : 'Levels & Streams'}
+          </p>
         </div>
 
-        {/* Staff Members */}
+        {/* Staff / Faculty Members */}
         <div
           onClick={() => (!readOnly ? onNavigateTab('staff') : undefined)}
           className={`bg-white p-5 rounded-2xl border border-slate-200/90 shadow-sm transition group ${
@@ -161,35 +168,41 @@ export const SchoolDashboardOverview: React.FC<SchoolDashboardOverviewProps> = (
           }`}
         >
           <div className="flex items-center justify-between text-slate-500 mb-2">
-            <span className="text-[11px] font-bold uppercase tracking-wider text-slate-400">School Staff</span>
+            <span className="text-[11px] font-bold uppercase tracking-wider text-slate-400">
+              {isTertiary ? 'Faculty & Staff' : 'School Staff'}
+            </span>
             <div className="w-8 h-8 rounded-xl bg-purple-50 text-purple-700 flex items-center justify-center group-hover:scale-110 transition">
               <Users className="w-4 h-4" />
             </div>
           </div>
-          <p className="text-2xl sm:text-3xl font-black text-slate-900 tracking-tight">
+          <p className="text-2xl sm:text-3xl font-black text-slate-900 tracking-tight tabular-nums">
             {loading ? '...' : stats?.totalStaff ?? 0}
           </p>
-          <p className="text-[11px] text-slate-500 font-medium mt-1">Teachers &amp; Admin</p>
+          <p className="text-[11px] text-slate-500 font-medium mt-1">
+            {instLabels.staffPlural} &amp; Admin
+          </p>
         </div>
 
-        {/* Parents / Guardians */}
+        {/* Parents / Sponsors */}
         <div
           onClick={() => onNavigateTab('parents')}
           className="bg-white p-5 rounded-2xl border border-slate-200/90 shadow-sm hover:border-emerald-300 hover:shadow-md transition cursor-pointer group"
         >
           <div className="flex items-center justify-between text-slate-500 mb-2">
-            <span className="text-[11px] font-bold uppercase tracking-wider text-slate-400">Parents/Guardians</span>
+            <span className="text-[11px] font-bold uppercase tracking-wider text-slate-400">
+              {instLabels.parent}s
+            </span>
             <div className="w-8 h-8 rounded-xl bg-amber-50 text-amber-700 flex items-center justify-center group-hover:scale-110 transition">
               <Users className="w-4 h-4" />
             </div>
           </div>
-          <p className="text-2xl sm:text-3xl font-black text-slate-900 tracking-tight">
+          <p className="text-2xl sm:text-3xl font-black text-slate-900 tracking-tight tabular-nums">
             {loading ? '...' : stats?.totalParents ?? 0}
           </p>
           <p className="text-[11px] text-slate-500 font-medium mt-1">Verified Contacts</p>
         </div>
 
-        {/* Active Session & Term */}
+        {/* Active Session & Term / Semester */}
         <div
           onClick={() => (!readOnly ? onNavigateTab('sessions') : undefined)}
           className={`bg-white p-5 rounded-2xl border border-slate-200/90 shadow-sm transition col-span-2 lg:col-span-1 group ${
@@ -203,10 +216,10 @@ export const SchoolDashboardOverview: React.FC<SchoolDashboardOverviewProps> = (
             </div>
           </div>
           <p className="text-lg sm:text-xl font-black text-slate-900 tracking-tight truncate">
-            {loading ? '...' : stats?.currentAcademicSession ?? '2024/2025'}
+            {loading ? '...' : stats?.currentAcademicSession ?? activeSettings?.current_academic_session ?? '2025/2026'}
           </p>
           <p className="text-[11px] text-teal-700 font-bold mt-1 truncate">
-            {stats?.currentTerm ?? '1st Term'} (Active)
+            {stats?.currentTerm ?? activeSettings?.current_term ?? instProfile.cycleLabels[0]} (Active)
           </p>
         </div>
       </div>

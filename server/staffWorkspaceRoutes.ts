@@ -16,6 +16,7 @@ import {
 import { logAudit } from './audit.ts';
 import { notificationService } from './notificationService.ts';
 import { wrapRouterAsync } from './securityUtils.ts';
+import { resolveInstitutionProfile } from '../src/utils/institutionMode.ts';
 
 export const staffWorkspaceRouter = wrapRouterAsync(Router());
 
@@ -121,15 +122,76 @@ function buildNerdcLessonPlanDraft(params: {
   };
 }
 
+function buildTertiaryLectureOutlineDraft(params: {
+  subjectName: string;
+  className: string;
+  termName: string;
+  weekNumber: number;
+  durationMinutes: number;
+  topic: string;
+  subTopic?: string;
+  schoolType?: string;
+}) {
+  const course = params.subjectName.trim();
+  const levelName = params.className.trim();
+  const semester = params.termName.trim() || '1st Semester';
+  const week = Math.max(1, Math.min(16, Number(params.weekNumber || 1)));
+  const duration = Math.max(30, Math.min(240, Number(params.durationMinutes || 120)));
+  const topic = params.topic.trim();
+  const subTopic = (params.subTopic || `Theoretical Foundations & Applied Analysis of ${topic}`).trim();
+  const standardBody = /polytechnic/i.test(params.schoolType || '') ? 'NBTE' : 'NUC CCMAS';
+
+  const objectives = [
+    `Upon completing this ${duration}-minute ${levelName} lecture, students should be able to:`,
+    `1. Critically define and formulate the theoretical principles underlying "${topic}" within ${course}.`,
+    `2. Analyze and apply "${subTopic}" to real-world engineering, analytical, or professional problem sets.`,
+    `3. Synthesize peer-reviewed references and defend solutions during tutorial/seminar review.`,
+  ].join('\n');
+
+  const previousKnowledge = `Students have completed prerequisite modules from Weeks 1–${Math.max(1, week - 1)} of ${semester} in ${course} and foundational ${levelName} departmental coursework.`;
+
+  const instructionalMaterials = `${standardBody}-aligned ${course} Course Synopsis & Lecture Slides, recommended university textbooks & journal excerpts on ${topic}, projector/whiteboard, and ${levelName} tutorial problem sheet.`;
+
+  const introStep = `Part I — Lecture Framing & Recap (${Math.round(duration * 0.1)} mins): Lecturer links Week ${Math.max(1, week - 1)} concepts to today's module "${topic}" (${subTopic}), outlines expected learning outcomes, and states assessment relevance.`;
+
+  const presentationSteps = [
+    `Part II — Core Theoretical Exposition (${Math.round(duration * 0.35)} mins):\n• Lecturer presents the formal definitions, models, and derivations of "${topic}" in line with the ${standardBody} syllabus for ${levelName} (${semester}, Week ${week}).\n• Students annotate lecture handouts and raise clarification queries.`,
+    `Part III — Applied Case Study & Worked Analysis (${Math.round(duration * 0.3)} mins):\n• Lecturer demonstrates two rigorous worked examples or empirical Nigerian/international case analyses illustrating "${subTopic}".\n• Critical evaluation of assumptions, edge cases, and methodological trade-offs.`,
+    `Part IV — Interactive Seminar & Tutorial Discussion (${Math.round(duration * 0.15)} mins):\n• Students discuss applied tutorial prompts in small groups and present concise critiques to the lecture hall.`,
+    `Part V — Synthesis & Reading List (${Math.round(duration * 0.1)} mins):\n• Lecturer consolidates key takeaways, highlights examinable principles, and assigns pre-reading for Week ${week + 1}.`,
+  ].join('\n\n');
+
+  const evaluationQuestions = [
+    `1. Critically examine the core principles and formal structure of ${topic}.`,
+    `2. Using an applied scenario in ${course}, demonstrate how ${subTopic} solves a practical problem.`,
+    `3. Identify two limitations or boundary conditions of the standard approach to ${topic}.`,
+  ].join('\n');
+
+  const assignmentText = `1. Complete Tutorial Problem Set ${week} on "${topic}" and submit before the next ${course} lecture.\n2. Read the assigned chapter/article on "${subTopic}" and prepare a 1-page critical summary.\n3. Review worked lecture derivations in preparation for Continuous Assessment (CA).`;
+
+  return {
+    topic,
+    sub_topic: subTopic,
+    behavioural_objectives: objectives,
+    previous_knowledge: previousKnowledge,
+    instructional_materials: instructionalMaterials,
+    introduction_step: introStep,
+    presentation_steps: presentationSteps,
+    evaluation_questions: evaluationQuestions,
+    assignment_text: assignmentText,
+  };
+}
+
 // ==============================================================================
-// 1. LESSON NOTES & NERDC LESSON PLAN STUDIO
+// 1. LESSON NOTES & LECTURE OUTLINES STUDIO
 // ==============================================================================
 
 // POST /api/v1/staff-workspace/lesson-notes/generate
 staffWorkspaceRouter.post('/lesson-notes/generate', ...staffOnlyGuard, async (req: AuthenticatedRequest, res) => {
+  const schoolId = req.targetSchoolId!;
   const subjectName = String(req.body?.subject_name || '').trim();
   const className = String(req.body?.class_name || '').trim();
-  const termName = String(req.body?.term_name || '1st Term').trim();
+  const termName = String(req.body?.term_name || '').trim();
   const weekNumber = Number(req.body?.week_number || 1);
   const durationMinutes = Number(req.body?.duration_minutes || 40);
   const topic = String(req.body?.topic || '').trim();
@@ -138,14 +200,47 @@ staffWorkspaceRouter.post('/lesson-notes/generate', ...staffOnlyGuard, async (re
   if (!subjectName || !className || !topic) {
     return res.status(400).json({
       error: 'VALIDATION_ERROR',
-      message: 'Subject, Class, and Lesson Topic are required to generate a lesson plan.',
+      message: 'Subject/Course, Class/Level, and Topic are required to generate a draft.',
+    });
+  }
+
+  const school = await dbGet(
+    `SELECT id, type FROM schools WHERE id = $1 LIMIT 1`,
+    `SELECT id, type FROM schools WHERE id = ? LIMIT 1`,
+    [schoolId]
+  );
+  const schoolSettings = await dbGet(
+    `SELECT institution_category, academic_cycle_type, cycle_labels_json, grading_mode, terminology_json, current_term
+     FROM school_settings WHERE school_id = $1 LIMIT 1`,
+    `SELECT institution_category, academic_cycle_type, cycle_labels_json, grading_mode, terminology_json, current_term
+     FROM school_settings WHERE school_id = ? LIMIT 1`,
+    [schoolId]
+  );
+  const instProfile = resolveInstitutionProfile(school, schoolSettings);
+  const resolvedTerm = termName || instProfile.cycleLabels[0] || '1st Term';
+
+  if (instProfile.isTertiary) {
+    const generated = buildTertiaryLectureOutlineDraft({
+      subjectName,
+      className,
+      termName: resolvedTerm,
+      weekNumber,
+      durationMinutes: Number(req.body?.duration_minutes || 120),
+      topic,
+      subTopic,
+      schoolType: school?.type,
+    });
+    return res.json({
+      success: true,
+      draft: generated,
+      message: 'Structured Higher Institution lecture note & course outline draft generated. Review and customize before saving.',
     });
   }
 
   const generated = buildNerdcLessonPlanDraft({
     subjectName,
     className,
-    termName,
+    termName: resolvedTerm,
     weekNumber,
     durationMinutes,
     topic,

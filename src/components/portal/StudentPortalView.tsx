@@ -21,6 +21,7 @@ import {
 import { api } from '../../services/api.js';
 import { useAuth } from '../../context/AuthContext.js';
 import { AcademicSessionItem, ReceiptItem, ReportCardItem, StudentDashboardData } from '../../types/index.js';
+import { resolveInstitutionProfile } from '../../utils/institutionMode.js';
 import { AttendanceBadge, SeverityBadge, WorkflowStatusBadge } from '../common/StatusBadge.js';
 import { PrintableReportCardModal } from '../performance/PrintableReportCardModal.js';
 import { PrintableReceiptModal } from '../school/PrintableReceiptModal.js';
@@ -40,7 +41,9 @@ type StudentTab =
   | 'notifications';
 
 export const StudentPortalView: React.FC = () => {
-  const { activeSchoolId, user } = useAuth();
+  const { activeSchoolId, activeSchool, activeSettings, user } = useAuth();
+  const instProfile = resolveInstitutionProfile(activeSchool, activeSettings);
+  const { labels: instLabels, isTertiary } = instProfile;
   const [tab, setTab] = useState<StudentTab>(() => {
     try {
       if (window.sessionStorage.getItem('bursariq_post_login_tab') === 'cbt') {
@@ -199,7 +202,7 @@ export const StudentPortalView: React.FC = () => {
     { key: 'cbt', label: 'CBT Exams', icon: MonitorCheck },
     { key: 'profile', label: 'My Profile', icon: User },
     { key: 'results', label: 'My Results', icon: BarChart3 },
-    { key: 'reports', label: 'My Report Cards', icon: FileText },
+    { key: 'reports', label: isTertiary ? 'Results & Transcripts' : 'My Report Cards', icon: FileText },
     { key: 'attendance', label: 'My Attendance', icon: CalendarCheck },
     { key: 'behaviour', label: 'Behaviour & Remarks', icon: MessageSquare },
     { key: 'timetable', label: 'Timetable & Calendar', icon: Calendar },
@@ -216,7 +219,7 @@ export const StudentPortalView: React.FC = () => {
           <div>
             <h2 className="text-lg font-bold text-slate-900">{data.student.full_name}</h2>
             <p className="text-xs text-slate-500">
-              Admission No: <span className="font-mono text-slate-700">{data.student.admission_number}</span> · Class:{' '}
+              {instLabels.studentId}: <span className="font-mono text-slate-700">{data.student.admission_number}</span> · {instLabels.classLabel}:{' '}
               {data.student.class_name || 'Unassigned'}
             </p>
           </div>
@@ -245,7 +248,7 @@ export const StudentPortalView: React.FC = () => {
               }}
               className="px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl"
             >
-              <option value="">All Terms</option>
+              <option value="">All {instLabels.cyclePlural}</option>
               {(selectedSessionObj?.terms || sessions.flatMap((s) => s.terms || [])).map((t) => (
                 <option key={t.id} value={t.id}>
                   {t.name}

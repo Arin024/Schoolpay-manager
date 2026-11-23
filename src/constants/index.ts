@@ -7,12 +7,25 @@ export const NIGERIAN_STATES = [
   'Taraba', 'Yobe', 'Zamfara'
 ];
 
-export const SCHOOL_TYPES = [
+export const K12_SCHOOL_TYPES = [
   'Nursery & Primary',
   'Secondary',
   'Comprehensive / K-12',
   'Vocational / Technical',
   'International'
+];
+
+export const TERTIARY_SCHOOL_TYPES = [
+  'University',
+  'Polytechnic',
+  'College of Education',
+  'College of Health / Nursing',
+  'Monotechnic / Institute'
+];
+
+export const SCHOOL_TYPES = [
+  ...K12_SCHOOL_TYPES,
+  ...TERTIARY_SCHOOL_TYPES,
 ];
 
 export const SCHOOL_STATUSES = [

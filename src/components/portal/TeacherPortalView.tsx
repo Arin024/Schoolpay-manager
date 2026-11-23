@@ -31,6 +31,7 @@ import {
 } from 'lucide-react';
 import { api } from '../../services/api.js';
 import { useAuth } from '../../context/AuthContext.js';
+import { resolveInstitutionProfile } from '../../utils/institutionMode.js';
 import { copyTextToClipboard } from '../../utils/clipboard.js';
 import {
   ConfidentialNoticeItem,
@@ -69,7 +70,9 @@ type TeacherTab =
   | 'fees';
 
 export const TeacherPortalView: React.FC = () => {
-  const { activeSchoolId } = useAuth();
+  const { activeSchoolId, activeSchool, activeSettings } = useAuth();
+  const instProfile = resolveInstitutionProfile(activeSchool, activeSettings);
+  const { labels: instLabels, isTertiary } = instProfile;
   const [tab, setTab] = useState<TeacherTab>('overview');
   const [dashboard, setDashboard] = useState<TeacherDashboardData | null>(null);
   const [loading, setLoading] = useState(true);
@@ -279,15 +282,15 @@ export const TeacherPortalView: React.FC = () => {
     icon: React.ComponentType<{ className?: string }>;
     badge?: number;
   }> = [
-    { key: 'overview', label: 'Staff Overview', icon: LayoutDashboard },
+    { key: 'overview', label: isTertiary ? 'Lecturer Overview' : 'Staff Overview', icon: LayoutDashboard },
     { key: 'confidential', label: 'Confidential Notices', icon: ShieldAlert, badge: unreadConfidentialCount },
-    { key: 'lesson-notes', label: 'Lesson Notes & Plans', icon: BookOpen },
+    { key: 'lesson-notes', label: isTertiary ? 'Lecture Notes & Outlines' : 'Lesson Notes & Plans', icon: BookOpen },
     { key: 'cbt', label: 'CBT Exams', icon: MonitorCheck },
     { key: 'timetable', label: 'Timetable & Events', icon: Clock },
     { key: 'requests', label: 'Staff Requests', icon: Send },
-    { key: 'classes', label: 'Assigned Classes', icon: Building2 },
+    { key: 'classes', label: isTertiary ? `Assigned ${instLabels.classPlural}` : 'Assigned Classes', icon: Building2 },
     { key: 'students', label: 'Students', icon: GraduationCap },
-    { key: 'performance', label: 'Performance & Reports', icon: BarChart3 },
+    { key: 'performance', label: isTertiary ? 'Results & GPA/CGPA' : 'Performance & Reports', icon: BarChart3 },
     { key: 'attendance', label: 'Attendance', icon: CalendarCheck },
     { key: 'behaviour', label: 'Behaviour & Remarks', icon: MessageSquare },
     { key: 'announcements', label: 'Announcements', icon: Megaphone },
@@ -330,9 +333,13 @@ export const TeacherPortalView: React.FC = () => {
       <div className="bg-white rounded-2xl border border-slate-200 p-5 space-y-4">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
           <div>
-            <h2 className="text-base font-bold text-slate-900">Dedicated Staff Workspace</h2>
+            <h2 className="text-base font-bold text-slate-900">
+              {instProfile.isTertiary ? 'Dedicated Faculty & Staff Workspace' : 'Dedicated Staff Workspace'}
+            </h2>
             <p className="text-xs text-slate-500 mt-0.5">
-              Private staff portal for NERDC lesson notes, confidential administrative circulars, prospective admissions notices, teaching schedules, and staff requests. Strictly isolated from parent and student portals.
+              {instProfile.isTertiary
+                ? 'Private faculty & staff portal for lecture notes, course outlines, confidential senate/departmental circulars, admissions notices, schedules, and staff requests. Strictly isolated from sponsor and student portals.'
+                : 'Private staff portal for NERDC lesson notes, confidential administrative circulars, prospective admissions notices, teaching schedules, and staff requests. Strictly isolated from parent and student portals.'}
             </p>
           </div>
           <div className="flex flex-wrap items-center gap-2 shrink-0">
@@ -407,11 +414,15 @@ export const TeacherPortalView: React.FC = () => {
               onClick={() => setTab('lesson-notes')}
               className="bg-white rounded-2xl border border-emerald-200 p-4 text-left hover:border-emerald-300 transition cursor-pointer"
             >
-              <p className="text-xs text-emerald-700 font-semibold">My Lesson Notes</p>
+              <p className="text-xs text-emerald-700 font-semibold">
+                {instProfile.isTertiary ? 'My Lecture Notes' : 'My Lesson Notes'}
+              </p>
               <p className="text-2xl font-bold text-slate-900 mt-1 tabular-nums">
                 {dashboard.stats.lessonNotesCount ?? 0}
               </p>
-              <p className="text-[11px] text-slate-500 mt-0.5">NERDC plans &amp; notes</p>
+              <p className="text-[11px] text-slate-500 mt-0.5">
+                {instProfile.isTertiary ? 'Course outlines & notes' : 'NERDC plans & notes'}
+              </p>
             </button>
             <button
               type="button"

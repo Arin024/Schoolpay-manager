@@ -34,6 +34,7 @@ import {
 } from '../../types/index.js';
 import { LoginForm } from '../auth/LoginForm.js';
 import { copyTextToClipboard } from '../../utils/clipboard.js';
+import { resolveInstitutionProfile } from '../../utils/institutionMode.js';
 
 interface PublicSchoolWebsiteProps {
   portalSlug: string;
@@ -384,6 +385,8 @@ export const PublicSchoolWebsite: React.FC<PublicSchoolWebsiteProps> = ({
   if (!data) return null;
 
   const { school, website, urls, settings, posts, gallery, events, classes, stats, cbtSummary } = data;
+  const instProfile = resolveInstitutionProfile(school, settings);
+  const { labels: instLabels } = instProfile;
   const cleanHandle = urls?.portal_subdomain || settings?.portal_subdomain || school.slug;
   const liveWebsiteUrl = `${window.location.origin}/site/${cleanHandle}`;
   const shareablePortalUrl = `${window.location.origin}/#portal/${school.slug}`;
@@ -559,7 +562,7 @@ export const PublicSchoolWebsite: React.FC<PublicSchoolWebsiteProps> = ({
           <div className="p-4 sm:p-8 space-y-5 sm:space-y-6 flex-1 flex flex-col justify-between min-w-0">
             <div className="space-y-3 min-w-0">
               <p className="text-xs font-medium text-emerald-300 break-words">
-                Official School Website · Session {settings?.current_academic_session || '2025/2026'} ({settings?.current_term || '1st Term'})
+                Official {instLabels.institution} Website · Session {settings?.current_academic_session || '2025/2026'} ({settings?.current_term || instProfile.cycleLabels[0]})
               </p>
               <h1
                 className="text-2xl sm:text-4xl font-black tracking-tight text-white leading-tight break-words"
@@ -600,7 +603,7 @@ export const PublicSchoolWebsite: React.FC<PublicSchoolWebsiteProps> = ({
                 <div className="min-w-0 flex-1">
                   <p className="text-[11px] font-semibold text-slate-300 flex items-center gap-1.5">
                     <Globe className="w-3.5 h-3.5 text-emerald-300 shrink-0" />
-                    <span>Official Shareable School Website Link</span>
+                    <span>Official Shareable {instLabels.institution} Website Link</span>
                   </p>
                   <p className="font-mono text-white font-semibold break-all sm:truncate select-all mt-0.5 text-[11px] sm:text-xs">
                     {liveWebsiteUrl}
@@ -760,7 +763,10 @@ export const PublicSchoolWebsite: React.FC<PublicSchoolWebsiteProps> = ({
             <div className="space-y-1.5">
               <h3 className="text-sm font-bold text-slate-900">Our Mission</h3>
               <p className="text-slate-600 leading-relaxed">
-                {website.mission || 'Delivering NERDC-aligned instruction, continuous assessment, and holistic character mentorship.'}
+                {website.mission ||
+                  (instProfile.isTertiary
+                    ? 'Delivering accredited higher-education instruction, applied research, and academic excellence.'
+                    : 'Delivering NERDC-aligned instruction, continuous assessment, and holistic character mentorship.')}
               </p>
             </div>
           </div>

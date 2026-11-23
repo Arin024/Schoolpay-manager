@@ -403,7 +403,7 @@ publicPortalRouter.post('/verify-document', async (req, res) => {
   if (pool) {
     try {
       const pgRes = await queryPg(
-        `SELECT rc.id, rc.verification_code, rc.status, rc.average_score, rc.subjects_count, rc.published_at,
+        `SELECT rc.id, rc.verification_code, rc.status, rc.average_score, rc.subjects_count, rc.published_at, rc.snapshot_json,
                 s.id AS school_id, s.name AS school_name, s.slug AS school_slug, s.state AS school_state, s.lga AS school_lga,
                 st.first_name, st.middle_name, st.last_name,
                 c.name AS class_name,
@@ -431,7 +431,7 @@ publicPortalRouter.post('/verify-document', async (req, res) => {
   if (!card) {
     card = cacheDb
       .prepare(
-        `SELECT rc.id, rc.verification_code, rc.status, rc.average_score, rc.subjects_count, rc.published_at,
+        `SELECT rc.id, rc.verification_code, rc.status, rc.average_score, rc.subjects_count, rc.published_at, rc.snapshot_json,
                 s.id AS school_id, s.name AS school_name, s.slug AS school_slug, s.state AS school_state, s.lga AS school_lga,
                 st.first_name, st.middle_name, st.last_name,
                 c.name AS class_name,
@@ -453,11 +453,11 @@ publicPortalRouter.post('/verify-document', async (req, res) => {
   }
 
   if (!card) {
-    // Also check Full-Session Cumulative Annual Report Cards (SRC-...)
+    // Also check Full-Session Cumulative Annual Report Cards / Academic Transcripts (SRC-...)
     if (getPgPool()) {
       try {
         const pgSessionRes = await queryPg(
-          `SELECT src.id, src.verification_code, src.status, src.average_score, src.subjects_count, src.published_at,
+          `SELECT src.id, src.verification_code, src.status, src.average_score, src.subjects_count, src.published_at, src.snapshot_json,
                   s.id AS school_id, s.name AS school_name, s.slug AS school_slug, s.state AS school_state, s.lga AS school_lga,
                   st.first_name, st.middle_name, st.last_name,
                   c.name AS class_name,
@@ -484,7 +484,7 @@ publicPortalRouter.post('/verify-document', async (req, res) => {
       try {
         card = cacheDb
           .prepare(
-            `SELECT src.id, src.verification_code, src.status, src.average_score, src.subjects_count, src.published_at,
+            `SELECT src.id, src.verification_code, src.status, src.average_score, src.subjects_count, src.published_at, src.snapshot_json,
                     s.id AS school_id, s.name AS school_name, s.slug AS school_slug, s.state AS school_state, s.lga AS school_lga,
                     st.first_name, st.middle_name, st.last_name,
                     c.name AS class_name,
@@ -514,6 +514,15 @@ publicPortalRouter.post('/verify-document', async (req, res) => {
     });
   }
 
+  let snap: any = null;
+  if (card.snapshot_json) {
+    try {
+      snap = typeof card.snapshot_json === 'string' ? JSON.parse(card.snapshot_json) : card.snapshot_json;
+    } catch {
+      snap = null;
+    }
+  }
+
   return res.json({
     valid: true,
     document_type: 'REPORT_CARD',
@@ -532,6 +541,16 @@ publicPortalRouter.post('/verify-document', async (req, res) => {
       term_name: card.term_name || 'N/A',
       subjects_count: Number(card.subjects_count || 0),
       published_at: card.published_at,
+      ...(snap && (snap.gradingMode === 'GPA_5' || snap.gradingMode === 'GPA_4')
+        ? {
+            grading_mode: snap.gradingMode,
+            gpa: snap.gpa ?? null,
+            cgpa: snap.cgpa ?? null,
+            gpa_scale_max: snap.gpa_scale_max ?? null,
+            total_credit_units: snap.total_credit_units ?? null,
+            academic_standing: snap.academic_standing ?? null,
+          }
+        : {}),
     },
   });
 });

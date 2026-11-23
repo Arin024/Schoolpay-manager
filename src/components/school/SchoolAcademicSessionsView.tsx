@@ -3,19 +3,20 @@ import {
   Calendar,
   Plus,
   Clock,
-  CheckCircle2,
   AlertCircle,
   X,
-  Layers,
-  ChevronRight,
   BookOpen,
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext.js';
 import { api } from '../../services/api.js';
-import { AcademicSessionItem, TermItem, SessionStatus } from '../../types/index.js';
+import { AcademicSessionItem, SessionStatus } from '../../types/index.js';
+import { resolveInstitutionProfile } from '../../utils/institutionMode.js';
 
 export const SchoolAcademicSessionsView: React.FC = () => {
-  const { activeSchool } = useAuth();
+  const { activeSchool, activeSettings } = useAuth();
+  const profile = resolveInstitutionProfile(activeSchool, activeSettings);
+  const { labels, cycleType, cycleLabels } = profile;
+
   const [sessions, setSessions] = useState<AcademicSessionItem[]>([]);
   const [loading, setLoading] = useState(true);
 
@@ -30,15 +31,26 @@ export const SchoolAcademicSessionsView: React.FC = () => {
   const currentEndYear = currentStartYear + 1;
   const defaultSessionName = `${currentStartYear}/${currentEndYear}`;
 
+  const defaultCycleName =
+    cycleLabels[0] ||
+    (cycleType === 'SEMESTER'
+      ? '1st Semester'
+      : cycleType === 'TRIMESTER'
+        ? '1st Trimester'
+        : currentMonth >= 1 && currentMonth <= 4
+          ? 'Second Term'
+          : currentMonth >= 5 && currentMonth <= 8
+            ? 'Third Term'
+            : 'First Term');
+
   // Form states
   const [newSessionName, setNewSessionName] = useState(defaultSessionName);
   const [newSessionStart, setNewSessionStart] = useState(`${currentStartYear}-09-01`);
   const [newSessionEnd, setNewSessionEnd] = useState(`${currentEndYear}-07-31`);
   const [newSessionStatus, setNewSessionStatus] = useState<SessionStatus>('ACTIVE');
 
-  const [newTermName, setNewTermName] = useState(
-    currentMonth >= 1 && currentMonth <= 4 ? 'Second Term' : currentMonth >= 5 && currentMonth <= 8 ? 'Third Term' : 'First Term'
-  );
+  const [newTermName, setNewTermName] = useState(defaultCycleName);
+  const [customTermName, setCustomTermName] = useState('');
   const [newTermStart, setNewTermStart] = useState(`${currentStartYear}-09-09`);
   const [newTermEnd, setNewTermEnd] = useState(`${currentStartYear}-12-18`);
   const [newTermStatus, setNewTermStatus] = useState<SessionStatus>('ACTIVE');
@@ -46,6 +58,10 @@ export const SchoolAcademicSessionsView: React.FC = () => {
   const [formSubmitting, setFormSubmitting] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
   const [seedingTermsId, setSeedingTermsId] = useState<string | null>(null);
+
+  useEffect(() => {
+    setNewTermName(defaultCycleName);
+  }, [defaultCycleName]);
 
   useEffect(() => {
     loadSessions();
@@ -88,49 +104,113 @@ export const SchoolAcademicSessionsView: React.FC = () => {
   const handleCreateTerm = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!selectedSessionForTerm) return;
+    const finalName = newTermName === '__CUSTOM__' ? customTermName.trim() : newTermName;
+    if (!finalName) {
+      setFormError(`Please enter a ${labels.cycle.toLowerCase()} name.`);
+      return;
+    }
     setFormSubmitting(true);
     setFormError(null);
 
     try {
       await api.createTerm(selectedSessionForTerm.id, {
-        name: newTermName,
+        name: finalName,
         start_date: newTermStart,
         end_date: newTermEnd,
         status: newTermStatus,
       });
       setIsAddTermModalOpen(false);
       setSelectedSessionForTerm(null);
+      setCustomTermName('');
       await loadSessions();
     } catch (err: any) {
-      setFormError(err?.message || 'Failed to create term');
+      setFormError(err?.message || `Failed to create ${labels.cycle.toLowerCase()}`);
     } finally {
       setFormSubmitting(false);
     }
   };
 
-  const handleSeedNigerianTerms = async (sess: AcademicSessionItem) => {
+  const handleSeedAcademicCycles = async (sess: AcademicSessionItem) => {
     setSeedingTermsId(sess.id);
+    setFormError(null);
     try {
       const yearMatch = String(sess.name || '').match(/^(\d{4})/);
       const y1 = yearMatch ? parseInt(yearMatch[1], 10) : currentStartYear;
       const y2 = y1 + 1;
       const existingNames = new Set((sess.terms || []).map((t) => t.name.trim().toLowerCase()));
-      const templates: Array<{ name: string; start_date: string; end_date: string; status: SessionStatus }> = [
-        { name: 'First Term', start_date: `${y1}-09-09`, end_date: `${y1}-12-18`, status: currentMonth >= 9 ? 'ACTIVE' : 'COMPLETED' },
-        { name: 'Second Term', start_date: `${y2}-01-12`, end_date: `${y2}-04-10`, status: currentMonth >= 1 && currentMonth <= 4 ? 'ACTIVE' : currentMonth >= 9 ? 'UPCOMING' : 'COMPLETED' },
-        { name: 'Third Term', start_date: `${y2}-04-27`, end_date: `${y2}-07-24`, status: currentMonth >= 5 && currentMonth <= 8 ? 'ACTIVE' : 'UPCOMING' },
-      ];
+
+      let templates: Array<{ name: string; start_date: string; end_date: string; status: SessionStatus }>;
+
+      if (cycleType === 'SEMESTER') {
+        const firstLabel = cycleLabels[0] || '1st Semester';
+        const secondLabel = cycleLabels[1] || '2nd Semester';
+        templates = [
+          {
+            name: firstLabel,
+            start_date: `${y1}-10-01`,
+            end_date: `${y2}-02-28`,
+            status: currentMonth >= 9 || currentMonth <= 2 ? 'ACTIVE' : 'COMPLETED',
+          },
+          {
+            name: secondLabel,
+            start_date: `${y2}-03-15`,
+            end_date: `${y2}-07-31`,
+            status: currentMonth >= 3 && currentMonth <= 8 ? 'ACTIVE' : 'UPCOMING',
+          },
+        ];
+        if (cycleLabels[2]) {
+          templates.push({
+            name: cycleLabels[2],
+            start_date: `${y2}-08-05`,
+            end_date: `${y2}-09-20`,
+            status: 'UPCOMING',
+          });
+        }
+      } else if (cycleType === 'TRIMESTER') {
+        templates = [
+          { name: cycleLabels[0] || '1st Trimester', start_date: `${y1}-09-09`, end_date: `${y1}-12-18`, status: currentMonth >= 9 ? 'ACTIVE' : 'COMPLETED' },
+          { name: cycleLabels[1] || '2nd Trimester', start_date: `${y2}-01-12`, end_date: `${y2}-04-10`, status: currentMonth >= 1 && currentMonth <= 4 ? 'ACTIVE' : currentMonth >= 9 ? 'UPCOMING' : 'COMPLETED' },
+          { name: cycleLabels[2] || '3rd Trimester', start_date: `${y2}-04-27`, end_date: `${y2}-07-24`, status: currentMonth >= 5 && currentMonth <= 8 ? 'ACTIVE' : 'UPCOMING' },
+        ];
+      } else {
+        templates = [
+          { name: 'First Term', start_date: `${y1}-09-09`, end_date: `${y1}-12-18`, status: currentMonth >= 9 ? 'ACTIVE' : 'COMPLETED' },
+          { name: 'Second Term', start_date: `${y2}-01-12`, end_date: `${y2}-04-10`, status: currentMonth >= 1 && currentMonth <= 4 ? 'ACTIVE' : currentMonth >= 9 ? 'UPCOMING' : 'COMPLETED' },
+          { name: 'Third Term', start_date: `${y2}-04-27`, end_date: `${y2}-07-24`, status: currentMonth >= 5 && currentMonth <= 8 ? 'ACTIVE' : 'UPCOMING' },
+        ];
+      }
+
       for (const tpl of templates) {
         if (existingNames.has(tpl.name.toLowerCase())) continue;
         await api.createTerm(sess.id, tpl);
       }
       await loadSessions();
     } catch (err: any) {
-      setFormError(err?.message || 'Failed to add Nigerian terms');
+      setFormError(err?.message || `Failed to setup ${labels.cyclePlural.toLowerCase()}`);
     } finally {
       setSeedingTermsId(null);
     }
   };
+
+  // Deduplicated options for modal dropdown
+  const cycleNameOptions = Array.from(
+    new Set([
+      ...cycleLabels,
+      ...(cycleType === 'SEMESTER'
+        ? ['1st Semester', '2nd Semester', 'Harmattan Semester', 'Rain Semester', 'Summer Semester']
+        : cycleType === 'TRIMESTER'
+          ? ['1st Trimester', '2nd Trimester', '3rd Trimester']
+          : ['First Term', 'Second Term', 'Third Term', '1st Semester', '2nd Semester']),
+    ])
+  );
+
+  const expectedCycleCount = cycleType === 'SEMESTER' ? Math.max(2, cycleLabels.length) : 3;
+  const seedButtonLabel =
+    cycleType === 'SEMESTER'
+      ? `Setup ${cycleLabels.slice(0, 2).join(' & ')}`
+      : cycleType === 'TRIMESTER'
+        ? 'Setup 3 Trimesters'
+        : 'Setup 3 Nigerian Terms';
 
   return (
     <div className="space-y-6">
@@ -145,15 +225,16 @@ export const SchoolAcademicSessionsView: React.FC = () => {
           </button>
         </div>
       )}
+
       {/* Top Header */}
       <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-6 flex flex-col md:flex-row md:items-center justify-between gap-4">
         <div>
           <h2 className="text-lg font-black text-slate-900 tracking-tight flex items-center gap-2">
             <Calendar className="w-5 h-5 text-emerald-600" />
-            <span>Academic Sessions &amp; Terms / Semesters</span>
+            <span>Academic Sessions &amp; {labels.cyclePlural}</span>
           </h2>
           <p className="text-xs text-slate-500 mt-0.5">
-            Manage Nigerian school calendar years (e.g. {defaultSessionName}) and term schedules (First, Second, Third Term) for{' '}
+            Manage academic calendar years (e.g. {defaultSessionName}) and {labels.cycle.toLowerCase()} schedules ({cycleLabels.join(', ')}) for{' '}
             <strong className="text-slate-700">{activeSchool?.name}</strong>.
           </p>
         </div>
@@ -182,12 +263,12 @@ export const SchoolAcademicSessionsView: React.FC = () => {
           <div className="w-12 h-12 rounded-full bg-slate-100 text-slate-400 flex items-center justify-center mx-auto">
             <Calendar className="w-6 h-6" />
           </div>
-          <p className="text-xs font-semibold text-slate-700">No academic sessions found for this school.</p>
+          <p className="text-xs font-semibold text-slate-700">No academic sessions found for this {labels.institution.toLowerCase()}.</p>
           <button
             onClick={() => setIsAddSessionModalOpen(true)}
-            className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold transition"
+            className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold transition cursor-pointer"
           >
-            Create Initial Academic Session (e.g. 2024/2025)
+            Create Initial Academic Session (e.g. {defaultSessionName})
           </button>
         </div>
       ) : (
@@ -206,7 +287,7 @@ export const SchoolAcademicSessionsView: React.FC = () => {
                     <div className="flex items-center gap-2">
                       <h3 className="text-base font-black text-slate-900">{sess.name} Session</h3>
                       <span
-                        className={`px-2 py-0.5 rounded-full text-[10px] font-bold border ${
+                        className={`px-2 py-0.5 rounded-md text-[10px] font-bold border ${
                           sess.status === 'ACTIVE'
                             ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
                             : 'bg-slate-100 text-slate-600 border-slate-300'
@@ -222,40 +303,41 @@ export const SchoolAcademicSessionsView: React.FC = () => {
                 </div>
 
                 <div className="flex flex-wrap items-center gap-2 self-start sm:self-auto">
-                  {(!sess.terms || sess.terms.length < 3) && (
+                  {(!sess.terms || sess.terms.length < expectedCycleCount) && (
                     <button
                       type="button"
                       disabled={seedingTermsId === sess.id}
-                      onClick={() => handleSeedNigerianTerms(sess)}
+                      onClick={() => handleSeedAcademicCycles(sess)}
                       className="px-3 py-1.5 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-200 rounded-xl text-xs font-bold flex items-center gap-1 cursor-pointer disabled:opacity-60"
                     >
                       <BookOpen className="w-3.5 h-3.5 text-emerald-600" />
-                      <span>{seedingTermsId === sess.id ? 'Adding Terms...' : 'Setup 3 Nigerian Terms'}</span>
+                      <span>{seedingTermsId === sess.id ? `Adding ${labels.cyclePlural}...` : seedButtonLabel}</span>
                     </button>
                   )}
                   <button
                     onClick={() => {
                       setSelectedSessionForTerm(sess);
+                      setNewTermName(cycleNameOptions[0] || defaultCycleName);
                       setFormError(null);
                       setIsAddTermModalOpen(true);
                     }}
                     className="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-800 rounded-xl text-xs font-semibold flex items-center gap-1 cursor-pointer"
                   >
                     <Plus className="w-3.5 h-3.5 text-emerald-600" />
-                    <span>Add Term</span>
+                    <span>Add {labels.cycle}</span>
                   </button>
                 </div>
               </div>
 
-              {/* Terms inside Session */}
+              {/* Terms / Semesters inside Session */}
               <div className="pt-3 border-t border-slate-100">
                 <h4 className="text-[11px] font-bold text-slate-500 uppercase tracking-wider mb-2">
-                  Academic Terms / Semesters ({sess.terms?.length || 0})
+                  Academic {labels.cyclePlural} ({sess.terms?.length || 0})
                 </h4>
 
                 {!sess.terms || sess.terms.length === 0 ? (
                   <p className="text-xs text-slate-400 italic bg-slate-50 p-3 rounded-xl border border-dashed border-slate-200">
-                    No terms configured yet. Click "Add Term" above to add First, Second, or Third Term.
+                    No {labels.cyclePlural.toLowerCase()} configured yet. Click &ldquo;{seedButtonLabel}&rdquo; or &ldquo;Add {labels.cycle}&rdquo; above.
                   </p>
                 ) : (
                   <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
@@ -300,7 +382,7 @@ export const SchoolAcademicSessionsView: React.FC = () => {
               </div>
               <button
                 onClick={() => setIsAddSessionModalOpen(false)}
-                className="p-1 rounded-lg text-slate-400 hover:text-white"
+                className="p-1 rounded-lg text-slate-400 hover:text-white cursor-pointer"
               >
                 <X className="w-5 h-5" />
               </button>
@@ -323,7 +405,7 @@ export const SchoolAcademicSessionsView: React.FC = () => {
                   required
                   value={newSessionName}
                   onChange={(e) => setNewSessionName(e.target.value)}
-                  placeholder="e.g. 2024/2025"
+                  placeholder="e.g. 2025/2026"
                   className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl font-bold font-mono"
                 />
               </div>
@@ -366,14 +448,14 @@ export const SchoolAcademicSessionsView: React.FC = () => {
                 <button
                   type="button"
                   onClick={() => setIsAddSessionModalOpen(false)}
-                  className="px-4 py-2 border border-slate-300 text-slate-700 rounded-xl hover:bg-slate-50"
+                  className="px-4 py-2 border border-slate-300 text-slate-700 rounded-xl hover:bg-slate-50 cursor-pointer"
                 >
                   Cancel
                 </button>
                 <button
                   type="submit"
                   disabled={formSubmitting}
-                  className="px-5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl font-bold disabled:opacity-60"
+                  className="px-5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl font-bold disabled:opacity-60 cursor-pointer"
                 >
                   {formSubmitting ? 'Saving...' : 'Create Session'}
                 </button>
@@ -383,18 +465,20 @@ export const SchoolAcademicSessionsView: React.FC = () => {
         </div>
       )}
 
-      {/* CREATE TERM MODAL */}
+      {/* CREATE TERM / SEMESTER MODAL */}
       {isAddTermModalOpen && selectedSessionForTerm && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-xs p-4">
           <div className="bg-white rounded-2xl max-w-md w-full shadow-2xl border border-slate-200 overflow-hidden text-xs">
             <div className="bg-slate-900 px-6 py-4 flex items-center justify-between text-white border-b border-slate-800">
               <div className="flex items-center gap-2">
                 <Clock className="w-5 h-5 text-emerald-400" />
-                <h3 className="font-bold text-base">Add Term to {selectedSessionForTerm.name}</h3>
+                <h3 className="font-bold text-base">
+                  Add {labels.cycle} to {selectedSessionForTerm.name}
+                </h3>
               </div>
               <button
                 onClick={() => setIsAddTermModalOpen(false)}
-                className="p-1 rounded-lg text-slate-400 hover:text-white"
+                className="p-1 rounded-lg text-slate-400 hover:text-white cursor-pointer"
               >
                 <X className="w-5 h-5" />
               </button>
@@ -410,19 +494,30 @@ export const SchoolAcademicSessionsView: React.FC = () => {
 
               <div>
                 <label className="block font-semibold text-slate-700 mb-1">
-                  Term / Semester Name <span className="text-red-500">*</span>
+                  {labels.cycle} Name <span className="text-red-500">*</span>
                 </label>
                 <select
                   value={newTermName}
                   onChange={(e) => setNewTermName(e.target.value)}
                   className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl font-semibold"
                 >
-                  <option value="First Term">First Term</option>
-                  <option value="Second Term">Second Term</option>
-                  <option value="Third Term">Third Term</option>
-                  <option value="First Semester">First Semester</option>
-                  <option value="Second Semester">Second Semester</option>
+                  {cycleNameOptions.map((opt) => (
+                    <option key={opt} value={opt}>
+                      {opt}
+                    </option>
+                  ))}
+                  <option value="__CUSTOM__">Custom {labels.cycle} Name...</option>
                 </select>
+                {newTermName === '__CUSTOM__' && (
+                  <input
+                    type="text"
+                    required
+                    value={customTermName}
+                    onChange={(e) => setCustomTermName(e.target.value)}
+                    placeholder={`e.g. Summer ${labels.cycle} / Modular Session`}
+                    className="w-full mt-2 px-3 py-2 bg-white border border-slate-300 rounded-xl font-semibold"
+                  />
+                )}
               </div>
 
               <div className="grid grid-cols-2 gap-3">
@@ -463,16 +558,16 @@ export const SchoolAcademicSessionsView: React.FC = () => {
                 <button
                   type="button"
                   onClick={() => setIsAddTermModalOpen(false)}
-                  className="px-4 py-2 border border-slate-300 text-slate-700 rounded-xl hover:bg-slate-50"
+                  className="px-4 py-2 border border-slate-300 text-slate-700 rounded-xl hover:bg-slate-50 cursor-pointer"
                 >
                   Cancel
                 </button>
                 <button
                   type="submit"
                   disabled={formSubmitting}
-                  className="px-5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl font-bold disabled:opacity-60"
+                  className="px-5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl font-bold disabled:opacity-60 cursor-pointer"
                 >
-                  {formSubmitting ? 'Saving...' : 'Add Term'}
+                  {formSubmitting ? 'Saving...' : `Add ${labels.cycle}`}
                 </button>
               </div>
             </form>

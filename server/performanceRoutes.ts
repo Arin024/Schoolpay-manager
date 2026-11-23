@@ -25,6 +25,11 @@ import {
   compileSessionReportCard,
   compileTermReportCard,
 } from './reportCardService.ts';
+import {
+  computeGpaGradeBand,
+  getAcademicClassStanding,
+  resolveInstitutionProfile,
+} from '../src/utils/institutionMode.ts';
 
 export const performanceRouter = Router();
 
@@ -600,10 +605,10 @@ performanceRouter.post(
   requireRole(ADMIN_ONLY_ROLES),
   async (req: AuthenticatedRequest, res) => {
     const schoolId = req.targetSchoolId!;
-    const { name, code, department, class_id, status = 'ACTIVE' } = req.body || {};
+    const { name, code, department, class_id, status = 'ACTIVE', credit_units } = req.body || {};
 
     if (!name || typeof name !== 'string' || !name.trim()) {
-      return res.status(400).json({ error: 'MISSING_NAME', message: 'Subject name is required.' });
+      return res.status(400).json({ error: 'MISSING_NAME', message: 'Subject/Course name is required.' });
     }
     const cleanName = name.trim();
     const dup = await dbGet(
@@ -612,20 +617,22 @@ performanceRouter.post(
       [schoolId, cleanName]
     );
     if (dup) {
-      return res.status(409).json({ error: 'DUPLICATE_SUBJECT', message: `Subject "${cleanName}" already exists.` });
+      return res.status(409).json({ error: 'DUPLICATE_SUBJECT', message: `"${cleanName}" already exists.` });
     }
 
     const id = newId('sub');
     const cleanCode = code ? String(code).trim().toUpperCase() : cleanName.slice(0, 4).toUpperCase();
     const validStatus = status === 'INACTIVE' ? 'INACTIVE' : 'ACTIVE';
+    const parsedUnits = Number(credit_units);
+    const cleanUnits = Number.isFinite(parsedUnits) && parsedUnits >= 1 && parsedUnits <= 12 ? Math.round(parsedUnits) : 3;
 
     await execWrite(
-      `INSERT INTO subjects (id, school_id, name, code, department, class_id, status, is_deleted, created_at, updated_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
-      `INSERT INTO subjects (id, school_id, name, code, department, class_id, status, is_deleted, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-       ON CONFLICT(id) DO UPDATE SET name = excluded.name`,
-      [id, schoolId, cleanName, cleanCode, department || null, class_id || null, validStatus]
+      `INSERT INTO subjects (id, school_id, name, code, department, class_id, credit_units, status, is_deleted, created_at, updated_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+      `INSERT INTO subjects (id, school_id, name, code, department, class_id, credit_units, status, is_deleted, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+       ON CONFLICT(id) DO UPDATE SET name = excluded.name, credit_units = excluded.credit_units`,
+      [id, schoolId, cleanName, cleanCode, department || null, class_id || null, cleanUnits, validStatus]
     );
 
     logAudit({
@@ -635,7 +642,7 @@ performanceRouter.post(
       action: 'CREATE_SUBJECT',
       entity: 'SUBJECT',
       entityId: id,
-      metadata: { name: cleanName, code: cleanCode },
+      metadata: { name: cleanName, code: cleanCode, credit_units: cleanUnits },
     });
 
     const subject = await dbGet(`SELECT * FROM subjects WHERE id = $1`, `SELECT * FROM subjects WHERE id = ?`, [id]);
@@ -651,7 +658,7 @@ performanceRouter.put(
   async (req: AuthenticatedRequest, res) => {
     const schoolId = req.targetSchoolId!;
     const { id } = req.params;
-    const { name, code, department, class_id, status } = req.body || {};
+    const { name, code, department, class_id, status, credit_units } = req.body || {};
 
     const existing = await dbGet(
       `SELECT * FROM subjects WHERE id = $1 AND school_id = $2`,
@@ -662,16 +669,19 @@ performanceRouter.put(
       return res.status(404).json({ error: 'NOT_FOUND', message: 'Subject not found.' });
     }
 
+    const parsedUnits = credit_units !== undefined && credit_units !== null ? Number(credit_units) : null;
+    const cleanUnits = parsedUnits !== null && Number.isFinite(parsedUnits) && parsedUnits >= 1 && parsedUnits <= 12 ? Math.round(parsedUnits) : null;
+
     await execWrite(
       `UPDATE subjects
        SET name = COALESCE($1, name), code = COALESCE($2, code), department = COALESCE($3, department),
-           class_id = COALESCE($4, class_id), status = COALESCE($5, status), updated_at = CURRENT_TIMESTAMP
-       WHERE id = $6 AND school_id = $7`,
+           class_id = COALESCE($4, class_id), credit_units = COALESCE($5, credit_units), status = COALESCE($6, status), updated_at = CURRENT_TIMESTAMP
+       WHERE id = $7 AND school_id = $8`,
       `UPDATE subjects
        SET name = COALESCE(?, name), code = COALESCE(?, code), department = COALESCE(?, department),
-           class_id = COALESCE(?, class_id), status = COALESCE(?, status), updated_at = CURRENT_TIMESTAMP
+           class_id = COALESCE(?, class_id), credit_units = COALESCE(?, credit_units), status = COALESCE(?, status), updated_at = CURRENT_TIMESTAMP
        WHERE id = ? AND school_id = ?`,
-      [name?.trim() || null, code?.trim().toUpperCase() || null, department ?? null, class_id ?? null, status || null, id, schoolId]
+      [name?.trim() || null, code?.trim().toUpperCase() || null, department ?? null, class_id ?? null, cleanUnits, status || null, id, schoolId]
     );
 
     const subject = await dbGet(`SELECT * FROM subjects WHERE id = $1`, `SELECT * FROM subjects WHERE id = ?`, [id]);
@@ -1532,20 +1542,32 @@ performanceRouter.get(
 
 async function buildLiveReportCardBreakdown(schoolId: string, rc: any) {
   const settings = await getSchoolAcademicSettings(schoolId);
-  const school = await dbGet(`SELECT id, name, address, state, lga, phone, email, website, logo_url FROM schools WHERE id = $1`, `SELECT id, name, address, state, lga, phone, email, website, logo_url FROM schools WHERE id = ?`, [schoolId]);
+  const school = await dbGet(
+    `SELECT id, name, type, address, state, lga, phone, email, website, logo_url FROM schools WHERE id = $1`,
+    `SELECT id, name, type, address, state, lga, phone, email, website, logo_url FROM schools WHERE id = ?`,
+    [schoolId]
+  );
+  const schoolSettingsRow = await dbGet(
+    `SELECT institution_category, academic_cycle_type, cycle_labels_json, grading_mode, terminology_json, current_term
+     FROM school_settings WHERE school_id = $1 LIMIT 1`,
+    `SELECT institution_category, academic_cycle_type, cycle_labels_json, grading_mode, terminology_json, current_term
+     FROM school_settings WHERE school_id = ? LIMIT 1`,
+    [schoolId]
+  );
+  const instProfile = resolveInstitutionProfile(school, schoolSettingsRow);
   const student = await dbGet(`SELECT id, admission_number, full_name, first_name, last_name, gender, class_id, class_name, class_arm_name FROM students WHERE id = $1 AND school_id = $2`, `SELECT id, admission_number, full_name, first_name, last_name, gender, class_id, class_name, class_arm_name FROM students WHERE id = ? AND school_id = ?`, [rc.student_id, schoolId]);
   const session = await dbGet(`SELECT id, name FROM academic_sessions WHERE id = $1`, `SELECT id, name FROM academic_sessions WHERE id = ?`, [rc.academic_session_id]);
   const term = await dbGet(`SELECT id, name FROM terms WHERE id = $1`, `SELECT id, name FROM terms WHERE id = ?`, [rc.term_id]);
 
   const scores = await dbAll(
-    `SELECT ss.*, sub.name as subject_name, sub.code as subject_code, ex.total_max_score, ex.ca_max_score, ex.exam_max_score
+    `SELECT ss.*, sub.name as subject_name, sub.code as subject_code, COALESCE(sub.credit_units, 3) as credit_units, ex.total_max_score, ex.ca_max_score, ex.exam_max_score
      FROM student_scores ss
      JOIN subjects sub ON ss.subject_id = sub.id
      JOIN examinations ex ON ss.examination_id = ex.id
      WHERE ss.school_id = $1 AND ss.student_id = $2 AND ss.academic_session_id = $3 AND ss.term_id = $4
        ${rc.examination_id ? 'AND ss.examination_id = $5' : ''}
      ORDER BY sub.name ASC`,
-    `SELECT ss.*, sub.name as subject_name, sub.code as subject_code, ex.total_max_score, ex.ca_max_score, ex.exam_max_score
+    `SELECT ss.*, sub.name as subject_name, sub.code as subject_code, COALESCE(sub.credit_units, 3) as credit_units, ex.total_max_score, ex.ca_max_score, ex.exam_max_score
      FROM student_scores ss
      JOIN subjects sub ON ss.subject_id = sub.id
      JOIN examinations ex ON ss.examination_id = ex.id
@@ -1604,6 +1626,56 @@ async function buildLiveReportCardBreakdown(schoolId: string, rc: any) {
     [schoolId, rc.student_id, rc.academic_session_id, rc.term_id]
   );
 
+  const isGpaMode = instProfile.gradingMode === 'GPA_5' || instProfile.gradingMode === 'GPA_4';
+  let totalCreditUnits = 0;
+  let totalQualityPoints = 0;
+
+  const compiledSubjects = scores.map((s) => {
+    const units = Math.max(1, Math.round(Number(s.credit_units || 3)));
+    const maxScore = Number(s.total_max_score) > 0 ? Number(s.total_max_score) : 100;
+    const pct = s.total_score !== null && s.total_score !== undefined ? (Number(s.total_score) / maxScore) * 100 : null;
+    let gradePoint: number | null = null;
+    let qualityPoints: number | null = null;
+    let effectiveGrade = s.grade;
+    let effectiveRemark = s.grade_remark;
+    if (isGpaMode && pct !== null) {
+      const band = computeGpaGradeBand(pct, instProfile.gradingMode);
+      gradePoint = band.points;
+      qualityPoints = Math.round(units * band.points * 100) / 100;
+      totalCreditUnits += units;
+      totalQualityPoints += qualityPoints;
+      effectiveGrade = band.grade;
+      effectiveRemark = band.remark;
+    }
+    return {
+      subject_id: s.subject_id,
+      subject_name: s.subject_name,
+      subject_code: s.subject_code,
+      credit_units: units,
+      grade_point: gradePoint,
+      quality_points: qualityPoints,
+      ca_score: s.ca_score,
+      exam_score: s.exam_score,
+      ca_max_score: s.ca_max_score,
+      exam_max_score: s.exam_max_score,
+      total_score: s.total_score,
+      grade: effectiveGrade,
+      grade_remark: effectiveRemark,
+      subject_remark: s.subject_remark,
+    };
+  });
+
+  const computedGpa = isGpaMode && totalCreditUnits > 0
+    ? Math.round((totalQualityPoints / totalCreditUnits) * 100) / 100
+    : null;
+  const academicStanding = computedGpa !== null ? getAcademicClassStanding(computedGpa, instProfile.gradingMode) : null;
+  const overallGrade = isGpaMode
+    ? (() => {
+        const band = computeGpaGradeBand(Number(rc.average_score || 0), instProfile.gradingMode);
+        return { grade: band.grade, remark: academicStanding || band.remark };
+      })()
+    : computeGrade(Number(rc.average_score || 0), 100, settings.grading_scale);
+
   return {
     reportCardId: rc.id,
     verificationCode: rc.verification_code || `RC-${rc.id.slice(-6).toUpperCase()}`,
@@ -1617,21 +1689,23 @@ async function buildLiveReportCardBreakdown(schoolId: string, rc: any) {
     subjects_count: Number(rc.subjects_count || scores.length),
     class_position: settings.show_class_position ? rc.class_position : null,
     class_size: settings.show_class_position ? rc.class_size : null,
-    overall_grade: computeGrade(Number(rc.average_score || 0), 100, settings.grading_scale),
+    gradingMode: instProfile.gradingMode,
+    gpa: computedGpa,
+    cgpa: computedGpa,
+    gpa_scale_max: instProfile.gpaScaleMax,
+    total_credit_units: isGpaMode ? totalCreditUnits : null,
+    total_grade_points: isGpaMode ? Math.round(totalQualityPoints * 100) / 100 : null,
+    academic_standing: academicStanding,
+    institution_profile: {
+      category: instProfile.category,
+      isTertiary: instProfile.isTertiary,
+      cycleType: instProfile.cycleType,
+      gradingMode: instProfile.gradingMode,
+      labels: instProfile.labels,
+    },
+    overall_grade: overallGrade,
     gradingScale: normalizeGradingScale(settings.grading_scale),
-    subjects: scores.map((s) => ({
-      subject_id: s.subject_id,
-      subject_name: s.subject_name,
-      subject_code: s.subject_code,
-      ca_score: s.ca_score,
-      exam_score: s.exam_score,
-      ca_max_score: s.ca_max_score,
-      exam_max_score: s.exam_max_score,
-      total_score: s.total_score,
-      grade: s.grade,
-      grade_remark: s.grade_remark,
-      subject_remark: s.subject_remark,
-    })),
+    subjects: compiledSubjects,
     attendance_summary: attSummary,
     behaviour_summary: behSummary,
     teacher_remark: rc.teacher_remark || officialRemark?.remark_text || '',

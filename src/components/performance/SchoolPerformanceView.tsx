@@ -35,6 +35,7 @@ import {
 } from '../../types/index.js';
 import { WorkflowStatusBadge } from '../common/StatusBadge.js';
 import { PrintableReportCardModal } from './PrintableReportCardModal.js';
+import { resolveInstitutionProfile } from '../../utils/institutionMode.js';
 
 interface SchoolPerformanceViewProps {
   readOnly?: boolean;
@@ -43,7 +44,11 @@ interface SchoolPerformanceViewProps {
 type PerfSubTab = 'analytics' | 'subjects' | 'exams' | 'reports' | 'settings';
 
 export const SchoolPerformanceView: React.FC<SchoolPerformanceViewProps> = ({ readOnly = false }) => {
-  const { activeSchool } = useAuth();
+  const { activeSchool, activeSettings } = useAuth();
+  const instProfile = resolveInstitutionProfile(activeSchool, activeSettings);
+  const { isTertiary, labels: instLabels, gradingMode } = instProfile;
+  const isGpaMode = gradingMode === 'GPA_5' || gradingMode === 'GPA_4';
+  const showCreditUnits = isTertiary || isGpaMode;
   const [subTab, setSubTab] = useState<PerfSubTab>('analytics');
 
   // Shared metadata
@@ -67,7 +72,7 @@ export const SchoolPerformanceView: React.FC<SchoolPerformanceViewProps> = ({ re
   const [overviewLoading, setOverviewLoading] = useState(true);
   const [overviewError, setOverviewError] = useState<string | null>(null);
 
-  // Subjects modal
+  // Subjects / Courses modal
   const [subjectModalOpen, setSubjectModalOpen] = useState(false);
   const [editingSubject, setEditingSubject] = useState<SubjectItem | null>(null);
   const [subjectForm, setSubjectForm] = useState({
@@ -75,6 +80,7 @@ export const SchoolPerformanceView: React.FC<SchoolPerformanceViewProps> = ({ re
     code: '',
     department: '',
     class_id: '',
+    credit_units: 3,
     status: 'ACTIVE',
   });
   const [subjectSaving, setSubjectSaving] = useState(false);
@@ -327,14 +333,15 @@ export const SchoolPerformanceView: React.FC<SchoolPerformanceViewProps> = ({ re
     try {
       const payload = {
         ...subjectForm,
+        credit_units: Number(subjectForm.credit_units) || 3,
         status: subjectForm.status as 'ACTIVE' | 'INACTIVE',
       };
       if (editingSubject) {
         await api.updateSubject(editingSubject.id, payload);
-        showMsg('ok', 'Subject updated.');
+        showMsg('ok', `${instLabels.subject} updated.`);
       } else {
         await api.createSubject(payload);
-        showMsg('ok', 'Subject created.');
+        showMsg('ok', `${instLabels.subject} created.`);
       }
       const res = await api.getSubjects();
       setSubjects(res.subjects || []);
@@ -645,12 +652,18 @@ export const SchoolPerformanceView: React.FC<SchoolPerformanceViewProps> = ({ re
           <div>
             <h2 className="text-lg font-bold text-slate-900 flex items-center gap-2">
               <BarChart3 className="w-5 h-5 text-emerald-600" />
-              <span>Academic Performance &amp; Digital Report Cards</span>
+              <span>
+                {isTertiary
+                  ? `Academic Performance, GPA/CGPA & ${instLabels.report}`
+                  : 'Academic Performance & Digital Report Cards'}
+              </span>
             </h2>
             <p className="text-xs text-slate-500 mt-0.5">
               {readOnly
-                ? 'Read-only analytics, examination standings, and report card archive.'
-                : 'Manage subjects, examinations, score workflows, audited post-publish corrections, and digital report cards.'}
+                ? `Read-only analytics, examination standings, and ${instLabels.report.toLowerCase()} archive.`
+                : isTertiary
+                  ? `Manage ${instLabels.subjectPlural.toLowerCase()} & credit units, ${instLabels.cycle.toLowerCase()} exams, score workflows, and official GPA/CGPA transcripts.`
+                  : 'Manage subjects, examinations, score workflows, audited post-publish corrections, and digital report cards.'}
             </p>
           </div>
           {readOnly && (
@@ -665,9 +678,9 @@ export const SchoolPerformanceView: React.FC<SchoolPerformanceViewProps> = ({ re
           {(
             [
               { key: 'analytics', label: 'Analytics & Rankings', icon: BarChart3 },
-              { key: 'subjects', label: 'Subjects', icon: BookOpen },
+              { key: 'subjects', label: instLabels.subjectPlural, icon: BookOpen },
               { key: 'exams', label: 'Examinations & Scores', icon: ClipboardCheck },
-              { key: 'reports', label: 'Report Cards', icon: FileText },
+              { key: 'reports', label: isTertiary ? 'Results & Transcripts' : 'Report Cards', icon: FileText },
               ...(!readOnly ? [{ key: 'settings', label: 'Policy Settings', icon: Sliders }] : []),
             ] as const
           ).map((t) => {
@@ -1172,36 +1185,45 @@ export const SchoolPerformanceView: React.FC<SchoolPerformanceViewProps> = ({ re
         <div className="bg-white rounded-2xl border border-slate-200 p-6 space-y-4">
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
             <div>
-              <h3 className="text-sm font-bold text-slate-900">Curriculum Subjects ({subjects.length})</h3>
-              <p className="text-xs text-slate-500">Subjects assessed in examinations and report cards.</p>
+              <h3 className="text-sm font-bold text-slate-900">
+                Curriculum {instLabels.subjectPlural} ({subjects.length})
+              </h3>
+              <p className="text-xs text-slate-500">
+                {showCreditUnits
+                  ? `${instLabels.subjectPlural} and Credit Units used to compute weighted GPA & CGPA transcripts.`
+                  : 'Subjects assessed in examinations and report cards.'}
+              </p>
             </div>
             {!readOnly && (
               <button
                 type="button"
                 onClick={() => {
                   setEditingSubject(null);
-                  setSubjectForm({ name: '', code: '', department: '', class_id: '', status: 'ACTIVE' });
+                  setSubjectForm({ name: '', code: '', department: '', class_id: '', credit_units: 3, status: 'ACTIVE' });
                   setSubjectModalOpen(true);
                 }}
                 className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold inline-flex items-center gap-1.5 cursor-pointer self-start"
               >
                 <Plus className="w-4 h-4" />
-                <span>Add Subject</span>
+                <span>Add {instLabels.subject}</span>
               </button>
             )}
           </div>
 
           {subjects.length === 0 ? (
-            <p className="py-10 text-center text-xs text-slate-400">No subjects configured yet.</p>
+            <p className="py-10 text-center text-xs text-slate-400">
+              No {instLabels.subjectPlural.toLowerCase()} configured yet.
+            </p>
           ) : (
             <div className="overflow-x-auto">
               <table className="w-full text-left text-xs">
                 <thead>
                   <tr className="border-b border-slate-200 text-slate-500 bg-slate-50/70">
                     <th className="py-2.5 px-3">Code</th>
-                    <th className="py-2.5 px-3">Subject Name</th>
+                    <th className="py-2.5 px-3">{instLabels.subject} Title</th>
+                    {showCreditUnits && <th className="py-2.5 px-3 text-right">Credit Units</th>}
                     <th className="py-2.5 px-3">Department</th>
-                    <th className="py-2.5 px-3">Target Class</th>
+                    <th className="py-2.5 px-3">Target {instLabels.classLabel}</th>
                     <th className="py-2.5 px-3">Status</th>
                     {!readOnly && <th className="py-2.5 px-3 text-right">Actions</th>}
                   </tr>
@@ -1211,8 +1233,13 @@ export const SchoolPerformanceView: React.FC<SchoolPerformanceViewProps> = ({ re
                     <tr key={sub.id} className="hover:bg-slate-50/60">
                       <td className="py-2.5 px-3 font-mono text-slate-700 font-semibold">{sub.code}</td>
                       <td className="py-2.5 px-3 font-semibold text-slate-900">{sub.name}</td>
+                      {showCreditUnits && (
+                        <td className="py-2.5 px-3 text-right font-bold tabular-nums text-emerald-700">
+                          {sub.credit_units ?? 3}
+                        </td>
+                      )}
                       <td className="py-2.5 px-3 text-slate-600">{sub.department || 'General'}</td>
-                      <td className="py-2.5 px-3 text-slate-600">{sub.class_name || 'All Classes'}</td>
+                      <td className="py-2.5 px-3 text-slate-600">{sub.class_name || `All ${instLabels.classPlural}`}</td>
                       <td className="py-2.5 px-3">
                         <span
                           className={`text-[11px] font-semibold ${
@@ -1234,6 +1261,7 @@ export const SchoolPerformanceView: React.FC<SchoolPerformanceViewProps> = ({ re
                                   code: sub.code,
                                   department: sub.department || '',
                                   class_id: sub.class_id || '',
+                                  credit_units: Number(sub.credit_units ?? 3),
                                   status: sub.status,
                                 });
                                 setSubjectModalOpen(true);
@@ -2180,58 +2208,91 @@ export const SchoolPerformanceView: React.FC<SchoolPerformanceViewProps> = ({ re
         </form>
       )}
 
-      {/* SUBJECT MODAL */}
+      {/* SUBJECT / COURSE MODAL */}
       {subjectModalOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-xs p-4">
           <div className="bg-white rounded-2xl max-w-md w-full shadow-2xl border border-slate-200 overflow-hidden">
             <div className="bg-slate-900 px-5 py-4 text-white flex items-center justify-between">
-              <h3 className="font-bold text-sm">{editingSubject ? 'Edit Subject' : 'Add Subject'}</h3>
+              <h3 className="font-bold text-sm">
+                {editingSubject ? `Edit ${instLabels.subject}` : `Add ${instLabels.subject}`}
+              </h3>
               <button type="button" onClick={() => setSubjectModalOpen(false)} className="text-slate-400 hover:text-white">
                 <X className="w-4 h-4" />
               </button>
             </div>
             <form onSubmit={handleSaveSubject} className="p-5 space-y-3 text-xs">
               <div>
-                <label className="block font-semibold text-slate-700 mb-1">Subject Name *</label>
+                <label className="block font-semibold text-slate-700 mb-1">{instLabels.subject} Title *</label>
                 <input
                   type="text"
                   required
                   value={subjectForm.name}
                   onChange={(e) => setSubjectForm({ ...subjectForm, name: e.target.value })}
-                  placeholder="e.g. Mathematics"
+                  placeholder={isTertiary ? 'e.g. Introduction to Computer Science' : 'e.g. Mathematics'}
                   className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl"
                 />
               </div>
               <div className="grid grid-cols-2 gap-3">
                 <div>
-                  <label className="block font-semibold text-slate-700 mb-1">Subject Code</label>
+                  <label className="block font-semibold text-slate-700 mb-1">{instLabels.subject} Code</label>
                   <input
                     type="text"
                     value={subjectForm.code}
                     onChange={(e) => setSubjectForm({ ...subjectForm, code: e.target.value })}
-                    placeholder="e.g. MTH101"
+                    placeholder={isTertiary ? 'e.g. CSC 101' : 'e.g. MTH101'}
                     className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl font-mono"
                   />
                 </div>
+                {showCreditUnits ? (
+                  <div>
+                    <label className="block font-semibold text-slate-700 mb-1">Credit Units *</label>
+                    <input
+                      type="number"
+                      min={1}
+                      max={12}
+                      required
+                      value={subjectForm.credit_units}
+                      onChange={(e) =>
+                        setSubjectForm({ ...subjectForm, credit_units: Math.max(1, Math.min(12, Number(e.target.value) || 3)) })
+                      }
+                      className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl font-bold tabular-nums"
+                    />
+                  </div>
+                ) : (
+                  <div>
+                    <label className="block font-semibold text-slate-700 mb-1">Department</label>
+                    <input
+                      type="text"
+                      value={subjectForm.department}
+                      onChange={(e) => setSubjectForm({ ...subjectForm, department: e.target.value })}
+                      placeholder="Sciences, Arts..."
+                      className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl"
+                    />
+                  </div>
+                )}
+              </div>
+              {showCreditUnits && (
                 <div>
-                  <label className="block font-semibold text-slate-700 mb-1">Department</label>
+                  <label className="block font-semibold text-slate-700 mb-1">Department / Faculty</label>
                   <input
                     type="text"
                     value={subjectForm.department}
                     onChange={(e) => setSubjectForm({ ...subjectForm, department: e.target.value })}
-                    placeholder="Sciences, Arts..."
+                    placeholder="e.g. Computer Science, Accounting, General Studies"
                     className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl"
                   />
                 </div>
-              </div>
+              )}
               <div>
-                <label className="block font-semibold text-slate-700 mb-1">Target Class (Optional)</label>
+                <label className="block font-semibold text-slate-700 mb-1">
+                  Target {instLabels.classLabel} (Optional)
+                </label>
                 <select
                   value={subjectForm.class_id}
                   onChange={(e) => setSubjectForm({ ...subjectForm, class_id: e.target.value })}
                   className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl"
                 >
-                  <option value="">All Classes</option>
+                  <option value="">All {instLabels.classPlural}</option>
                   {classes.map((c) => (
                     <option key={c.id} value={c.id}>
                       {c.name}
@@ -2252,7 +2313,7 @@ export const SchoolPerformanceView: React.FC<SchoolPerformanceViewProps> = ({ re
                   disabled={subjectSaving}
                   className="px-5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl font-bold"
                 >
-                  {subjectSaving ? 'Saving...' : 'Save Subject'}
+                  {subjectSaving ? 'Saving...' : `Save ${instLabels.subject}`}
                 </button>
               </div>
             </form>

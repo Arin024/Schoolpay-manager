@@ -745,12 +745,12 @@ export const LoginForm: React.FC<LoginFormProps> = ({
                     <div className="p-3 rounded-xl bg-emerald-50 border border-emerald-200 text-[11px] text-emerald-900 flex items-start gap-2">
                       <ShieldCheck className="w-4 h-4 text-emerald-600 shrink-0 mt-0.5" />
                       <span>
-                        <strong>Read-only Parent Portal:</strong> Enter your child&apos;s school-generated Admission Number to view results, report cards, attendance, and fees — no password or email required.
+                        <strong>Read-only Parent / Sponsor Portal:</strong> Enter your ward&apos;s Admission or Matric Number to view results, transcripts/report cards, attendance, and fees — no password required.
                       </span>
                     </div>
                     <div>
                       <label className="block text-xs font-semibold text-slate-700 mb-1.5">
-                        Child&apos;s Admission Number
+                        Student Admission / Matric Number
                       </label>
                       <div className="relative">
                         <div className="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none text-slate-400">
@@ -763,7 +763,7 @@ export const LoginForm: React.FC<LoginFormProps> = ({
                             setIdentifier(e.target.value);
                             if (ambiguousSchools.length > 0) setAmbiguousSchools([]);
                           }}
-                          placeholder="e.g. BMC/2026/0001 or ADM-2025-001"
+                          placeholder="e.g. ADM-2025-001 or CSC/2026/001"
                           required
                           autoComplete="off"
                           className="w-full pl-10 pr-3.5 py-2.5 text-sm bg-slate-50 focus:bg-white border border-slate-300 focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500 rounded-xl transition"
@@ -831,12 +831,12 @@ export const LoginForm: React.FC<LoginFormProps> = ({
                     <div className="p-3 rounded-xl bg-teal-50 border border-teal-200 text-[11px] text-teal-900 flex items-start gap-2">
                       <ShieldCheck className="w-4 h-4 text-teal-600 shrink-0 mt-0.5" />
                       <span>
-                        <strong>Read-only Student Portal:</strong> Enter your school-generated Admission Number to view your results, report cards, attendance, and timetable — no password or email required.
+                        <strong>Read-only Student Portal:</strong> Enter your school-issued Admission or Matric Number to view your results, transcripts/report cards, CBT exams, attendance, and timetable — no password required.
                       </span>
                     </div>
                     <div>
                       <label className="block text-xs font-semibold text-slate-700 mb-1.5">
-                        Student Admission Number
+                        Student Admission / Matric Number
                       </label>
                       <div className="relative">
                         <div className="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none text-slate-400">
@@ -849,7 +849,7 @@ export const LoginForm: React.FC<LoginFormProps> = ({
                             setIdentifier(e.target.value);
                             if (ambiguousSchools.length > 0) setAmbiguousSchools([]);
                           }}
-                          placeholder="e.g. BMC/2026/0001 or ADM-2025-001"
+                          placeholder="e.g. ADM-2025-001 or CSC/2026/001"
                           required
                           autoComplete="off"
                           className="w-full pl-10 pr-3.5 py-2.5 text-sm bg-slate-50 focus:bg-white border border-slate-300 focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500 rounded-xl transition"
@@ -1244,15 +1244,36 @@ export const LoginForm: React.FC<LoginFormProps> = ({
                     ) : (
                       <>
                         <div>
-                          <span className="text-emerald-700 block">Class &amp; Session</span>
+                          <span className="text-emerald-700 block">
+                            {verifyResult.details.grading_mode ? 'Level & Session' : 'Class & Session'}
+                          </span>
                           <strong>
                             {verifyResult.details.class_name} • {verifyResult.details.session_name}
                           </strong>
                         </div>
                         <div>
-                          <span className="text-emerald-700 block">Term</span>
+                          <span className="text-emerald-700 block">
+                            {verifyResult.details.grading_mode ? 'Academic Period' : 'Term'}
+                          </span>
                           <strong>{verifyResult.details.term_name}</strong>
                         </div>
+                        {verifyResult.details.grading_mode && (verifyResult.details.cgpa ?? verifyResult.details.gpa) !== null && (
+                          <>
+                            <div>
+                              <span className="text-emerald-700 block">Verified GPA / CGPA</span>
+                              <strong>
+                                {Number(verifyResult.details.cgpa ?? verifyResult.details.gpa).toFixed(2)} /{' '}
+                                {Number(verifyResult.details.gpa_scale_max || 5).toFixed(2)}
+                              </strong>
+                            </div>
+                            {verifyResult.details.academic_standing && (
+                              <div>
+                                <span className="text-emerald-700 block">Academic Standing</span>
+                                <strong>{verifyResult.details.academic_standing}</strong>
+                              </div>
+                            )}
+                          </>
+                        )}
                       </>
                     )}
                   </div>

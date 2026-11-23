@@ -5,6 +5,11 @@ import {
   dbGet,
   getSchoolAcademicSettings,
 } from './accessControl.ts';
+import {
+  computeGpaGradeBand,
+  getAcademicClassStanding,
+  resolveInstitutionProfile,
+} from '../src/utils/institutionMode.ts';
 
 export interface CompileReportOptions {
   onlyPublished?: boolean;
@@ -15,9 +20,9 @@ export interface CompileReportOptions {
 
 function getTermSortOrder(termName: string, startDate?: string | null): number {
   const lower = String(termName || '').toLowerCase();
-  if (lower.includes('1st') || lower.includes('first')) return 1;
-  if (lower.includes('2nd') || lower.includes('second')) return 2;
-  if (lower.includes('3rd') || lower.includes('third')) return 3;
+  if (lower.includes('1st') || lower.includes('first') || lower.includes('harmattan')) return 1;
+  if (lower.includes('2nd') || lower.includes('second') || lower.includes('rain')) return 2;
+  if (lower.includes('3rd') || lower.includes('third') || lower.includes('summer')) return 3;
   if (startDate) {
     const ts = Date.parse(startDate);
     if (!Number.isNaN(ts)) return 10 + ts / 1e12;
@@ -115,10 +120,16 @@ export async function compileTermReportCard(
 
   const settings = await getSchoolAcademicSettings(schoolId);
   const school = await dbGet(
-    `SELECT id, name, address, state, lga, phone, email, website, logo_url FROM schools WHERE id = $1`,
-    `SELECT id, name, address, state, lga, phone, email, website, logo_url FROM schools WHERE id = ?`,
+    `SELECT id, name, type, address, state, lga, phone, email, website, logo_url FROM schools WHERE id = $1`,
+    `SELECT id, name, type, address, state, lga, phone, email, website, logo_url FROM schools WHERE id = ?`,
     [schoolId]
   );
+  const schoolTenantSettings = await dbGet(
+    `SELECT institution_category, academic_cycle_type, cycle_labels_json, grading_mode, terminology_json, current_term FROM school_settings WHERE school_id = $1 LIMIT 1`,
+    `SELECT institution_category, academic_cycle_type, cycle_labels_json, grading_mode, terminology_json, current_term FROM school_settings WHERE school_id = ? LIMIT 1`,
+    [schoolId]
+  );
+  const instProfile = resolveInstitutionProfile(school, schoolTenantSettings);
   const student = await dbGet(
     `SELECT id, admission_number, full_name, first_name, last_name, gender, class_id, class_name, class_arm_name
      FROM students WHERE id = $1 AND school_id = $2 AND (is_deleted = 0 OR is_deleted IS NULL)`,
@@ -143,7 +154,8 @@ export async function compileTermReportCard(
   const pubScoreClause = onlyPublished ? `AND ss.status = 'PUBLISHED' AND ex.status = 'PUBLISHED'` : '';
 
   const rawScores = await dbAll(
-    `SELECT ss.*, sub.name as subject_name, sub.code as subject_code, ex.total_max_score, ex.ca_max_score, ex.exam_max_score,
+    `SELECT ss.*, sub.name as subject_name, sub.code as subject_code, COALESCE(sub.credit_units, 3) as credit_units,
+            ex.total_max_score, ex.ca_max_score, ex.exam_max_score,
             ex.title as examination_title, ex.created_at as exam_created_at
      FROM student_scores ss
      JOIN subjects sub ON ss.subject_id = sub.id
@@ -153,7 +165,8 @@ export async function compileTermReportCard(
        ${pubScoreClause}
        ${examFilterId ? 'AND ss.examination_id = $5' : ''}
      ORDER BY sub.name ASC, ex.created_at DESC`,
-    `SELECT ss.*, sub.name as subject_name, sub.code as subject_code, ex.total_max_score, ex.ca_max_score, ex.exam_max_score,
+    `SELECT ss.*, sub.name as subject_name, sub.code as subject_code, COALESCE(sub.credit_units, 3) as credit_units,
+            ex.total_max_score, ex.ca_max_score, ex.exam_max_score,
             ex.title as examination_title, ex.created_at as exam_created_at
      FROM student_scores ss
      JOIN subjects sub ON ss.subject_id = sub.id
@@ -348,7 +361,56 @@ export async function compileTermReportCard(
     ? Number(existingRc.total_score || 0)
     : totalScore;
 
-  const overallGrade = computeGrade(avgScore, 100, settings.grading_scale);
+  const isGpaMode = instProfile.gradingMode === 'GPA_5' || instProfile.gradingMode === 'GPA_4';
+  let totalCreditUnits = 0;
+  let totalQualityPoints = 0;
+
+  const compiledSubjects = scores.map((s) => {
+    const units = Math.max(1, Math.round(Number(s.credit_units || 3)));
+    const maxScore = Number(s.total_max_score) > 0 ? Number(s.total_max_score) : 100;
+    const pct = s.total_score !== null && s.total_score !== undefined ? (Number(s.total_score) / maxScore) * 100 : null;
+    let gradePoint: number | null = null;
+    let qualityPoints: number | null = null;
+    let effectiveGrade = s.grade;
+    let effectiveRemark = s.grade_remark;
+    if (isGpaMode && pct !== null) {
+      const band = computeGpaGradeBand(pct, instProfile.gradingMode);
+      gradePoint = band.points;
+      qualityPoints = Math.round(units * band.points * 100) / 100;
+      totalCreditUnits += units;
+      totalQualityPoints += qualityPoints;
+      effectiveGrade = band.grade;
+      effectiveRemark = band.remark;
+    }
+    return {
+      subject_id: s.subject_id,
+      subject_name: s.subject_name,
+      subject_code: s.subject_code,
+      credit_units: units,
+      grade_point: gradePoint,
+      quality_points: qualityPoints,
+      ca_score: s.ca_score,
+      exam_score: s.exam_score,
+      ca_max_score: s.ca_max_score,
+      exam_max_score: s.exam_max_score,
+      total_score: s.total_score,
+      grade: effectiveGrade,
+      grade_remark: effectiveRemark,
+      subject_remark: s.subject_remark,
+    };
+  });
+
+  const computedGpa = isGpaMode && totalCreditUnits > 0
+    ? Math.round((totalQualityPoints / totalCreditUnits) * 100) / 100
+    : null;
+  const academicStanding = computedGpa !== null ? getAcademicClassStanding(computedGpa, instProfile.gradingMode) : null;
+
+  const overallGrade = isGpaMode
+    ? (() => {
+        const band = computeGpaGradeBand(avgScore, instProfile.gradingMode);
+        return { grade: band.grade, remark: academicStanding || band.remark };
+      })()
+    : computeGrade(avgScore, 100, settings.grading_scale);
   const verCode =
     existingRc?.verification_code ||
     `RC-${crypto.createHash('sha256').update(`${schoolId}:${studentId}:${academicSessionId}:${termId}`).digest('hex').slice(0, 6).toUpperCase()}`;
@@ -368,22 +430,24 @@ export async function compileTermReportCard(
     subjects_count: scores.length || Number(existingRc?.subjects_count || 0),
     class_position: settings.show_class_position ? classPosition : null,
     class_size: settings.show_class_position ? classSize : null,
+    gradingMode: instProfile.gradingMode,
+    gpa: computedGpa,
+    cgpa: computedGpa,
+    gpa_scale_max: instProfile.gpaScaleMax,
+    total_credit_units: isGpaMode ? totalCreditUnits : null,
+    total_grade_points: isGpaMode ? Math.round(totalQualityPoints * 100) / 100 : null,
+    academic_standing: academicStanding,
+    institution_profile: {
+      category: instProfile.category,
+      isTertiary: instProfile.isTertiary,
+      cycleType: instProfile.cycleType,
+      gradingMode: instProfile.gradingMode,
+      labels: instProfile.labels,
+    },
     overall_grade: overallGrade,
     gradingScale: parseGradingScaleSafe(settings.grading_scale),
     passMark: Number(settings.pass_mark ?? 40),
-    subjects: scores.map((s) => ({
-      subject_id: s.subject_id,
-      subject_name: s.subject_name,
-      subject_code: s.subject_code,
-      ca_score: s.ca_score,
-      exam_score: s.exam_score,
-      ca_max_score: s.ca_max_score,
-      exam_max_score: s.exam_max_score,
-      total_score: s.total_score,
-      grade: s.grade,
-      grade_remark: s.grade_remark,
-      subject_remark: s.subject_remark,
-    })),
+    subjects: compiledSubjects,
     attendance_summary: attSummary,
     behaviour_summary: behSummary,
     teacher_remark: existingRc?.teacher_remark || officialRemark?.remark_text || '',
@@ -505,8 +569,22 @@ export async function compileSessionReportCard(
 
   const pubScoreClause = onlyPublished ? `AND ss.status = 'PUBLISHED' AND ex.status = 'PUBLISHED'` : '';
 
+  const schoolTenantSettings = await dbGet(
+    `SELECT institution_category, academic_cycle_type, cycle_labels_json, grading_mode, terminology_json, current_term FROM school_settings WHERE school_id = $1 LIMIT 1`,
+    `SELECT institution_category, academic_cycle_type, cycle_labels_json, grading_mode, terminology_json, current_term FROM school_settings WHERE school_id = ? LIMIT 1`,
+    [schoolId]
+  );
+  const schoolWithType = await dbGet(
+    `SELECT id, name, type, address, state, lga, phone, email, website, logo_url FROM schools WHERE id = $1`,
+    `SELECT id, name, type, address, state, lga, phone, email, website, logo_url FROM schools WHERE id = ?`,
+    [schoolId]
+  );
+  const instProfile = resolveInstitutionProfile(schoolWithType || school, schoolTenantSettings);
+  const isGpaMode = instProfile.gradingMode === 'GPA_5' || instProfile.gradingMode === 'GPA_4';
+
   const rawScores = await dbAll(
-    `SELECT ss.*, sub.name as subject_name, sub.code as subject_code, ex.total_max_score, ex.ca_max_score, ex.exam_max_score,
+    `SELECT ss.*, sub.name as subject_name, sub.code as subject_code, COALESCE(sub.credit_units, 3) as credit_units,
+            ex.total_max_score, ex.ca_max_score, ex.exam_max_score,
             ex.created_at as exam_created_at, t.name as term_name
      FROM student_scores ss
      JOIN subjects sub ON ss.subject_id = sub.id
@@ -516,7 +594,8 @@ export async function compileSessionReportCard(
        AND (ex.is_deleted = 0 OR ex.is_deleted IS NULL)
        ${pubScoreClause}
      ORDER BY sub.name ASC, ex.created_at DESC`,
-    `SELECT ss.*, sub.name as subject_name, sub.code as subject_code, ex.total_max_score, ex.ca_max_score, ex.exam_max_score,
+    `SELECT ss.*, sub.name as subject_name, sub.code as subject_code, COALESCE(sub.credit_units, 3) as credit_units,
+            ex.total_max_score, ex.ca_max_score, ex.exam_max_score,
             ex.created_at as exam_created_at, t.name as term_name
      FROM student_scores ss
      JOIN subjects sub ON ss.subject_id = sub.id
@@ -535,13 +614,14 @@ export async function compileSessionReportCard(
   }
 
   // Group scores cleanly per subject + term (latest exam per subject+term)
-  const subjectTermMap = new Map<string, { subject_id: string; subject_name: string; subject_code: string; byTerm: Map<string, any> }>();
+  const subjectTermMap = new Map<string, { subject_id: string; subject_name: string; subject_code: string; credit_units: number; byTerm: Map<string, any> }>();
   for (const s of rawScores) {
     if (!subjectTermMap.has(s.subject_id)) {
       subjectTermMap.set(s.subject_id, {
         subject_id: s.subject_id,
         subject_name: s.subject_name,
         subject_code: s.subject_code,
+        credit_units: Math.max(1, Math.round(Number(s.credit_units || 3))),
         byTerm: new Map<string, any>(),
       });
     }
@@ -598,12 +678,18 @@ export async function compileSessionReportCard(
     });
 
     const cumulativeAvg = termsTaken > 0 ? Math.round((pctSum / termsTaken) * 100) / 100 : 0;
-    const gradeInfo = computeGrade(cumulativeAvg, 100, settings.grading_scale);
+    const gpaBand = isGpaMode ? computeGpaGradeBand(cumulativeAvg, instProfile.gradingMode) : null;
+    const gradeInfo = gpaBand
+      ? { grade: gpaBand.grade, remark: gpaBand.remark }
+      : computeGrade(cumulativeAvg, 100, settings.grading_scale);
 
     return {
       subject_id: sub.subject_id,
       subject_name: sub.subject_name,
       subject_code: sub.subject_code,
+      credit_units: sub.credit_units,
+      grade_point: gpaBand ? gpaBand.points : null,
+      quality_points: gpaBand ? Math.round(sub.credit_units * gpaBand.points * 100) / 100 : null,
       term_scores: termScores,
       terms_taken: termsTaken,
       cumulative_total: Math.round(cumulativeTotal * 100) / 100,
@@ -614,23 +700,43 @@ export async function compileSessionReportCard(
     };
   });
 
-  // Compute term-by-term averages across subjects
+  // Compute term/semester-by-term averages and GPAs across subjects
+  let cumulativeSessionUnits = 0;
+  let cumulativeSessionPoints = 0;
   const termAverages = orderedTerms.map((t: any) => {
-    const scored = subjects
-      .map((sub) => sub.term_scores.find((ts) => ts.term_id === t.id))
-      .filter((ts) => ts && ts.percentage !== null);
-    const termTotal = Math.round(scored.reduce((acc, ts) => acc + Number(ts!.total_score || 0), 0) * 100) / 100;
+    const scoredPairs = subjects
+      .map((sub) => ({ sub, ts: sub.term_scores.find((ts) => ts.term_id === t.id) }))
+      .filter((pair) => pair.ts && pair.ts.percentage !== null);
+    const termTotal = Math.round(scoredPairs.reduce((acc, p) => acc + Number(p.ts!.total_score || 0), 0) * 100) / 100;
     const termAvg =
-      scored.length > 0
-        ? Math.round((scored.reduce((acc, ts) => acc + Number(ts!.percentage || 0), 0) / scored.length) * 100) / 100
+      scoredPairs.length > 0
+        ? Math.round((scoredPairs.reduce((acc, p) => acc + Number(p.ts!.percentage || 0), 0) / scoredPairs.length) * 100) / 100
         : 0;
+    let termGpa: number | null = null;
+    let termUnits: number | null = null;
+    if (isGpaMode && scoredPairs.length > 0) {
+      let unitsSum = 0;
+      let qpSum = 0;
+      for (const p of scoredPairs) {
+        const u = Math.max(1, Number(p.sub.credit_units || 3));
+        const band = computeGpaGradeBand(Number(p.ts!.percentage || 0), instProfile.gradingMode);
+        unitsSum += u;
+        qpSum += u * band.points;
+      }
+      termUnits = unitsSum;
+      termGpa = unitsSum > 0 ? Math.round((qpSum / unitsSum) * 100) / 100 : 0;
+      cumulativeSessionUnits += unitsSum;
+      cumulativeSessionPoints += qpSum;
+    }
     return {
       term_id: t.id,
       term_name: t.name,
-      subjects_count: scored.length,
+      subjects_count: scoredPairs.length,
       total_score: termTotal,
       average_score: termAvg,
-      grade: scored.length > 0 ? computeGrade(termAvg, 100, settings.grading_scale).grade : '—',
+      grade: scoredPairs.length > 0 ? computeGrade(termAvg, 100, settings.grading_scale).grade : '—',
+      gpa: termGpa,
+      credit_units: termUnits,
     };
   });
 
@@ -766,7 +872,17 @@ export async function compileSessionReportCard(
       ? existingSrc.promotion_status
       : defaultPromotionStatus;
 
-  const overallGrade = computeGrade(sessionAverage, 100, settings.grading_scale);
+  const computedCgpa = isGpaMode && cumulativeSessionUnits > 0
+    ? Math.round((cumulativeSessionPoints / cumulativeSessionUnits) * 100) / 100
+    : null;
+  const academicStanding = computedCgpa !== null ? getAcademicClassStanding(computedCgpa, instProfile.gradingMode) : null;
+
+  const overallGrade = isGpaMode
+    ? (() => {
+        const band = computeGpaGradeBand(sessionAverage, instProfile.gradingMode);
+        return { grade: band.grade, remark: academicStanding || band.remark };
+      })()
+    : computeGrade(sessionAverage, 100, settings.grading_scale);
   const verCode =
     existingSrc?.verification_code ||
     `SRC-${crypto.createHash('sha256').update(`${schoolId}:${studentId}:${academicSessionId}`).digest('hex').slice(0, 6).toUpperCase()}`;
@@ -776,10 +892,12 @@ export async function compileSessionReportCard(
     reportCardId: existingSrc?.id || `live_src_${studentId}_${academicSessionId}`,
     verificationCode: verCode,
     isLiveGenerated: !hasPublishedOfficialSrc,
-    school,
+    school: schoolWithType || school,
     student,
     sessionName: session.name,
-    termName: 'Full Academic Session (Annual Cumulative)',
+    termName: instProfile.isTertiary
+      ? 'Full Academic Session Transcript (Cumulative CGPA)'
+      : 'Full Academic Session (Annual Cumulative)',
     showClassPosition: Boolean(settings.show_class_position),
     total_score: sessionTotal,
     average_score: sessionAverage,
@@ -788,6 +906,20 @@ export async function compileSessionReportCard(
     class_position: settings.show_class_position ? classPosition : null,
     class_size: settings.show_class_position ? classSize : null,
     promotion_status: promotionStatus,
+    gradingMode: instProfile.gradingMode,
+    gpa: computedCgpa,
+    cgpa: computedCgpa,
+    gpa_scale_max: instProfile.gpaScaleMax,
+    total_credit_units: isGpaMode ? cumulativeSessionUnits : null,
+    total_grade_points: isGpaMode ? Math.round(cumulativeSessionPoints * 100) / 100 : null,
+    academic_standing: academicStanding,
+    institution_profile: {
+      category: instProfile.category,
+      isTertiary: instProfile.isTertiary,
+      cycleType: instProfile.cycleType,
+      gradingMode: instProfile.gradingMode,
+      labels: instProfile.labels,
+    },
     overall_grade: overallGrade,
     gradingScale: parseGradingScaleSafe(settings.grading_scale),
     passMark,

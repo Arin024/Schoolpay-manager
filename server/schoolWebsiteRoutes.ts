@@ -274,8 +274,12 @@ publicWebsiteRouter.get('/schools/:slug/website', async (req, res) => {
   }
 
   const settings = await dbGet(
-    `SELECT portal_subdomain, current_academic_session, current_term FROM school_settings WHERE school_id = $1 LIMIT 1`,
-    `SELECT portal_subdomain, current_academic_session, current_term FROM school_settings WHERE school_id = ? LIMIT 1`,
+    `SELECT portal_subdomain, current_academic_session, current_term,
+            institution_category, academic_cycle_type, cycle_labels_json, grading_mode, terminology_json
+     FROM school_settings WHERE school_id = $1 LIMIT 1`,
+    `SELECT portal_subdomain, current_academic_session, current_term,
+            institution_category, academic_cycle_type, cycle_labels_json, grading_mode, terminology_json
+     FROM school_settings WHERE school_id = ? LIMIT 1`,
     [school.id]
   );
 
@@ -384,6 +388,11 @@ publicWebsiteRouter.get('/schools/:slug/website', async (req, res) => {
       portal_subdomain: settings?.portal_subdomain || normalizeSubdomainSlug(school.slug),
       current_academic_session: settings?.current_academic_session || '2025/2026',
       current_term: settings?.current_term || '1st Term',
+      institution_category: settings?.institution_category || null,
+      academic_cycle_type: settings?.academic_cycle_type || null,
+      cycle_labels_json: settings?.cycle_labels_json || null,
+      grading_mode: settings?.grading_mode || null,
+      terminology_json: settings?.terminology_json || null,
     },
     urls: buildPortalUrls(school.slug, settings?.portal_subdomain),
     website,

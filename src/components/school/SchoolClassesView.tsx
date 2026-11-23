@@ -15,8 +15,9 @@ import {
 import { useAuth } from '../../context/AuthContext.js';
 import { api } from '../../services/api.js';
 import { ClassItem, ClassArmItem, StaffItem } from '../../types/index.js';
+import { resolveInstitutionProfile } from '../../utils/institutionMode.js';
 
-const ARM_QUICK_PRESETS = [
+const K12_ARM_QUICK_PRESETS = [
   { label: 'A, B', value: 'A, B' },
   { label: 'A, B, C', value: 'A, B, C' },
   { label: 'Gold, Silver', value: 'Gold, Silver' },
@@ -24,8 +25,20 @@ const ARM_QUICK_PRESETS = [
   { label: 'Science, Art, Commercial', value: 'Science, Art, Commercial' },
 ];
 
+const TERTIARY_DEPT_QUICK_PRESETS = [
+  { label: 'Computer Science, Accounting, Business Admin', value: 'Computer Science, Accounting, Business Admin' },
+  { label: 'Mass Comm, Economics, Political Science', value: 'Mass Communication, Economics, Political Science' },
+  { label: 'Nursing, Public Health, Med Lab', value: 'Nursing Science, Public Health, Medical Laboratory' },
+  { label: 'Civil Eng, Electrical Eng, Mechanical Eng', value: 'Civil Engineering, Electrical Engineering, Mechanical Engineering' },
+  { label: 'Full-Time, Part-Time', value: 'Full-Time, Part-Time' },
+];
+
 export const SchoolClassesView: React.FC = () => {
-  const { activeSchool } = useAuth();
+  const { activeSchool, activeSettings } = useAuth();
+  const profile = resolveInstitutionProfile(activeSchool, activeSettings);
+  const { isTertiary, labels } = profile;
+  const armQuickPresets = isTertiary ? TERTIARY_DEPT_QUICK_PRESETS : K12_ARM_QUICK_PRESETS;
+
   const [classes, setClasses] = useState<ClassItem[]>([]);
   const [staff, setStaff] = useState<StaffItem[]>([]);
   const [loading, setLoading] = useState(true);
@@ -42,12 +55,12 @@ export const SchoolClassesView: React.FC = () => {
 
   // Form states
   const [newClassName, setNewClassName] = useState('');
-  const [newClassLevel, setNewClassLevel] = useState('Junior Secondary');
+  const [newClassLevel, setNewClassLevel] = useState(isTertiary ? 'Undergraduate' : 'Junior Secondary');
   const [newClassDesc, setNewClassDesc] = useState('');
   const [newClassArmsText, setNewClassArmsText] = useState('');
 
-  const [newArmName, setNewArmName] = useState('Gold');
-  const [newArmCapacity, setNewArmCapacity] = useState('40');
+  const [newArmName, setNewArmName] = useState(isTertiary ? 'Computer Science' : 'Gold');
+  const [newArmCapacity, setNewArmCapacity] = useState(isTertiary ? '120' : '40');
   const [newArmTeacherId, setNewArmTeacherId] = useState('');
 
   const [editArmName, setEditArmName] = useState('');
@@ -58,7 +71,7 @@ export const SchoolClassesView: React.FC = () => {
   const [formError, setFormError] = useState<string | null>(null);
   const [presetLoading, setPresetLoading] = useState(false);
 
-  const handleLoadNigerianPreset = async (mode: 'SECONDARY' | 'PRIMARY' | 'K12') => {
+  const handleLoadNigerianPreset = async (mode: 'SECONDARY' | 'PRIMARY' | 'K12' | 'UNIVERSITY' | 'POLYTECHNIC' | 'COLLEGE') => {
     setPresetLoading(true);
     setStatusBanner(null);
     try {
@@ -66,12 +79,12 @@ export const SchoolClassesView: React.FC = () => {
       await loadData();
       setStatusBanner({
         type: 'success',
-        message: res.message || 'Nigerian classes and arms loaded successfully.',
+        message: res.message || `${labels.classPlural} loaded successfully.`,
       });
     } catch (err: any) {
       setStatusBanner({
         type: 'error',
-        message: err?.message || 'Failed to apply Nigerian class preset.',
+        message: err?.message || `Failed to apply ${labels.classLabel.toLowerCase()} preset.`,
       });
     } finally {
       setPresetLoading(false);
@@ -242,10 +255,12 @@ export const SchoolClassesView: React.FC = () => {
         <div>
           <h2 className="text-lg font-black text-slate-900 tracking-tight flex items-center gap-2">
             <Building2 className="w-5 h-5 text-emerald-600" />
-            <span>Classes &amp; Stream/Arm Structure</span>
+            <span>{labels.classPlural} Structure</span>
           </h2>
           <p className="text-xs text-slate-500 mt-0.5">
-            Configure academic grade levels, streams (e.g. Gold, Diamond, A, B), capacities, and assigned class teachers for{' '}
+            {isTertiary
+              ? 'Configure academic levels (100L–500L, ND/HND, Year 1–3), departments/options, capacities, and academic advisers for '
+              : 'Configure academic grade levels, streams (e.g. Gold, Diamond, A, B), capacities, and assigned class teachers for '}
             <strong className="text-slate-700">{activeSchool?.name}</strong>.
           </p>
         </div>
@@ -256,8 +271,13 @@ export const SchoolClassesView: React.FC = () => {
             disabled={presetLoading}
             onClick={() => {
               const t = String(activeSchool?.type || '').toLowerCase();
-              const mode =
-                t.includes('comprehensive') || t.includes('k-12')
+              const mode = isTertiary
+                ? t.includes('polytechnic') || t.includes('monotechnic')
+                  ? 'POLYTECHNIC'
+                  : t.includes('college')
+                    ? 'COLLEGE'
+                    : 'UNIVERSITY'
+                : t.includes('comprehensive') || t.includes('k-12')
                   ? 'K12'
                   : t.includes('primary') || t.includes('nursery')
                     ? 'PRIMARY'
@@ -267,7 +287,13 @@ export const SchoolClassesView: React.FC = () => {
             className="px-3.5 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-800 rounded-xl text-xs font-bold transition flex items-center gap-1.5 cursor-pointer disabled:opacity-60"
           >
             <Sparkles className="w-4 h-4 text-emerald-600" />
-            <span>{presetLoading ? 'Setting up...' : 'Load Nigerian Classes'}</span>
+            <span>
+              {presetLoading
+                ? 'Setting up...'
+                : isTertiary
+                  ? `Load Standard ${labels.classPlural}`
+                  : 'Load Nigerian Classes'}
+            </span>
           </button>
           <button
             type="button"
@@ -275,7 +301,7 @@ export const SchoolClassesView: React.FC = () => {
             className="px-4 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold transition flex items-center gap-1.5 shadow-sm cursor-pointer"
           >
             <Plus className="w-4 h-4" />
-            <span>Add Academic Class</span>
+            <span>Add {labels.classLabel}</span>
           </button>
         </div>
       </div>
@@ -308,11 +334,11 @@ export const SchoolClassesView: React.FC = () => {
         </div>
       )}
 
-      {/* Classes Grid */}
+      {/* Classes / Levels Grid */}
       {loading ? (
         <div className="bg-white rounded-2xl border border-slate-200 p-16 text-center text-xs text-slate-400 shadow-sm">
           <div className="w-8 h-8 rounded-full border-2 border-emerald-600 border-t-transparent animate-spin mx-auto mb-2" />
-          <span>Loading classes and arms...</span>
+          <span>Loading {labels.classPlural.toLowerCase()}...</span>
         </div>
       ) : classes.length === 0 ? (
         <div className="bg-white rounded-2xl border border-slate-200 p-8 sm:p-12 text-center space-y-4 shadow-sm">
@@ -320,34 +346,69 @@ export const SchoolClassesView: React.FC = () => {
             <Building2 className="w-6 h-6" />
           </div>
           <div>
-            <p className="text-sm font-bold text-slate-800">No classes configured for this school yet.</p>
-            <p className="text-xs text-slate-500 mt-1 max-w-md mx-auto">
-              Quickly load Nigerian standard classes &amp; streams (JSS 1–3, SSS 1–3 Science/Art/Commercial, or Nursery &amp; Primary 1–6) in one click.
+            <p className="text-sm font-bold text-slate-800">
+              No {labels.classPlural.toLowerCase()} configured yet.
+            </p>
+            <p className="text-xs text-slate-500 mt-1 max-w-lg mx-auto">
+              {isTertiary
+                ? 'Quickly load standard Nigerian tertiary levels & departments (100L–500L, ND 1–HND 2, or College Year 1–3) in one click.'
+                : 'Quickly load Nigerian standard classes & streams (JSS 1–3, SSS 1–3 Science/Art/Commercial, or Nursery & Primary 1–6) in one click.'}
             </p>
           </div>
           <div className="flex flex-wrap items-center justify-center gap-2">
-            <button
-              type="button"
-              disabled={presetLoading}
-              onClick={() => handleLoadNigerianPreset('SECONDARY')}
-              className="px-4 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold transition cursor-pointer disabled:opacity-60"
-            >
-              {presetLoading ? 'Creating...' : 'Auto-Setup Secondary (JSS 1–3 & SSS 1–3)'}
-            </button>
-            <button
-              type="button"
-              disabled={presetLoading}
-              onClick={() => handleLoadNigerianPreset('PRIMARY')}
-              className="px-4 py-2.5 bg-slate-800 hover:bg-slate-900 text-white rounded-xl text-xs font-bold transition cursor-pointer disabled:opacity-60"
-            >
-              Auto-Setup Nursery &amp; Primary 1–6
-            </button>
+            {isTertiary ? (
+              <>
+                <button
+                  type="button"
+                  disabled={presetLoading}
+                  onClick={() => handleLoadNigerianPreset('UNIVERSITY')}
+                  className="px-4 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold transition cursor-pointer disabled:opacity-60"
+                >
+                  {presetLoading ? 'Creating...' : 'University Levels (100L – 500L)'}
+                </button>
+                <button
+                  type="button"
+                  disabled={presetLoading}
+                  onClick={() => handleLoadNigerianPreset('POLYTECHNIC')}
+                  className="px-4 py-2.5 bg-slate-800 hover:bg-slate-900 text-white rounded-xl text-xs font-bold transition cursor-pointer disabled:opacity-60"
+                >
+                  Polytechnic (ND 1 – HND 2)
+                </button>
+                <button
+                  type="button"
+                  disabled={presetLoading}
+                  onClick={() => handleLoadNigerianPreset('COLLEGE')}
+                  className="px-4 py-2.5 bg-slate-700 hover:bg-slate-800 text-white rounded-xl text-xs font-bold transition cursor-pointer disabled:opacity-60"
+                >
+                  College of Health / Ed (Year 1 – 3)
+                </button>
+              </>
+            ) : (
+              <>
+                <button
+                  type="button"
+                  disabled={presetLoading}
+                  onClick={() => handleLoadNigerianPreset('SECONDARY')}
+                  className="px-4 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold transition cursor-pointer disabled:opacity-60"
+                >
+                  {presetLoading ? 'Creating...' : 'Auto-Setup Secondary (JSS 1–3 & SSS 1–3)'}
+                </button>
+                <button
+                  type="button"
+                  disabled={presetLoading}
+                  onClick={() => handleLoadNigerianPreset('PRIMARY')}
+                  className="px-4 py-2.5 bg-slate-800 hover:bg-slate-900 text-white rounded-xl text-xs font-bold transition cursor-pointer disabled:opacity-60"
+                >
+                  Auto-Setup Nursery &amp; Primary 1–6
+                </button>
+              </>
+            )}
             <button
               type="button"
               onClick={openCreateClassModal}
               className="px-4 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-800 rounded-xl text-xs font-bold transition cursor-pointer"
             >
-              Create Custom Class
+              Create Custom {labels.classLabel}
             </button>
           </div>
         </div>
@@ -386,14 +447,14 @@ export const SchoolClassesView: React.FC = () => {
               <div className="space-y-2 pt-2 border-t border-slate-100 text-xs">
                 <div className="flex items-center justify-between">
                   <span className="font-bold text-[11px] text-slate-600 uppercase tracking-wider">
-                    Arms / Streams ({cls.arms?.length || 0})
+                    {labels.armLabel}s ({cls.arms?.length || 0})
                   </span>
                   <button
                     type="button"
                     onClick={() => {
                       setSelectedClassForArm(cls);
                       setNewArmName('');
-                      setNewArmCapacity('40');
+                      setNewArmCapacity(isTertiary ? '120' : '40');
                       setNewArmTeacherId('');
                       setFormError(null);
                       setIsAddArmModalOpen(true);
@@ -401,7 +462,7 @@ export const SchoolClassesView: React.FC = () => {
                     className="text-[11px] font-bold text-emerald-600 hover:text-emerald-700 flex items-center gap-1 px-2 py-1 rounded-lg hover:bg-emerald-50 transition cursor-pointer"
                   >
                     <Plus className="w-3.5 h-3.5" />
-                    <span>Add Arm</span>
+                    <span>Add {isTertiary ? 'Department' : 'Arm'}</span>
                   </button>
                 </div>
 
@@ -499,46 +560,55 @@ export const SchoolClassesView: React.FC = () => {
 
               <div>
                 <label className="block font-semibold text-slate-700 mb-1">
-                  Class Name <span className="text-red-500">*</span>
+                  {labels.classLabel} Name <span className="text-red-500">*</span>
                 </label>
                 <input
                   type="text"
                   required
                   value={newClassName}
                   onChange={(e) => setNewClassName(e.target.value)}
-                  placeholder="e.g. JSS 1, SSS 2, Primary 4, Creche"
+                  placeholder={isTertiary ? 'e.g. 100 Level, ND 1, HND 2, Year 1' : 'e.g. JSS 1, SSS 2, Primary 4, Creche'}
                   className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl font-bold"
                 />
               </div>
 
               <div>
-                <label className="block font-semibold text-slate-700 mb-1">Grade Level</label>
+                <label className="block font-semibold text-slate-700 mb-1">Academic Tier / Level</label>
                 <select
                   value={newClassLevel}
                   onChange={(e) => setNewClassLevel(e.target.value)}
                   className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl"
                 >
-                  <option value="Early Years / Nursery">Early Years / Nursery</option>
-                  <option value="Primary">Primary (Basic 1 - 6)</option>
-                  <option value="Junior Secondary">Junior Secondary (JSS 1 - 3)</option>
-                  <option value="Senior Secondary">Senior Secondary (SSS 1 - 3)</option>
-                  <option value="Vocational / Other">Vocational / Other</option>
+                  <optgroup label="Higher Institution / Tertiary">
+                    <option value="Undergraduate">Undergraduate (100L – 600L)</option>
+                    <option value="National Diploma">National Diploma (ND 1 – ND 2)</option>
+                    <option value="Higher National Diploma">Higher National Diploma (HND 1 – HND 2)</option>
+                    <option value="College / Diploma">College / Health / Education (Year 1 – 3)</option>
+                    <option value="Postgraduate">Postgraduate (PGD / MSc / PhD)</option>
+                  </optgroup>
+                  <optgroup label="Basic & Secondary (K-12)">
+                    <option value="Early Years / Nursery">Early Years / Nursery</option>
+                    <option value="Primary">Primary (Basic 1 - 6)</option>
+                    <option value="Junior Secondary">Junior Secondary (JSS 1 - 3)</option>
+                    <option value="Senior Secondary">Senior Secondary (SSS 1 - 3)</option>
+                    <option value="Vocational / Other">Vocational / Other</option>
+                  </optgroup>
                 </select>
               </div>
 
               <div>
                 <label className="block font-semibold text-slate-700 mb-1">
-                  Initial Arms / Streams <span className="text-slate-400 font-normal">(Optional, comma-separated)</span>
+                  Initial {labels.armLabel}s <span className="text-slate-400 font-normal">(Optional, comma-separated)</span>
                 </label>
                 <input
                   type="text"
                   value={newClassArmsText}
                   onChange={(e) => setNewClassArmsText(e.target.value)}
-                  placeholder="e.g. Gold, Silver or A, B, C"
+                  placeholder={isTertiary ? 'e.g. Computer Science, Accounting, Business Admin' : 'e.g. Gold, Silver or A, B, C'}
                   className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl"
                 />
                 <div className="flex flex-wrap gap-1.5 mt-1.5">
-                  {ARM_QUICK_PRESETS.map((p) => (
+                  {armQuickPresets.map((p) => (
                     <button
                       key={p.label}
                       type="button"
@@ -557,7 +627,7 @@ export const SchoolClassesView: React.FC = () => {
                   type="text"
                   value={newClassDesc}
                   onChange={(e) => setNewClassDesc(e.target.value)}
-                  placeholder="e.g. Upper basic junior class"
+                  placeholder={isTertiary ? 'e.g. First year undergraduate cohort' : 'e.g. Upper basic junior class'}
                   className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl"
                 />
               </div>
@@ -575,7 +645,7 @@ export const SchoolClassesView: React.FC = () => {
                   disabled={formSubmitting}
                   className="px-5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl font-bold disabled:opacity-60 cursor-pointer"
                 >
-                  {formSubmitting ? 'Creating...' : 'Create Class'}
+                  {formSubmitting ? 'Creating...' : `Create ${labels.classLabel}`}
                 </button>
               </div>
             </form>
@@ -583,14 +653,16 @@ export const SchoolClassesView: React.FC = () => {
         </div>
       )}
 
-      {/* ADD ARM MODAL */}
+      {/* ADD ARM / DEPARTMENT MODAL */}
       {isAddArmModalOpen && selectedClassForArm && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-xs p-4 overflow-y-auto">
           <div className="bg-white rounded-2xl max-w-md w-full shadow-2xl border border-slate-200 overflow-hidden text-xs my-6">
             <div className="bg-slate-900 px-6 py-4 flex items-center justify-between text-white border-b border-slate-800">
               <div className="flex items-center gap-2">
                 <Layers className="w-5 h-5 text-emerald-400" />
-                <h3 className="font-bold text-base">Add Arm to {selectedClassForArm.name}</h3>
+                <h3 className="font-bold text-base">
+                  Add {labels.armLabel} to {selectedClassForArm.name}
+                </h3>
               </div>
               <button
                 type="button"
@@ -611,21 +683,21 @@ export const SchoolClassesView: React.FC = () => {
 
               <div>
                 <label className="block font-semibold text-slate-700 mb-1">
-                  Arm / Stream Name(s) <span className="text-red-500">*</span>
+                  {labels.armLabel} Name(s) <span className="text-red-500">*</span>
                 </label>
                 <input
                   type="text"
                   required
                   value={newArmName}
                   onChange={(e) => setNewArmName(e.target.value)}
-                  placeholder="e.g. Gold or Gold, Silver, Diamond"
+                  placeholder={isTertiary ? 'e.g. Computer Science or Accounting, Finance' : 'e.g. Gold or Gold, Silver, Diamond'}
                   className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl font-bold"
                 />
                 <p className="text-[10px] text-slate-400 mt-1">
-                  Tip: Separate multiple arms with commas (e.g. <span className="font-mono">A, B, C</span>) to add them all at once.
+                  Tip: Separate multiple entries with commas to add them all at once.
                 </p>
                 <div className="flex flex-wrap gap-1.5 mt-1.5">
-                  {ARM_QUICK_PRESETS.map((p) => (
+                  {armQuickPresets.map((p) => (
                     <button
                       key={p.label}
                       type="button"
