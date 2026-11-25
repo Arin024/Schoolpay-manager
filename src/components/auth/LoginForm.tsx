@@ -1176,20 +1176,20 @@ export const LoginForm: React.FC<LoginFormProps> = ({
                       verifyType === 'REPORT_CARD' ? 'bg-slate-900 text-white shadow-sm' : 'text-slate-600'
                     }`}
                   >
-                    Published Report Card
+                    Report Card / Transcript
                   </button>
                 </div>
 
                 <div>
                   <label className="block text-xs font-semibold text-slate-700 mb-1">
-                    {verifyType === 'RECEIPT' ? 'Receipt Number *' : 'Report Card Verification Code *'}
+                    {verifyType === 'RECEIPT' ? 'Receipt Number *' : 'Report Card / Transcript Verification Code *'}
                   </label>
                   <input
                     type="text"
                     required
                     value={verifyCode}
                     onChange={(e) => setVerifyCode(e.target.value)}
-                    placeholder={verifyType === 'RECEIPT' ? 'e.g. RCP-2025-0001' : 'e.g. RC-8F3A12'}
+                    placeholder={verifyType === 'RECEIPT' ? 'e.g. RCP-2025-0001' : 'e.g. RC-8F3A12, SRC-... or CTR-...'}
                     className="w-full px-3.5 py-2.5 text-sm font-mono bg-slate-50 focus:bg-white border border-slate-300 rounded-xl"
                   />
                 </div>
@@ -1216,12 +1216,18 @@ export const LoginForm: React.FC<LoginFormProps> = ({
                   <div className="flex items-center gap-2 font-bold text-emerald-900">
                     <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
                     <span>
-                      Authentic {verifyResult.document_type === 'RECEIPT' ? 'Payment Receipt' : 'Report Card'} Verified
+                      Authentic{' '}
+                      {verifyResult.document_type === 'RECEIPT'
+                        ? 'Payment Receipt'
+                        : verifyResult.document_type === 'CAREER_TRANSCRIPT'
+                        ? 'Cumulative Career Transcript'
+                        : 'Report Card'}{' '}
+                      Verified
                     </span>
                   </div>
                   <div className="grid grid-cols-2 gap-2 pt-1 text-[11px] text-emerald-950">
                     <div>
-                      <span className="text-emerald-700 block">Issuing School</span>
+                      <span className="text-emerald-700 block">Issuing Institution</span>
                       <strong>{verifyResult.school.name}</strong>
                     </div>
                     <div>
@@ -1261,7 +1267,7 @@ export const LoginForm: React.FC<LoginFormProps> = ({
                           <>
                             <div>
                               <span className="text-emerald-700 block">Verified GPA / CGPA</span>
-                              <strong>
+                              <strong className="tabular-nums">
                                 {Number(verifyResult.details.cgpa ?? verifyResult.details.gpa).toFixed(2)} /{' '}
                                 {Number(verifyResult.details.gpa_scale_max || 5).toFixed(2)}
                               </strong>
@@ -1269,6 +1275,22 @@ export const LoginForm: React.FC<LoginFormProps> = ({
                             {verifyResult.details.academic_standing && (
                               <div>
                                 <span className="text-emerald-700 block">Academic Standing</span>
+                                <strong>{verifyResult.details.academic_standing}</strong>
+                              </div>
+                            )}
+                          </>
+                        )}
+                        {verifyResult.document_type === 'CAREER_TRANSCRIPT' && !verifyResult.details.cgpa && (
+                          <>
+                            <div>
+                              <span className="text-emerald-700 block">Lifetime Average</span>
+                              <strong className="tabular-nums">
+                                {Number((verifyResult.details as any).lifetime_average || 0).toFixed(1)}%
+                              </strong>
+                            </div>
+                            {verifyResult.details.academic_standing && (
+                              <div>
+                                <span className="text-emerald-700 block">Final Standing</span>
                                 <strong>{verifyResult.details.academic_standing}</strong>
                               </div>
                             )}

@@ -1323,7 +1323,7 @@ export interface PublicSchoolSummary {
 
 export interface PublicDocumentVerificationResult {
   valid: boolean;
-  document_type: 'RECEIPT' | 'REPORT_CARD';
+  document_type: 'RECEIPT' | 'REPORT_CARD' | 'CAREER_TRANSCRIPT';
   school: {
     id: string;
     name: string;

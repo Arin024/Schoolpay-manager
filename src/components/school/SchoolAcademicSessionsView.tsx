@@ -6,13 +6,20 @@ import {
   AlertCircle,
   X,
   BookOpen,
+  TrendingUp,
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext.js';
 import { api } from '../../services/api.js';
 import { AcademicSessionItem, SessionStatus } from '../../types/index.js';
 import { resolveInstitutionProfile } from '../../utils/institutionMode.js';
 
-export const SchoolAcademicSessionsView: React.FC = () => {
+interface SchoolAcademicSessionsViewProps {
+  onNavigateProgression?: () => void;
+}
+
+export const SchoolAcademicSessionsView: React.FC<SchoolAcademicSessionsViewProps> = ({
+  onNavigateProgression,
+}) => {
   const { activeSchool, activeSettings } = useAuth();
   const profile = resolveInstitutionProfile(activeSchool, activeSettings);
   const { labels, cycleType, cycleLabels } = profile;
@@ -239,17 +246,29 @@ export const SchoolAcademicSessionsView: React.FC = () => {
           </p>
         </div>
 
-        <button
-          onClick={() => {
-            setNewSessionName(defaultSessionName);
-            setFormError(null);
-            setIsAddSessionModalOpen(true);
-          }}
-          className="px-4 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold transition flex items-center gap-1.5 shadow-sm self-start md:self-auto cursor-pointer"
-        >
-          <Plus className="w-4 h-4" />
-          <span>New Academic Session</span>
-        </button>
+        <div className="flex flex-wrap items-center gap-2 self-start md:self-auto">
+          {onNavigateProgression && (
+            <button
+              type="button"
+              onClick={onNavigateProgression}
+              className="px-4 py-2.5 bg-white hover:bg-slate-50 text-slate-900 border border-slate-300 rounded-xl text-xs font-bold transition flex items-center gap-1.5 cursor-pointer whitespace-nowrap shrink-0"
+            >
+              <TrendingUp className="w-4 h-4 text-emerald-600" />
+              <span>Promote / Graduate</span>
+            </button>
+          )}
+          <button
+            onClick={() => {
+              setNewSessionName(defaultSessionName);
+              setFormError(null);
+              setIsAddSessionModalOpen(true);
+            }}
+            className="px-4 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold transition flex items-center gap-1.5 shadow-sm cursor-pointer whitespace-nowrap shrink-0"
+          >
+            <Plus className="w-4 h-4" />
+            <span>New Academic Session</span>
+          </button>
+        </div>
       </div>
 
       {/* Sessions Grid */}

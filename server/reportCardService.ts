@@ -10,6 +10,7 @@ import {
   getAcademicClassStanding,
   resolveInstitutionProfile,
 } from '../src/utils/institutionMode.ts';
+import { resolveHistoricalStudentClass } from './progressionService.ts';
 
 export interface CompileReportOptions {
   onlyPublished?: boolean;
@@ -130,14 +131,30 @@ export async function compileTermReportCard(
     [schoolId]
   );
   const instProfile = resolveInstitutionProfile(school, schoolTenantSettings);
-  const student = await dbGet(
-    `SELECT id, admission_number, full_name, first_name, last_name, gender, class_id, class_name, class_arm_name
+  const studentRaw = await dbGet(
+    `SELECT id, admission_number, full_name, first_name, last_name, gender, class_id, class_name, class_arm_id, class_arm_name
      FROM students WHERE id = $1 AND school_id = $2 AND (is_deleted = 0 OR is_deleted IS NULL)`,
-    `SELECT id, admission_number, full_name, first_name, last_name, gender, class_id, class_name, class_arm_name
+    `SELECT id, admission_number, full_name, first_name, last_name, gender, class_id, class_name, class_arm_id, class_arm_name
      FROM students WHERE id = ? AND school_id = ? AND (is_deleted = 0 OR is_deleted IS NULL)`,
     [studentId, schoolId]
   );
-  if (!student) return null;
+  if (!studentRaw) return null;
+
+  // Preserve exact historical class/level for this academic session even if student has since been promoted or graduated
+  const histClass = await resolveHistoricalStudentClass(
+    schoolId,
+    studentId,
+    academicSessionId,
+    studentRaw,
+    existingRc?.class_id || null
+  );
+  const student = {
+    ...studentRaw,
+    class_id: histClass.class_id || studentRaw.class_id,
+    class_name: histClass.class_name || studentRaw.class_name,
+    class_arm_id: histClass.class_arm_id || studentRaw.class_arm_id,
+    class_arm_name: histClass.class_arm_name || studentRaw.class_arm_name,
+  };
 
   const session = await dbGet(
     `SELECT id, name FROM academic_sessions WHERE id = $1`,
@@ -542,14 +559,30 @@ export async function compileSessionReportCard(
     `SELECT id, name, address, state, lga, phone, email, website, logo_url FROM schools WHERE id = ?`,
     [schoolId]
   );
-  const student = await dbGet(
-    `SELECT id, admission_number, full_name, first_name, last_name, gender, class_id, class_name, class_arm_name
+  const studentRaw = await dbGet(
+    `SELECT id, admission_number, full_name, first_name, last_name, gender, class_id, class_name, class_arm_id, class_arm_name
      FROM students WHERE id = $1 AND school_id = $2 AND (is_deleted = 0 OR is_deleted IS NULL)`,
-    `SELECT id, admission_number, full_name, first_name, last_name, gender, class_id, class_name, class_arm_name
+    `SELECT id, admission_number, full_name, first_name, last_name, gender, class_id, class_name, class_arm_id, class_arm_name
      FROM students WHERE id = ? AND school_id = ? AND (is_deleted = 0 OR is_deleted IS NULL)`,
     [studentId, schoolId]
   );
-  if (!student) return null;
+  if (!studentRaw) return null;
+
+  // Preserve exact historical class/level for this academic session even if student has since been promoted or graduated
+  const histClass = await resolveHistoricalStudentClass(
+    schoolId,
+    studentId,
+    academicSessionId,
+    studentRaw,
+    existingSrc?.class_id || null
+  );
+  const student = {
+    ...studentRaw,
+    class_id: histClass.class_id || studentRaw.class_id,
+    class_name: histClass.class_name || studentRaw.class_name,
+    class_arm_id: histClass.class_arm_id || studentRaw.class_arm_id,
+    class_arm_name: histClass.class_arm_name || studentRaw.class_arm_name,
+  };
 
   const session = await dbGet(
     `SELECT id, name FROM academic_sessions WHERE id = $1 AND school_id = $2`,

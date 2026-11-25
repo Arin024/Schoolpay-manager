@@ -25,6 +25,7 @@ import {
   compileSessionReportCard,
   compileTermReportCard,
 } from './reportCardService.ts';
+import { resolveHistoricalStudentClass } from './progressionService.ts';
 import {
   computeGpaGradeBand,
   getAcademicClassStanding,
@@ -1858,8 +1859,16 @@ performanceRouter.post(
       [schoolId]
     );
 
-    const computedList: { student: any; totalScore: number; averageScore: number; subjectsCount: number }[] = [];
+    const computedList: {
+      student: any;
+      historicalClassId: string | null;
+      historicalClassName: string | null;
+      totalScore: number;
+      averageScore: number;
+      subjectsCount: number;
+    }[] = [];
     for (const stu of students) {
+      const histCls = await resolveHistoricalStudentClass(schoolId, stu.id, academic_session_id, stu);
       const sParams = examination_id
         ? [schoolId, stu.id, academic_session_id, term_id, examination_id]
         : [schoolId, stu.id, academic_session_id, term_id];
@@ -1889,13 +1898,20 @@ performanceRouter.post(
           : valid.length;
       const averageScore = denom > 0 ? Math.round((pctSum / denom) * 100) / 100 : 0;
 
-      computedList.push({ student: stu, totalScore, averageScore, subjectsCount: valid.length });
+      computedList.push({
+        student: stu,
+        historicalClassId: histCls.class_id || stu.class_id || null,
+        historicalClassName: histCls.class_name || stu.class_name || null,
+        totalScore,
+        averageScore,
+        subjectsCount: valid.length,
+      });
     }
 
-    // Group by class_id to assign deterministic class ranks
+    // Group by historical class_id to assign deterministic class ranks
     const classGroups = new Map<string, typeof computedList>();
     for (const item of computedList) {
-      const cKey = item.student.class_id || 'UNASSIGNED';
+      const cKey = item.historicalClassId || 'UNASSIGNED';
       if (!classGroups.has(cKey)) classGroups.set(cKey, []);
       classGroups.get(cKey)!.push(item);
     }
@@ -1924,7 +1940,7 @@ performanceRouter.post(
              teacher_remark, verification_code, created_by, created_at, updated_at
            ) VALUES ($1, $2, $3, $4, $5, $6, $7, 'DRAFT', $8, $9, $10, $11, $12, $13, $14, $15, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
            ON CONFLICT (school_id, student_id, academic_session_id, term_id) DO UPDATE SET
-             class_id = EXCLUDED.class_id,
+             class_id = CASE WHEN report_cards.status = 'PUBLISHED' THEN report_cards.class_id ELSE EXCLUDED.class_id END,
              examination_id = COALESCE(EXCLUDED.examination_id, report_cards.examination_id),
              total_score = CASE WHEN report_cards.status = 'PUBLISHED' THEN report_cards.total_score ELSE EXCLUDED.total_score END,
              average_score = CASE WHEN report_cards.status = 'PUBLISHED' THEN report_cards.average_score ELSE EXCLUDED.average_score END,
@@ -1939,7 +1955,7 @@ performanceRouter.post(
              teacher_remark, verification_code, created_by, created_at, updated_at
            ) VALUES (?, ?, ?, ?, ?, ?, ?, 'DRAFT', ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
            ON CONFLICT(school_id, student_id, academic_session_id, term_id) DO UPDATE SET
-             class_id = excluded.class_id,
+             class_id = CASE WHEN report_cards.status = 'PUBLISHED' THEN report_cards.class_id ELSE excluded.class_id END,
              examination_id = COALESCE(excluded.examination_id, report_cards.examination_id),
              total_score = CASE WHEN report_cards.status = 'PUBLISHED' THEN report_cards.total_score ELSE excluded.total_score END,
              average_score = CASE WHEN report_cards.status = 'PUBLISHED' THEN report_cards.average_score ELSE excluded.average_score END,
@@ -1952,7 +1968,7 @@ performanceRouter.post(
             rcId,
             schoolId,
             item.student.id,
-            item.student.class_id || null,
+            item.historicalClassId,
             academic_session_id,
             term_id,
             examination_id || null,
@@ -1972,7 +1988,7 @@ performanceRouter.post(
           `SELECT * FROM report_cards WHERE school_id = ? AND student_id = ? AND academic_session_id = ? AND term_id = ?`,
           [schoolId, item.student.id, academic_session_id, term_id]
         );
-        if (row) generated.push(row);
+        if (row) generated.push({ ...row, class_name: item.historicalClassName });
       }
     }
 
@@ -2405,6 +2421,9 @@ performanceRouter.post(
       const srcId = newId('src');
       const verCode = `SRC-${crypto.randomBytes(3).toString('hex').toUpperCase()}`;
 
+      const histClassId = compiled.reportCard.class_id || stu.class_id || null;
+      const histClassName = bd?.student?.class_name || stu.class_name || null;
+
       await execWrite(
         `INSERT INTO session_report_cards (
            id, school_id, student_id, class_id, academic_session_id,
@@ -2414,7 +2433,7 @@ performanceRouter.post(
            created_by, created_at, updated_at
          ) VALUES ($1, $2, $3, $4, $5, 'DRAFT', $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
          ON CONFLICT (school_id, student_id, academic_session_id) DO UPDATE SET
-           class_id = EXCLUDED.class_id,
+           class_id = CASE WHEN session_report_cards.status = 'PUBLISHED' THEN session_report_cards.class_id ELSE EXCLUDED.class_id END,
            total_score = CASE WHEN session_report_cards.status = 'PUBLISHED' THEN session_report_cards.total_score ELSE EXCLUDED.total_score END,
            average_score = CASE WHEN session_report_cards.status = 'PUBLISHED' THEN session_report_cards.average_score ELSE EXCLUDED.average_score END,
            subjects_count = CASE WHEN session_report_cards.status = 'PUBLISHED' THEN session_report_cards.subjects_count ELSE EXCLUDED.subjects_count END,
@@ -2433,7 +2452,7 @@ performanceRouter.post(
            created_by, created_at, updated_at
          ) VALUES (?, ?, ?, ?, ?, 'DRAFT', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
          ON CONFLICT(school_id, student_id, academic_session_id) DO UPDATE SET
-           class_id = excluded.class_id,
+           class_id = CASE WHEN session_report_cards.status = 'PUBLISHED' THEN session_report_cards.class_id ELSE excluded.class_id END,
            total_score = CASE WHEN session_report_cards.status = 'PUBLISHED' THEN session_report_cards.total_score ELSE excluded.total_score END,
            average_score = CASE WHEN session_report_cards.status = 'PUBLISHED' THEN session_report_cards.average_score ELSE excluded.average_score END,
            subjects_count = CASE WHEN session_report_cards.status = 'PUBLISHED' THEN session_report_cards.subjects_count ELSE excluded.subjects_count END,
@@ -2448,7 +2467,7 @@ performanceRouter.post(
           srcId,
           schoolId,
           stu.id,
-          stu.class_id || null,
+          histClassId,
           academic_session_id,
           bd.total_score,
           bd.average_score,
@@ -2471,7 +2490,7 @@ performanceRouter.post(
         `SELECT * FROM session_report_cards WHERE school_id = ? AND student_id = ? AND academic_session_id = ?`,
         [schoolId, stu.id, academic_session_id]
       );
-      if (row) generated.push({ ...row, report_type: 'SESSION' });
+      if (row) generated.push({ ...row, class_name: histClassName, report_type: 'SESSION' });
     }
 
     logAudit({

@@ -395,6 +395,14 @@ export async function initDatabase() {
             await client.query(mig009Sql);
             console.log('[Neon PostgreSQL] Verified/applied migration 009_higher_institution_support.sql');
           }
+
+          // Execute idempotent 010_student_progression_and_career_transcripts.sql migration on Neon PostgreSQL before hydration
+          const mig010Path = path.resolve(process.cwd(), 'migrations/010_student_progression_and_career_transcripts.sql');
+          if (fs.existsSync(mig010Path)) {
+            const mig010Sql = fs.readFileSync(mig010Path, 'utf8');
+            await client.query(mig010Sql);
+            console.log('[Neon PostgreSQL] Verified/applied migration 010_student_progression_and_career_transcripts.sql');
+          }
         } finally {
           client.release();
         }
@@ -1029,6 +1037,116 @@ function migrateStep4Columns() {
         db.exec('ALTER TABLE subjects ADD COLUMN credit_units INTEGER DEFAULT 3;');
       } catch (e) {}
     }
+  }
+
+  // 2c. Ensure students table has additive graduation & admission session columns + progression/career transcript tables
+  const studentsTblExists = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='students'").get();
+  if (studentsTblExists) {
+    const stCols = db.prepare('PRAGMA table_info(students)').all().map((c: any) => c.name);
+    for (const [col, def] of [
+      ['graduation_date', 'TEXT'],
+      ['graduation_session_id', 'TEXT'],
+      ['admission_session_id', 'TEXT'],
+    ] as const) {
+      if (!stCols.includes(col)) {
+        try {
+          db.exec(`ALTER TABLE students ADD COLUMN ${col} ${def};`);
+        } catch (e) {}
+      }
+    }
+  }
+
+  try {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS student_promotion_batches (
+        id TEXT PRIMARY KEY,
+        school_id TEXT NOT NULL REFERENCES schools(id) ON DELETE CASCADE,
+        from_session_id TEXT REFERENCES academic_sessions(id) ON DELETE SET NULL,
+        to_session_id TEXT REFERENCES academic_sessions(id) ON DELETE SET NULL,
+        from_class_id TEXT REFERENCES classes(id) ON DELETE SET NULL,
+        from_class_name TEXT,
+        to_class_id TEXT REFERENCES classes(id) ON DELETE SET NULL,
+        to_class_name TEXT,
+        action_type TEXT DEFAULT 'PROMOTE',
+        total_students INTEGER DEFAULT 0,
+        promoted_count INTEGER DEFAULT 0,
+        retained_count INTEGER DEFAULT 0,
+        probation_count INTEGER DEFAULT 0,
+        graduated_count INTEGER DEFAULT 0,
+        status TEXT DEFAULT 'APPLIED',
+        notes TEXT,
+        executed_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+        executed_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        rolled_back_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+        rolled_back_at DATETIME
+      );
+      CREATE INDEX IF NOT EXISTS idx_promo_batches_school ON student_promotion_batches(school_id, executed_at DESC);
+
+      CREATE TABLE IF NOT EXISTS student_enrollment_history (
+        id TEXT PRIMARY KEY,
+        school_id TEXT NOT NULL REFERENCES schools(id) ON DELETE CASCADE,
+        student_id TEXT NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+        batch_id TEXT REFERENCES student_promotion_batches(id) ON DELETE SET NULL,
+        academic_session_id TEXT REFERENCES academic_sessions(id) ON DELETE SET NULL,
+        session_name TEXT,
+        class_id TEXT REFERENCES classes(id) ON DELETE SET NULL,
+        class_name TEXT,
+        class_arm_id TEXT REFERENCES class_arms(id) ON DELETE SET NULL,
+        class_arm_name TEXT,
+        previous_session_id TEXT REFERENCES academic_sessions(id) ON DELETE SET NULL,
+        previous_class_id TEXT REFERENCES classes(id) ON DELETE SET NULL,
+        previous_class_name TEXT,
+        previous_class_arm_id TEXT REFERENCES class_arms(id) ON DELETE SET NULL,
+        previous_class_arm_name TEXT,
+        previous_status TEXT DEFAULT 'ACTIVE',
+        new_status TEXT DEFAULT 'ACTIVE',
+        outcome TEXT NOT NULL,
+        session_average REAL,
+        session_gpa REAL,
+        cumulative_cgpa REAL,
+        credits_earned INTEGER,
+        outstanding_balance_kobo INTEGER DEFAULT 0,
+        remarks TEXT,
+        recorded_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      );
+      CREATE INDEX IF NOT EXISTS idx_enrollment_history_student ON student_enrollment_history(school_id, student_id, created_at ASC);
+      CREATE INDEX IF NOT EXISTS idx_enrollment_history_batch ON student_enrollment_history(school_id, batch_id);
+      CREATE INDEX IF NOT EXISTS idx_enrollment_history_session ON student_enrollment_history(school_id, academic_session_id);
+
+      CREATE TABLE IF NOT EXISTS career_transcripts (
+        id TEXT PRIMARY KEY,
+        school_id TEXT NOT NULL REFERENCES schools(id) ON DELETE CASCADE,
+        student_id TEXT NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+        verification_code TEXT NOT NULL UNIQUE,
+        status TEXT DEFAULT 'DRAFT',
+        institution_category TEXT DEFAULT 'K12',
+        grading_mode TEXT DEFAULT 'PERCENTAGE',
+        sessions_count INTEGER DEFAULT 0,
+        terms_count INTEGER DEFAULT 0,
+        total_subjects_courses INTEGER DEFAULT 0,
+        total_credit_units INTEGER DEFAULT 0,
+        total_grade_points REAL DEFAULT 0,
+        lifetime_cgpa REAL,
+        lifetime_average REAL DEFAULT 0,
+        final_standing TEXT,
+        graduation_status TEXT DEFAULT 'ACTIVE',
+        graduation_session_name TEXT,
+        carryover_count INTEGER DEFAULT 0,
+        snapshot_json TEXT,
+        registrar_remark TEXT,
+        principal_remark TEXT,
+        published_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+        published_at DATETIME,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(school_id, student_id)
+      );
+      CREATE INDEX IF NOT EXISTS idx_career_transcripts_school ON career_transcripts(school_id, updated_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_career_transcripts_code ON career_transcripts(verification_code);
+    `);
+  } catch (e) {
+    console.warn('[DB Migration 010 SQLite Notice]', (e as any)?.message);
   }
 
   // 3. Ensure webhook_events table includes PENDING in status check

@@ -16,6 +16,7 @@ import {
 import { toNaira } from './financeUtils.ts';
 import { paymentService } from './paymentService.ts';
 import { compileSessionReportCard, compileTermReportCard } from './reportCardService.ts';
+import { compileCareerTranscript } from './progressionService.ts';
 
 export const portalRouter = Router();
 
@@ -1501,3 +1502,114 @@ portalRouter.post(
     return res.json({ success: true, source: compiled.source, reportCard: compiled.reportCard });
   }
 );
+
+// ==============================================================================
+// MULTI-YEAR CUMULATIVE CAREER TRANSCRIPT FOR STUDENT & PARENT PORTALS
+// Works for both ACTIVE learners and GRADUATED / ALUMNI accounts (published data only)
+// ==============================================================================
+portalRouter.get(
+  '/student/career-transcript',
+  requireAuth,
+  requireTenant,
+  requireRole(STUDENT_PORTAL_ROLES),
+  async (req: AuthenticatedRequest, res) => {
+    const schoolId = req.targetSchoolId!;
+    const roleName = getEffectiveRoleName(req);
+    let targetStudentId = String(req.query.student_id || '').trim();
+
+    if (roleName === 'STUDENT') {
+      const own = await dbGet(
+        `SELECT id FROM students WHERE user_id = $1 AND school_id = $2 AND (is_deleted = 0 OR is_deleted IS NULL) LIMIT 1`,
+        `SELECT id FROM students WHERE user_id = ? AND school_id = ? AND (is_deleted = 0 OR is_deleted IS NULL) LIMIT 1`,
+        [req.user!.id, schoolId]
+      );
+      if (!own) {
+        return res.status(404).json({ error: 'STUDENT_NOT_LINKED', message: 'No student profile linked to your account.' });
+      }
+      targetStudentId = own.id;
+    }
+
+    if (!targetStudentId || !(await canAccessStudent(req, targetStudentId))) {
+      return res.status(403).json({
+        error: 'UNAUTHORIZED_STUDENT_ACCESS',
+        message: 'You are not authorized to view this career transcript.',
+      });
+    }
+
+    // Prefer official published snapshot if available, else compile from published scores only
+    const publishedCt = await dbGet(
+      `SELECT * FROM career_transcripts WHERE school_id = $1 AND student_id = $2 AND status = 'PUBLISHED' LIMIT 1`,
+      `SELECT * FROM career_transcripts WHERE school_id = ? AND student_id = ? AND status = 'PUBLISHED' LIMIT 1`,
+      [schoolId, targetStudentId]
+    );
+    if (publishedCt?.snapshot_json) {
+      try {
+        return res.json({
+          success: true,
+          source: 'OFFICIAL',
+          transcript: JSON.parse(publishedCt.snapshot_json),
+        });
+      } catch {}
+    }
+
+    const compiled = await compileCareerTranscript(schoolId, targetStudentId, {
+      onlyPublished: true,
+      visibilityRole: 'STUDENT',
+    });
+    if (!compiled) {
+      return res.status(404).json({
+        error: 'NO_PUBLISHED_RECORDS',
+        message: 'No published academic records are available yet for your cumulative career transcript.',
+      });
+    }
+    return res.json({ success: true, source: 'LIVE_PUBLISHED', transcript: compiled });
+  }
+);
+
+portalRouter.get(
+  '/parent/career-transcript',
+  requireAuth,
+  requireTenant,
+  requireRole(PARENT_PORTAL_ROLES),
+  async (req: AuthenticatedRequest, res) => {
+    const schoolId = req.targetSchoolId!;
+    const targetStudentId = String(req.query.student_id || '').trim();
+    if (!targetStudentId) {
+      return res.status(400).json({ error: 'MISSING_STUDENT_ID', message: 'student_id is required.' });
+    }
+    if (!(await canAccessStudent(req, targetStudentId))) {
+      return res.status(403).json({
+        error: 'UNAUTHORIZED_STUDENT_ACCESS',
+        message: 'You are not authorized to view this learner career transcript.',
+      });
+    }
+
+    const publishedCt = await dbGet(
+      `SELECT * FROM career_transcripts WHERE school_id = $1 AND student_id = $2 AND status = 'PUBLISHED' LIMIT 1`,
+      `SELECT * FROM career_transcripts WHERE school_id = ? AND student_id = ? AND status = 'PUBLISHED' LIMIT 1`,
+      [schoolId, targetStudentId]
+    );
+    if (publishedCt?.snapshot_json) {
+      try {
+        return res.json({
+          success: true,
+          source: 'OFFICIAL',
+          transcript: JSON.parse(publishedCt.snapshot_json),
+        });
+      } catch {}
+    }
+
+    const compiled = await compileCareerTranscript(schoolId, targetStudentId, {
+      onlyPublished: true,
+      visibilityRole: 'PARENT',
+    });
+    if (!compiled) {
+      return res.status(404).json({
+        error: 'NO_PUBLISHED_RECORDS',
+        message: 'No published academic records are available yet for this learner.',
+      });
+    }
+    return res.json({ success: true, source: 'LIVE_PUBLISHED', transcript: compiled });
+  }
+);
+

@@ -3320,7 +3320,105 @@ export const api = {
       headers: getAuthHeaders(),
     });
   },
+
+  // =========================================================================
+  // ACADEMIC PROGRESSION, PROMOTION/GRADUATION, ROLLBACK & CAREER TRANSCRIPTS
+  // =========================================================================
+  async getProgressionPreview(params: { class_id: string; from_session_id?: string }): Promise<any> {
+    const qs = new URLSearchParams({ class_id: params.class_id });
+    if (params.from_session_id) qs.set('from_session_id', params.from_session_id);
+    return safeFetch(`${API_BASE}/school/progression/preview?${qs.toString()}`, {
+      headers: getAuthHeaders(),
+    });
+  },
+
+  async executeProgression(payload: {
+    from_session_id?: string | null;
+    to_session_id?: string | null;
+    from_class_id: string;
+    to_class_id?: string | null;
+    notes?: string;
+    decisions: Array<{
+      student_id: string;
+      action: 'PROMOTE' | 'RETAIN' | 'PROBATION' | 'GRADUATE' | 'SKIP';
+      target_class_id?: string | null;
+      target_arm_id?: string | null;
+      session_average?: number | null;
+      session_gpa?: number | null;
+      outstanding_balance_kobo?: number;
+      remarks?: string;
+    }>;
+  }): Promise<{ success: boolean; message: string; batch: any }> {
+    return safeFetch(`${API_BASE}/school/progression/execute`, {
+      method: 'POST',
+      headers: getAuthHeaders(),
+      body: JSON.stringify(payload),
+    });
+  },
+
+  async getProgressionBatches(): Promise<{ success: boolean; batches: any[] }> {
+    return safeFetch(`${API_BASE}/school/progression/batches`, {
+      headers: getAuthHeaders(),
+    });
+  },
+
+  async rollbackProgressionBatch(batchId: string): Promise<{ success: boolean; message: string; restoredCount: number }> {
+    return safeFetch(`${API_BASE}/school/progression/batches/${encodeURIComponent(batchId)}/rollback`, {
+      method: 'POST',
+      headers: getAuthHeaders(),
+    });
+  },
+
+  async getAlumniRegistry(): Promise<{ success: boolean; alumni: any[] }> {
+    return safeFetch(`${API_BASE}/school/progression/alumni`, {
+      headers: getAuthHeaders(),
+    });
+  },
+
+  async getStudentProgressionHistory(studentId: string): Promise<{ success: boolean; history: any[] }> {
+    return safeFetch(`${API_BASE}/school/progression/students/${encodeURIComponent(studentId)}/history`, {
+      headers: getAuthHeaders(),
+    });
+  },
+
+  async getCareerTranscripts(): Promise<{ success: boolean; transcripts: any[] }> {
+    return safeFetch(`${API_BASE}/school/career-transcripts`, {
+      headers: getAuthHeaders(),
+    });
+  },
+
+  async compileCareerTranscript(studentId: string): Promise<{ success: boolean; transcript: any }> {
+    return safeFetch(`${API_BASE}/school/career-transcripts/compile`, {
+      method: 'POST',
+      headers: getAuthHeaders(),
+      body: JSON.stringify({ student_id: studentId }),
+    });
+  },
+
+  async publishCareerTranscript(
+    studentId: string,
+    payload?: { registrar_remark?: string; principal_remark?: string }
+  ): Promise<{ success: boolean; message: string; transcript: any }> {
+    return safeFetch(`${API_BASE}/school/career-transcripts/${encodeURIComponent(studentId)}/publish`, {
+      method: 'POST',
+      headers: getAuthHeaders(),
+      body: JSON.stringify(payload || {}),
+    });
+  },
+
+  async getStudentCareerTranscript(): Promise<{ success: boolean; source: string; transcript: any }> {
+    return safeFetch(`${API_BASE}/portal/student/career-transcript`, {
+      headers: getAuthHeaders(),
+    });
+  },
+
+  async getParentCareerTranscript(studentId: string): Promise<{ success: boolean; source: string; transcript: any }> {
+    return safeFetch(`${API_BASE}/portal/parent/career-transcript?student_id=${encodeURIComponent(studentId)}`, {
+      headers: getAuthHeaders(),
+    });
+  },
 };
+
 
 
 

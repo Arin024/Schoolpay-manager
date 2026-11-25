@@ -560,8 +560,8 @@ async function run() {
     await cdp.clickButtonByText('Verify Document Now');
     await cdp.waitForText('Authentic Payment Receipt Verified');
     await cdp.waitForText('Adaeze O***');
-    await cdp.clickButtonByText('Published Report Card');
-    await cdp.fillInputByPlaceholder('RC-8F3A12', rcCode);
+    await cdp.clickButtonByText('Report Card / Transcript');
+    await cdp.fillInputByPlaceholder('RC-', rcCode);
     await cdp.clickButtonByText('Verify Document Now');
     await cdp.waitForText('Authentic Report Card Verified');
     await cdp.waitForText('Brightstar Model College');

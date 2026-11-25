@@ -45,6 +45,7 @@ import { publicPortalRouter, normalizePhoneDigits } from './publicPortalRoutes.t
 import { publicWebsiteRouter, schoolWebsiteRouter } from './schoolWebsiteRoutes.ts';
 import { staffWorkspaceRouter } from './staffWorkspaceRoutes.ts';
 import { cbtRouter } from './cbtRoutes.ts';
+import { progressionRouter } from './progressionRoutes.ts';
 import {
   getCurrentNigerianCalendar,
   generateNextAdmissionNumber,
@@ -140,6 +141,8 @@ apiRouter.use('/v1/school', financeRouter);
 
 // Mount Performance, Attendance, Behaviour, Report Cards & Announcements module
 apiRouter.use('/v1/school', performanceRouter);
+// Mount Student Progression, Batch Promotion/Graduation, Rollback & Multi-Year Career Transcripts module
+apiRouter.use('/v1/school', progressionRouter);
 
 // Mount Parent & Student Read-Only Portals
 apiRouter.use('/v1/portal', portalRouter);

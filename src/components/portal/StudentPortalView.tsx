@@ -24,6 +24,7 @@ import { AcademicSessionItem, ReceiptItem, ReportCardItem, StudentDashboardData 
 import { resolveInstitutionProfile } from '../../utils/institutionMode.js';
 import { AttendanceBadge, SeverityBadge, WorkflowStatusBadge } from '../common/StatusBadge.js';
 import { PrintableReportCardModal } from '../performance/PrintableReportCardModal.js';
+import { PrintableCareerTranscriptModal } from '../performance/PrintableCareerTranscriptModal.js';
 import { PrintableReceiptModal } from '../school/PrintableReceiptModal.js';
 import { StudentCBTHallView } from '../cbt/StudentCBTHallView.js';
 
@@ -69,6 +70,8 @@ export const StudentPortalView: React.FC = () => {
   const [genTermId, setGenTermId] = useState('');
   const [generatingReport, setGeneratingReport] = useState(false);
   const [reportGenError, setReportGenError] = useState<string | null>(null);
+  const [viewingCareerTranscript, setViewingCareerTranscript] = useState<any | null>(null);
+  const [loadingCareerTranscript, setLoadingCareerTranscript] = useState(false);
 
   const loadDashboard = async (sessionId = selectedSessionId, termId = selectedTermId) => {
     setLoading(true);
@@ -158,6 +161,19 @@ export const StudentPortalView: React.FC = () => {
       await loadDashboard();
     } catch {
       // ignore
+    }
+  };
+
+  const handleOpenCareerTranscript = async () => {
+    setLoadingCareerTranscript(true);
+    setReportGenError(null);
+    try {
+      const res = await api.getStudentCareerTranscript();
+      setViewingCareerTranscript(res.transcript);
+    } catch (err: any) {
+      setReportGenError(err?.message || 'No published cumulative career transcript records are available yet.');
+    } finally {
+      setLoadingCareerTranscript(false);
     }
   };
 
@@ -710,6 +726,26 @@ export const StudentPortalView: React.FC = () => {
               </div>
             )}
           </div>
+
+          <div className="bg-white rounded-2xl border border-slate-200 p-6 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+            <div className="space-y-1">
+              <h3 className="text-sm font-bold text-slate-900">
+                {isTertiary ? 'Multi-Year Cumulative Academic Career Transcript' : 'Multi-Year Cumulative Academic Statement'}
+              </h3>
+              <p className="text-xs text-slate-600">
+                View and print your complete academic performance aggregated across all completed sessions, {instLabels.classPlural.toLowerCase()}, and {instLabels.cyclePlural.toLowerCase()}.
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={handleOpenCareerTranscript}
+              disabled={loadingCareerTranscript}
+              className="px-4 py-2.5 bg-slate-900 hover:bg-slate-800 text-white rounded-xl text-xs font-semibold inline-flex items-center gap-2 cursor-pointer disabled:opacity-50 whitespace-nowrap shrink-0"
+            >
+              <Printer className="w-3.5 h-3.5 text-emerald-400" />
+              <span>{loadingCareerTranscript ? 'Compiling Career Record...' : 'Open Full Career Transcript'}</span>
+            </button>
+          </div>
         </div>
       )}
 
@@ -989,6 +1025,13 @@ export const StudentPortalView: React.FC = () => {
         isOpen={Boolean(viewingReceipt)}
         onClose={() => setViewingReceipt(null)}
       />
+
+      {viewingCareerTranscript && (
+        <PrintableCareerTranscriptModal
+          transcript={viewingCareerTranscript}
+          onClose={() => setViewingCareerTranscript(null)}
+        />
+      )}
     </div>
   );
 };

@@ -1003,10 +1003,12 @@ financeRouter.post(
       return res.status(400).json({ error: 'NO_ITEMS', message: 'Fee structure has no line items.' });
     }
 
-    // Find all active students in class
+    // Find all active, non-deleted students in class (strictly excludes GRADUATED / ALUMNI / WITHDRAWN)
     const students = db.prepare(`
       SELECT * FROM students
-      WHERE school_id = ? AND class_id = ? AND student_status = 'ACTIVE'
+      WHERE school_id = ? AND class_id = ?
+        AND UPPER(COALESCE(student_status, 'ACTIVE')) = 'ACTIVE'
+        AND (is_deleted = 0 OR is_deleted IS NULL)
     `).all(schoolId, class_id) as any[];
 
     if (students.length === 0) {

@@ -299,11 +299,11 @@ publicPortalRouter.post('/verify-document', async (req, res) => {
   const cleanCode = String(code || '').trim();
   const docType = String(document_type || 'RECEIPT').toUpperCase();
 
-  if (!cleanCode || !['RECEIPT', 'REPORT_CARD'].includes(docType)) {
+  if (!cleanCode || !['RECEIPT', 'REPORT_CARD', 'TRANSCRIPT'].includes(docType)) {
     return res.status(400).json({
       valid: false,
       error: 'INVALID_REQUEST',
-      message: 'Provide document_type (RECEIPT or REPORT_CARD) and a verification/receipt number.',
+      message: 'Provide document_type (RECEIPT, REPORT_CARD, or TRANSCRIPT) and a verification/receipt number.',
     });
   }
 
@@ -507,10 +507,91 @@ publicPortalRouter.post('/verify-document', async (req, res) => {
   }
 
   if (!card) {
+    // Also check Official Multi-Year Cumulative Career Transcripts (CTR-...)
+    let careerRow: any = null;
+    if (getPgPool()) {
+      try {
+        const pgCareerRes = await queryPg(
+          `SELECT ct.*,
+                  s.id AS school_id, s.name AS school_name, s.slug AS school_slug, s.state AS school_state, s.lga AS school_lga,
+                  st.first_name, st.middle_name, st.last_name,
+                  COALESCE(c.name, st.class_name) AS class_name
+           FROM career_transcripts ct
+           JOIN schools s ON s.id = ct.school_id
+           JOIN students st ON st.id = ct.student_id
+           LEFT JOIN classes c ON c.id = st.class_id
+           WHERE UPPER(TRIM(ct.verification_code)) = UPPER($1)
+             AND ct.status = 'PUBLISHED'
+             AND (s.is_deleted = 0 OR s.is_deleted IS NULL)
+             ${scopedSchoolId ? 'AND ct.school_id = $2' : ''}
+           LIMIT 1`,
+          scopedSchoolId ? [cleanCode, scopedSchoolId] : [cleanCode]
+        );
+        careerRow = pgCareerRes.rows[0] || null;
+      } catch (err: any) {
+        console.warn('[Public Verify Career Transcript PG Notice]', err?.message);
+      }
+    }
+    if (!careerRow) {
+      try {
+        careerRow = cacheDb
+          .prepare(
+            `SELECT ct.*,
+                    s.id AS school_id, s.name AS school_name, s.slug AS school_slug, s.state AS school_state, s.lga AS school_lga,
+                    st.first_name, st.middle_name, st.last_name,
+                    COALESCE(c.name, st.class_name) AS class_name
+             FROM career_transcripts ct
+             JOIN schools s ON s.id = ct.school_id
+             JOIN students st ON st.id = ct.student_id
+             LEFT JOIN classes c ON c.id = st.class_id
+             WHERE UPPER(TRIM(ct.verification_code)) = UPPER(?)
+               AND ct.status = 'PUBLISHED'
+               AND UPPER(COALESCE(s.status, 'TRIAL')) != 'CANCELLED'
+               ${scopedSchoolId ? 'AND ct.school_id = ?' : ''}
+             LIMIT 1`
+          )
+          .get(...(scopedSchoolId ? [cleanCode, scopedSchoolId] : [cleanCode])) as any;
+      } catch {}
+    }
+
+    if (careerRow) {
+      const isGpa = careerRow.grading_mode === 'GPA_5' || careerRow.grading_mode === 'GPA_4';
+      return res.json({
+        valid: true,
+        document_type: 'CAREER_TRANSCRIPT',
+        school: {
+          id: careerRow.school_id,
+          name: careerRow.school_name,
+          slug: careerRow.school_slug,
+          state: careerRow.school_state,
+          lga: careerRow.school_lga,
+        },
+        details: {
+          verification_code: careerRow.verification_code,
+          student_name_masked: maskPersonName(buildStudentFullName(careerRow)),
+          class_name: careerRow.class_name || 'N/A',
+          session_name: careerRow.graduation_session_name || `${careerRow.sessions_count || 0} Academic Session(s)`,
+          term_name: `Cumulative Career Transcript (${careerRow.sessions_count || 0} Session${Number(careerRow.sessions_count) === 1 ? '' : 's'})`,
+          sessions_count: Number(careerRow.sessions_count || 0),
+          terms_count: Number(careerRow.terms_count || 0),
+          subjects_count: Number(careerRow.total_subjects_courses || 0),
+          grading_mode: careerRow.grading_mode,
+          cgpa: isGpa ? careerRow.lifetime_cgpa : null,
+          gpa: isGpa ? careerRow.lifetime_cgpa : null,
+          gpa_scale_max: careerRow.grading_mode === 'GPA_5' ? 5.0 : careerRow.grading_mode === 'GPA_4' ? 4.0 : null,
+          lifetime_average: Number(careerRow.lifetime_average || 0),
+          total_credit_units: isGpa ? Number(careerRow.total_credit_units || 0) : null,
+          academic_standing: careerRow.final_standing || null,
+          graduation_status: careerRow.graduation_status || 'ACTIVE',
+          published_at: careerRow.published_at,
+        },
+      });
+    }
+
     return res.status(404).json({
       valid: false,
       error: 'DOCUMENT_NOT_FOUND',
-      message: 'No published report card matched that verification code.',
+      message: 'No published report card or transcript matched that verification code.',
     });
   }
 

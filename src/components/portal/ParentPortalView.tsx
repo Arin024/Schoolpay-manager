@@ -36,6 +36,7 @@ import {
 } from '../../types/index.js';
 import { AttendanceBadge, SeverityBadge, WorkflowStatusBadge } from '../common/StatusBadge.js';
 import { PrintableReportCardModal } from '../performance/PrintableReportCardModal.js';
+import { PrintableCareerTranscriptModal } from '../performance/PrintableCareerTranscriptModal.js';
 import { PrintableReceiptModal } from '../school/PrintableReceiptModal.js';
 
 type ParentTab =
@@ -73,6 +74,8 @@ export const ParentPortalView: React.FC = () => {
   const [genSessionId, setGenSessionId] = useState('');
   const [genTermId, setGenTermId] = useState('');
   const [generatingReport, setGeneratingReport] = useState(false);
+  const [viewingCareerTranscript, setViewingCareerTranscript] = useState<any | null>(null);
+  const [loadingCareerTranscript, setLoadingCareerTranscript] = useState(false);
 
   // Online Checkout state (Parent online payment only)
   const [checkoutInvoice, setCheckoutInvoice] = useState<InvoiceDef | null>(null);
@@ -212,6 +215,24 @@ export const ParentPortalView: React.FC = () => {
       setViewingReceipt(res.receipt);
     } catch (err: any) {
       setStatusMsg({ type: 'err', text: err?.message || 'Failed to open receipt' });
+    }
+  };
+
+  const handleOpenCareerTranscript = async () => {
+    const childId = selectedChildId || data?.selectedChild?.id;
+    if (!childId) return;
+    setLoadingCareerTranscript(true);
+    setStatusMsg(null);
+    try {
+      const res = await api.getParentCareerTranscript(childId);
+      setViewingCareerTranscript(res.transcript);
+    } catch (err: any) {
+      setStatusMsg({
+        type: 'err',
+        text: err?.message || 'No published multi-year career transcript records are available yet.',
+      });
+    } finally {
+      setLoadingCareerTranscript(false);
     }
   };
 
@@ -952,6 +973,26 @@ export const ParentPortalView: React.FC = () => {
               </div>
             )}
           </div>
+
+          <div className="bg-white rounded-2xl border border-slate-200 p-6 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+            <div className="space-y-1">
+              <h3 className="text-sm font-bold text-slate-900">
+                {isTertiary ? 'Full Multi-Year Cumulative Career Transcript' : 'Full Multi-Year Cumulative Academic Statement'}
+              </h3>
+              <p className="text-xs text-slate-600">
+                Aggregates all completed sessions, {instLabels.classPlural.toLowerCase()}, and {instLabels.cyclePlural.toLowerCase()} into one official verifiable cumulative record.
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={handleOpenCareerTranscript}
+              disabled={loadingCareerTranscript}
+              className="px-4 py-2.5 bg-slate-900 hover:bg-slate-800 text-white rounded-xl text-xs font-semibold inline-flex items-center gap-2 cursor-pointer disabled:opacity-50 whitespace-nowrap shrink-0"
+            >
+              <Printer className="w-3.5 h-3.5 text-emerald-400" />
+              <span>{loadingCareerTranscript ? 'Compiling Career Record...' : 'Open Full Career Transcript'}</span>
+            </button>
+          </div>
         </div>
       )}
 
@@ -1586,6 +1627,13 @@ export const ParentPortalView: React.FC = () => {
         isOpen={Boolean(viewingReceipt)}
         onClose={() => setViewingReceipt(null)}
       />
+
+      {viewingCareerTranscript && (
+        <PrintableCareerTranscriptModal
+          transcript={viewingCareerTranscript}
+          onClose={() => setViewingCareerTranscript(null)}
+        />
+      )}
     </div>
   );
 };

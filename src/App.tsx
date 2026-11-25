@@ -21,6 +21,7 @@ import { SchoolUsersView } from './components/school/SchoolUsersView.js';
 import { SchoolAuditView } from './components/school/SchoolAuditView.js';
 import { SchoolSubscriptionView } from './components/school/SchoolSubscriptionView.js';
 import { SchoolRecycleBinView } from './components/school/SchoolRecycleBinView.js';
+import { SchoolProgressionView } from './components/school/SchoolProgressionView.js';
 import { SchoolPerformanceView } from './components/performance/SchoolPerformanceView.js';
 import { SchoolAttendanceView } from './components/performance/SchoolAttendanceView.js';
 import { SchoolBehaviourView } from './components/performance/SchoolBehaviourView.js';
@@ -71,6 +72,7 @@ import {
   Globe,
   BookOpen,
   MonitorCheck,
+  TrendingUp,
 } from 'lucide-react';
 import { SchoolStatusBadge } from './components/common/StatusBadge.js';
 import { resolveInstitutionProfile } from './utils/institutionMode.js';
@@ -86,6 +88,7 @@ type SchoolTab =
   | 'finance'
   | 'subscription'
   | 'students'
+  | 'progression'
   | 'classes'
   | 'parents'
   | 'staff'
@@ -120,6 +123,7 @@ const ALL_SCHOOL_TABS: SchoolTab[] = [
   'finance',
   'subscription',
   'students',
+  'progression',
   'classes',
   'parents',
   'staff',
@@ -305,6 +309,7 @@ const AppContent: React.FC = () => {
           finance: 'Fees & Invoicing',
           subscription: 'SaaS Subscription & Billing',
           students: 'Student Admissions & Directory',
+          progression: 'Academic Progression, Alumni & Career Transcripts',
           classes: 'Classes & Arms',
           parents: 'Parent Directory',
           staff: 'Staff Directory',
@@ -1230,6 +1235,18 @@ const AppContent: React.FC = () => {
               </button>
 
               <button
+                onClick={() => navigateTo('school', 'progression')}
+                className={`flex items-center gap-2 px-3.5 py-2.5 rounded-xl text-xs font-bold transition cursor-pointer whitespace-nowrap shrink-0 ${
+                  schoolTab === 'progression'
+                    ? 'bg-slate-900 text-white shadow'
+                    : 'text-slate-600 hover:bg-slate-100 hover:text-slate-900'
+                }`}
+              >
+                <TrendingUp className="w-4 h-4 text-emerald-400" />
+                <span>{isTertiary ? 'Progression & Graduation' : 'Promotion & Alumni'}</span>
+              </button>
+
+              <button
                 onClick={() => navigateTo('school', 'classes')}
                 className={`flex items-center gap-2 px-3.5 py-2.5 rounded-xl text-xs font-bold transition cursor-pointer whitespace-nowrap shrink-0 ${
                   schoolTab === 'classes'
@@ -1406,10 +1423,13 @@ const AppContent: React.FC = () => {
                 initialOpenImport={openImportOnStudentTab}
               />
             )}
+            {schoolTab === 'progression' && <SchoolProgressionView />}
             {schoolTab === 'classes' && <SchoolClassesView />}
             {schoolTab === 'parents' && <SchoolParentsView />}
             {schoolTab === 'staff' && <SchoolStaffDirectoryView />}
-            {schoolTab === 'sessions' && <SchoolAcademicSessionsView />}
+            {schoolTab === 'sessions' && (
+              <SchoolAcademicSessionsView onNavigateProgression={() => navigateTo('school', 'progression')} />
+            )}
             {schoolTab === 'website' && (
               <SchoolWebsiteManagerView
                 onPreviewLiveWebsite={(slug) => {
