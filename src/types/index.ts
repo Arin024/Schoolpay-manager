@@ -774,6 +774,8 @@ export interface AcademicSettings {
   students_can_view_fees: boolean;
   teachers_can_view_fees: boolean;
   require_review_before_approve: boolean;
+  min_credit_units_per_cycle?: number;
+  max_credit_units_per_cycle?: number;
   component_structure?: Array<{ key: string; label: string; max: number }> | null;
 }
 
@@ -783,11 +785,83 @@ export interface SubjectItem {
   name: string;
   code: string;
   credit_units?: number | null;
+  course_type?: 'CORE' | 'ELECTIVE' | 'GENERAL' | 'CARRYOVER' | 'PRACTICAL' | string | null;
+  semester_tag?: string | null;
   department?: string | null;
   class_id?: string | null;
   class_name?: string | null;
   status: 'ACTIVE' | 'INACTIVE';
   created_at?: string;
+}
+
+export interface CourseRegistrationItem {
+  id: string;
+  school_id?: string;
+  student_id: string;
+  student_name?: string;
+  admission_number?: string;
+  academic_session_id: string;
+  session_name?: string;
+  term_id: string;
+  term_name?: string;
+  class_id?: string | null;
+  class_name?: string | null;
+  subject_id: string;
+  subject_name: string;
+  subject_code?: string;
+  credit_units: number;
+  credit_units_snapshot?: number;
+  course_type?: string | null;
+  department?: string | null;
+  registration_type: 'REGULAR' | 'CARRYOVER' | 'ELECTIVE' | 'HISTORICAL' | string;
+  status: 'REGISTERED' | 'APPROVED' | 'DROPPED' | string;
+  created_at?: string;
+}
+
+export interface HistoricalBacklogInputRow {
+  admission_number?: string;
+  student_id?: string;
+  session_name: string;
+  term_name: string;
+  class_name: string;
+  subject_code?: string;
+  subject_name: string;
+  credit_units: number;
+  ca_score?: number | string | null;
+  exam_score?: number | string | null;
+  total_score?: number | string | null;
+}
+
+export interface ExamBroadsheetData {
+  exam: {
+    id: string;
+    title: string;
+    session_name?: string | null;
+    term_name?: string | null;
+    class_name?: string | null;
+    status: string;
+    total_max_score: number;
+  };
+  gradingMode: 'PERCENTAGE' | 'GPA_5' | 'GPA_4';
+  isGpaMode: boolean;
+  subjects: Array<{
+    id: string;
+    code: string;
+    name: string;
+    credit_units: number;
+  }>;
+  rows: Array<{
+    student_id: string;
+    admission_number: string | null;
+    student_name: string;
+    scores: Record<string, { total: number; grade: string; percentage: number }>;
+    subjects_count: number;
+    total_score: number;
+    average_score: number;
+    gpa: number | null;
+    credit_units: number | null;
+    position: number;
+  }>;
 }
 
 export interface ExaminationItem {
@@ -1369,6 +1443,11 @@ export interface SchoolWebsiteProfile {
   social_facebook?: string | null;
   social_instagram?: string | null;
   is_published: number;
+  show_enrollment_count?: number;
+  show_staff_count?: number;
+  show_classes_count?: number;
+  show_cbt_hall?: number;
+  show_admissions_form?: number;
   updated_at?: string;
 }
 
@@ -1467,9 +1546,9 @@ export interface PublicSchoolWebsiteData {
     }>;
   };
   stats: {
-    studentsCount: number;
-    classesCount: number;
-    staffCount: number;
+    studentsCount: number | null;
+    classesCount: number | null;
+    staffCount: number | null;
   };
 }
 

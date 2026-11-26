@@ -409,16 +409,24 @@ export async function compileCareerTranscript(
 
   const pubClause = onlyPublished ? `AND ss.status = 'PUBLISHED' AND ex.status = 'PUBLISHED'` : '';
 
-  // Load ALL scores across ALL sessions and terms for this student
+  // Load ALL scores across ALL sessions and terms for this student (honoring exact credit_units_snapshot if registered)
   const allScores = await dbAll(
     `SELECT ss.*,
-            sub.name as subject_name, sub.code as subject_code, COALESCE(sub.credit_units, 3) as credit_units,
+            sub.name as subject_name, sub.code as subject_code,
+            COALESCE(scr.credit_units_snapshot, sub.credit_units, 3) as credit_units,
             ex.title as exam_title, ex.ca_max_score, ex.exam_max_score, ex.total_max_score, ex.class_id as exam_class_id, ex.created_at as exam_created_at,
             ses.name as session_name, ses.start_date as session_start_date, ses.end_date as session_end_date, ses.created_at as session_created_at,
             t.name as term_name, t.start_date as term_start_date, t.created_at as term_created_at
      FROM student_scores ss
      JOIN subjects sub ON ss.subject_id = sub.id
      JOIN examinations ex ON ss.examination_id = ex.id
+     LEFT JOIN student_course_registrations scr
+       ON scr.school_id = ss.school_id
+      AND scr.student_id = ss.student_id
+      AND scr.academic_session_id = ss.academic_session_id
+      AND scr.term_id = ss.term_id
+      AND scr.subject_id = ss.subject_id
+      AND scr.status != 'DROPPED'
      LEFT JOIN academic_sessions ses ON ss.academic_session_id = ses.id
      LEFT JOIN terms t ON ss.term_id = t.id
      WHERE ss.school_id = $1 AND ss.student_id = $2
@@ -426,13 +434,21 @@ export async function compileCareerTranscript(
        ${pubClause}
      ORDER BY ex.created_at DESC`,
     `SELECT ss.*,
-            sub.name as subject_name, sub.code as subject_code, COALESCE(sub.credit_units, 3) as credit_units,
+            sub.name as subject_name, sub.code as subject_code,
+            COALESCE(scr.credit_units_snapshot, sub.credit_units, 3) as credit_units,
             ex.title as exam_title, ex.ca_max_score, ex.exam_max_score, ex.total_max_score, ex.class_id as exam_class_id, ex.created_at as exam_created_at,
             ses.name as session_name, ses.start_date as session_start_date, ses.end_date as session_end_date, ses.created_at as session_created_at,
             t.name as term_name, t.start_date as term_start_date, t.created_at as term_created_at
      FROM student_scores ss
      JOIN subjects sub ON ss.subject_id = sub.id
      JOIN examinations ex ON ss.examination_id = ex.id
+     LEFT JOIN student_course_registrations scr
+       ON scr.school_id = ss.school_id
+      AND scr.student_id = ss.student_id
+      AND scr.academic_session_id = ss.academic_session_id
+      AND scr.term_id = ss.term_id
+      AND scr.subject_id = ss.subject_id
+      AND scr.status != 'DROPPED'
      LEFT JOIN academic_sessions ses ON ss.academic_session_id = ses.id
      LEFT JOIN terms t ON ss.term_id = t.id
      WHERE ss.school_id = ? AND ss.student_id = ?
@@ -596,7 +612,8 @@ export async function compileCareerTranscript(
       );
 
       const compiledCourses = sortedTermScores.map((s) => {
-        const units = Number(s.credit_units) > 0 ? Number(s.credit_units) : 3;
+        const rawUnits = s.credit_units !== null && s.credit_units !== undefined ? Number(s.credit_units) : 3;
+        const units = Number.isFinite(rawUnits) && rawUnits >= 0 ? Math.round(rawUnits) : 3;
         const maxScore = Number(s.total_max_score) > 0 ? Number(s.total_max_score) : 100;
         const rawScore = Number(s.total_score ?? 0);
         const pct = Math.round(((rawScore / maxScore) * 100) * 100) / 100;

@@ -121,6 +121,10 @@ export const MIGRATION_ORDER = [
   'cbt_exams',
   'cbt_questions',
   'cbt_attempts',
+  'student_promotion_batches',
+  'student_enrollment_history',
+  'career_transcripts',
+  'student_course_registrations',
 ];
 
 /**

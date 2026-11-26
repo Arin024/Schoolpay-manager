@@ -576,24 +576,28 @@ export const PublicSchoolWebsite: React.FC<PublicSchoolWebsiteProps> = ({
                   `Official digital campus, academic portal, news updates, and admissions gateway for ${school.name}.`}
               </p>
               <div className="pt-1 flex flex-wrap items-center gap-2.5">
-                <button
-                  type="button"
-                  onClick={() => scrollToSection('school-admissions')}
-                  className={`px-4 py-2 text-xs font-bold text-white ${theme.buttonBg} ${theme.buttonHover} rounded-xl transition-colors inline-flex items-center gap-1.5 cursor-pointer shadow-sm`}
-                >
-                  <GraduationCap className="w-4 h-4" />
-                  <span>Prospective Student Admissions Form</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={handleEnterCbtHall}
-                  className="px-4 py-2 text-xs font-bold text-white bg-white/15 hover:bg-white/25 border border-white/20 rounded-xl transition-colors inline-flex items-center gap-1.5 cursor-pointer"
-                >
-                  <MonitorCheck className="w-4 h-4 text-emerald-300" />
-                  <span>
-                    Enter CBT Exam Hall{cbtSummary && cbtSummary.activeExamsCount > 0 ? ` (${cbtSummary.activeExamsCount} Live)` : ''}
-                  </span>
-                </button>
+                {Number(website.show_admissions_form ?? 1) === 1 && (
+                  <button
+                    type="button"
+                    onClick={() => scrollToSection('school-admissions')}
+                    className={`px-4 py-2 text-xs font-bold text-white ${theme.buttonBg} ${theme.buttonHover} rounded-xl transition-colors inline-flex items-center gap-1.5 cursor-pointer shadow-sm`}
+                  >
+                    <GraduationCap className="w-4 h-4" />
+                    <span>Prospective {instProfile.isTertiary ? 'Student' : 'Learner'} Admissions Form</span>
+                  </button>
+                )}
+                {Number(website.show_cbt_hall ?? 1) === 1 && (
+                  <button
+                    type="button"
+                    onClick={handleEnterCbtHall}
+                    className="px-4 py-2 text-xs font-bold text-white bg-white/15 hover:bg-white/25 border border-white/20 rounded-xl transition-colors inline-flex items-center gap-1.5 cursor-pointer"
+                  >
+                    <MonitorCheck className="w-4 h-4 text-emerald-300" />
+                    <span>
+                      Enter CBT Exam Hall{cbtSummary && cbtSummary.activeExamsCount > 0 ? ` (${cbtSummary.activeExamsCount} Live)` : ''}
+                    </span>
+                  </button>
+                )}
               </div>
             </div>
 
@@ -630,27 +634,85 @@ export const PublicSchoolWebsite: React.FC<PublicSchoolWebsiteProps> = ({
               </div>
             </div>
 
-            {/* School Facts & Contact Strip */}
-            <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 pt-4 border-t border-white/15 text-xs">
-              <div>
-                <p className="text-slate-300">Enrolled Learners</p>
-                <p className="text-lg font-bold text-white tabular-nums mt-0.5">{stats?.studentsCount ?? 0}</p>
-              </div>
-              <div>
-                <p className="text-slate-300">Academic Classes</p>
-                <p className="text-lg font-bold text-white tabular-nums mt-0.5">{stats?.classesCount ?? 0}</p>
-              </div>
-              <div>
-                <p className="text-slate-300">Teaching Staff</p>
-                <p className="text-lg font-bold text-white tabular-nums mt-0.5">{stats?.staffCount ?? 0}</p>
-              </div>
-              <div>
-                <p className="text-slate-300">Admissions</p>
-                <p className="text-sm font-bold text-emerald-300 mt-1">
-                  {website.admissions_open ? 'Currently Open' : 'By Inquiry'}
-                </p>
-              </div>
-            </div>
+            {/* School Facts & Contact Strip (Privacy-Respecting) */}
+            {(() => {
+              const factItems: Array<{ label: string; value: string; accent?: boolean; numeric?: boolean }> = [];
+              if (
+                Number(website.show_enrollment_count ?? 0) === 1 &&
+                stats?.studentsCount !== null &&
+                stats?.studentsCount !== undefined
+              ) {
+                factItems.push({
+                  label: instProfile.isTertiary ? 'Enrolled Students' : 'Enrolled Learners',
+                  value: String(stats.studentsCount),
+                  numeric: true,
+                });
+              }
+              if (
+                Number(website.show_classes_count ?? 1) === 1 &&
+                stats?.classesCount !== null &&
+                stats?.classesCount !== undefined
+              ) {
+                factItems.push({
+                  label: `Academic ${instLabels.classPlural}`,
+                  value: String(stats.classesCount),
+                  numeric: true,
+                });
+              }
+              if (
+                Number(website.show_staff_count ?? 0) === 1 &&
+                stats?.staffCount !== null &&
+                stats?.staffCount !== undefined
+              ) {
+                factItems.push({
+                  label: instLabels.staffPlural,
+                  value: String(stats.staffCount),
+                  numeric: true,
+                });
+              }
+              factItems.push({
+                label: 'Current Session',
+                value: [settings?.current_academic_session, settings?.current_term].filter(Boolean).join(' · ') || 'Active Session',
+              });
+              factItems.push({
+                label: 'Admissions',
+                value: website.admissions_open ? 'Currently Open' : 'By Inquiry',
+                accent: true,
+              });
+              if (factItems.length < 4) {
+                factItems.push({
+                  label: 'Digital Portal',
+                  value: 'Verified & Live',
+                });
+              }
+              const visibleFacts = factItems.slice(0, 4);
+              const gridClass =
+                visibleFacts.length <= 2
+                  ? 'grid-cols-2'
+                  : visibleFacts.length === 3
+                    ? 'grid-cols-2 sm:grid-cols-3'
+                    : 'grid-cols-2 sm:grid-cols-4';
+              return (
+                <div className={`grid ${gridClass} gap-4 pt-4 border-t border-white/15 text-xs`}>
+                  {visibleFacts.map((item) => (
+                    <div key={item.label}>
+                      <p className="text-slate-300">{item.label}</p>
+                      <p
+                        className={
+                          item.numeric
+                            ? 'text-lg font-bold text-white tabular-nums mt-0.5'
+                            : item.accent
+                              ? 'text-sm font-bold text-emerald-300 mt-1'
+                              : 'text-sm font-bold text-white mt-1'
+                        }
+                      >
+                        {item.value}
+                      </p>
+                    </div>
+                  ))}
+                </div>
+              );
+            })()}
           </div>
         </div>
 
@@ -695,49 +757,51 @@ export const PublicSchoolWebsite: React.FC<PublicSchoolWebsiteProps> = ({
       </section>
 
       {/* Public CBT Examination Hall Schedule Strip */}
-      <section id="school-cbt-hall" className="scroll-mt-24 bg-white rounded-2xl border border-slate-200 p-5 sm:p-7 space-y-4 min-w-0">
-        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-          <div className="space-y-1">
-            <p className={`text-xs font-bold ${theme.accentText}`}>Digital Examinations</p>
-            <h2 className="text-xl font-bold text-slate-900 tracking-tight flex items-center gap-2">
-              <MonitorCheck className="w-5 h-5 text-emerald-600 shrink-0" />
-              <span>School CBT Examination Hall</span>
-            </h2>
-            <p className="text-xs text-slate-600">
-              Students sign in with their school Admission Number to take scheduled Computer-Based Tests across their assigned class.
-            </p>
+      {Number(website.show_cbt_hall ?? 1) === 1 && (
+        <section id="school-cbt-hall" className="scroll-mt-24 bg-white rounded-2xl border border-slate-200 p-5 sm:p-7 space-y-4 min-w-0">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div className="space-y-1">
+              <p className={`text-xs font-bold ${theme.accentText}`}>Digital Examinations</p>
+              <h2 className="text-xl font-bold text-slate-900 tracking-tight flex items-center gap-2">
+                <MonitorCheck className="w-5 h-5 text-emerald-600 shrink-0" />
+                <span>{instLabels.institution} CBT Examination Hall</span>
+              </h2>
+              <p className="text-xs text-slate-600">
+                {instProfile.isTertiary ? 'Students' : 'Learners'} sign in with their {instLabels.studentId} to take scheduled Computer-Based Tests across their assigned {instLabels.classLabel.toLowerCase()}.
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={handleEnterCbtHall}
+              className={`px-4 py-2.5 rounded-xl text-white text-xs font-bold ${theme.buttonBg} ${theme.buttonHover} inline-flex items-center gap-1.5 cursor-pointer shrink-0 self-start sm:self-auto`}
+            >
+              <MonitorCheck className="w-4 h-4" />
+              <span>{instProfile.isTertiary ? 'Student' : 'Learner'} CBT Sign-In</span>
+            </button>
           </div>
-          <button
-            type="button"
-            onClick={handleEnterCbtHall}
-            className={`px-4 py-2.5 rounded-xl text-white text-xs font-bold ${theme.buttonBg} ${theme.buttonHover} inline-flex items-center gap-1.5 cursor-pointer shrink-0 self-start sm:self-auto`}
-          >
-            <MonitorCheck className="w-4 h-4" />
-            <span>Student CBT Sign-In</span>
-          </button>
-        </div>
 
-        {cbtSummary && cbtSummary.exams.length > 0 ? (
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3.5 text-xs">
-            {cbtSummary.exams.map((ex) => (
-              <div key={ex.id} className="p-4 rounded-xl bg-slate-50 border border-slate-200 space-y-1.5">
-                <p className="text-[11px] font-bold text-emerald-700 uppercase">
-                  {ex.subject_name} · {ex.class_name}
-                </p>
-                <p className="text-sm font-bold text-slate-900">{ex.title}</p>
-                <p className="text-slate-600 inline-flex items-center gap-2 tabular-nums">
-                  <Clock className="w-3.5 h-3.5 text-slate-400" />
-                  <span>{ex.duration_minutes} mins · {ex.total_questions} question{ex.total_questions === 1 ? '' : 's'}</span>
-                </p>
-              </div>
-            ))}
-          </div>
-        ) : (
-          <p className="text-xs text-slate-500 bg-slate-50 border border-slate-200 rounded-xl p-4">
-            No live public CBT schedule listed right now. Enrolled students can sign in anytime to view their class CBT assessments and past results.
-          </p>
-        )}
-      </section>
+          {cbtSummary && cbtSummary.exams.length > 0 ? (
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3.5 text-xs">
+              {cbtSummary.exams.map((ex) => (
+                <div key={ex.id} className="p-4 rounded-xl bg-slate-50 border border-slate-200 space-y-1.5">
+                  <p className="text-[11px] font-bold text-emerald-700 uppercase">
+                    {ex.subject_name} · {ex.class_name}
+                  </p>
+                  <p className="text-sm font-bold text-slate-900">{ex.title}</p>
+                  <p className="text-slate-600 inline-flex items-center gap-2 tabular-nums">
+                    <Clock className="w-3.5 h-3.5 text-slate-400" />
+                    <span>{ex.duration_minutes} mins · {ex.total_questions} question{ex.total_questions === 1 ? '' : 's'}</span>
+                  </p>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <p className="text-xs text-slate-500 bg-slate-50 border border-slate-200 rounded-xl p-4">
+              No live public CBT schedule listed right now. Enrolled {instProfile.isTertiary ? 'students' : 'learners'} can sign in anytime to view their {instLabels.classLabel.toLowerCase()} CBT assessments and past results.
+            </p>
+          )}
+        </section>
+      )}
 
       {/* About, Vision, Mission & Principal's Welcome */}
       <section id="school-about" className="scroll-mt-24 grid grid-cols-1 lg:grid-cols-12 gap-6 min-w-0">
@@ -1015,10 +1079,15 @@ export const PublicSchoolWebsite: React.FC<PublicSchoolWebsiteProps> = ({
       {/* Upcoming School Calendar & Prospective Admissions Inquiry */}
       <section className="grid grid-cols-1 lg:grid-cols-12 gap-6 min-w-0">
         {/* Public Calendar Events */}
-        <div id="school-calendar" className="scroll-mt-24 lg:col-span-5 min-w-0 bg-white rounded-2xl border border-slate-200 p-5 sm:p-7 space-y-5">
+        <div
+          id="school-calendar"
+          className={`scroll-mt-24 ${
+            Number(website.show_admissions_form ?? 1) === 1 ? 'lg:col-span-5' : 'lg:col-span-12'
+          } min-w-0 bg-white rounded-2xl border border-slate-200 p-5 sm:p-7 space-y-5`}
+        >
           <div>
             <p className={`text-xs font-bold ${theme.accentText}`}>Upcoming Dates</p>
-            <h2 className="text-xl font-bold text-slate-900 tracking-tight">School Events Calendar</h2>
+            <h2 className="text-xl font-bold text-slate-900 tracking-tight">{instLabels.institution} Events Calendar</h2>
           </div>
 
           {events.length === 0 ? (
@@ -1048,6 +1117,7 @@ export const PublicSchoolWebsite: React.FC<PublicSchoolWebsiteProps> = ({
         </div>
 
         {/* Prospective Admissions Inquiry Form */}
+        {Number(website.show_admissions_form ?? 1) === 1 && (
         <div id="school-admissions" className="scroll-mt-24 lg:col-span-7 min-w-0 bg-white rounded-2xl border border-slate-200 p-5 sm:p-7 space-y-5">
           <div className="space-y-1">
             <p className={`text-xs font-bold ${theme.accentText}`}>Admissions &amp; Parent Inquiries</p>
@@ -1177,6 +1247,7 @@ export const PublicSchoolWebsite: React.FC<PublicSchoolWebsiteProps> = ({
             </div>
           </form>
         </div>
+        )}
       </section>
 
       {/* Article Reader Modal */}

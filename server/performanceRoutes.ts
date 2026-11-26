@@ -160,6 +160,8 @@ performanceRouter.put(
       students_can_view_fees = true,
       teachers_can_view_fees = false,
       require_review_before_approve = false,
+      min_credit_units_per_cycle,
+      max_credit_units_per_cycle,
     } = req.body || {};
 
     const caMax = Number(ca_max_score);
@@ -179,14 +181,21 @@ performanceRouter.put(
     const stuFees = students_can_view_fees ? 1 : 0;
     const tchFees = teachers_can_view_fees ? 1 : 0;
     const reqRev = require_review_before_approve ? 1 : 0;
+    const existingSet = await getSchoolAcademicSettings(schoolId);
+    const minUnits = min_credit_units_per_cycle !== undefined && Number.isFinite(Number(min_credit_units_per_cycle))
+      ? Math.max(0, Math.min(60, Math.round(Number(min_credit_units_per_cycle))))
+      : Number(existingSet.min_credit_units_per_cycle ?? 12);
+    const maxUnits = max_credit_units_per_cycle !== undefined && Number.isFinite(Number(max_credit_units_per_cycle))
+      ? Math.max(minUnits, Math.min(80, Math.round(Number(max_credit_units_per_cycle))))
+      : Math.max(minUnits, Number(existingSet.max_credit_units_per_cycle ?? 24));
     const id = `acad_set_${schoolId}`;
 
     await execWrite(
       `INSERT INTO school_academic_settings (
          id, school_id, ca_max_score, exam_max_score, component_structure_json, grading_scale_json,
          missing_score_policy, show_class_position, students_can_view_fees, teachers_can_view_fees,
-         require_review_before_approve, updated_by, created_at, updated_at
-       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+         require_review_before_approve, min_credit_units_per_cycle, max_credit_units_per_cycle, updated_by, created_at, updated_at
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
        ON CONFLICT (school_id) DO UPDATE SET
          ca_max_score = EXCLUDED.ca_max_score,
          exam_max_score = EXCLUDED.exam_max_score,
@@ -197,13 +206,15 @@ performanceRouter.put(
          students_can_view_fees = EXCLUDED.students_can_view_fees,
          teachers_can_view_fees = EXCLUDED.teachers_can_view_fees,
          require_review_before_approve = EXCLUDED.require_review_before_approve,
+         min_credit_units_per_cycle = EXCLUDED.min_credit_units_per_cycle,
+         max_credit_units_per_cycle = EXCLUDED.max_credit_units_per_cycle,
          updated_by = EXCLUDED.updated_by,
          updated_at = CURRENT_TIMESTAMP`,
       `INSERT INTO school_academic_settings (
          id, school_id, ca_max_score, exam_max_score, component_structure_json, grading_scale_json,
          missing_score_policy, show_class_position, students_can_view_fees, teachers_can_view_fees,
-         require_review_before_approve, updated_by, created_at, updated_at
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+         require_review_before_approve, min_credit_units_per_cycle, max_credit_units_per_cycle, updated_by, created_at, updated_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
        ON CONFLICT(school_id) DO UPDATE SET
          ca_max_score = excluded.ca_max_score,
          exam_max_score = excluded.exam_max_score,
@@ -214,9 +225,11 @@ performanceRouter.put(
          students_can_view_fees = excluded.students_can_view_fees,
          teachers_can_view_fees = excluded.teachers_can_view_fees,
          require_review_before_approve = excluded.require_review_before_approve,
+         min_credit_units_per_cycle = excluded.min_credit_units_per_cycle,
+         max_credit_units_per_cycle = excluded.max_credit_units_per_cycle,
          updated_by = excluded.updated_by,
          updated_at = CURRENT_TIMESTAMP`,
-      [id, schoolId, caMax, examMax, compJson, scaleJson, missingPolicy, showPos, stuFees, tchFees, reqRev, req.user!.id]
+      [id, schoolId, caMax, examMax, compJson, scaleJson, missingPolicy, showPos, stuFees, tchFees, reqRev, minUnits, maxUnits, req.user!.id]
     );
 
     logAudit({
@@ -227,7 +240,7 @@ performanceRouter.put(
       entity: 'SCHOOL_ACADEMIC_SETTINGS',
       entityId: id,
       ipAddress: req.ip,
-      metadata: { caMax, examMax, missingPolicy, showPos, stuFees, tchFees, reqRev },
+      metadata: { caMax, examMax, missingPolicy, showPos, stuFees, tchFees, reqRev, minUnits, maxUnits },
     });
 
     const updated = await getSchoolAcademicSettings(schoolId);
@@ -606,34 +619,69 @@ performanceRouter.post(
   requireRole(ADMIN_ONLY_ROLES),
   async (req: AuthenticatedRequest, res) => {
     const schoolId = req.targetSchoolId!;
-    const { name, code, department, class_id, status = 'ACTIVE', credit_units } = req.body || {};
+    const {
+      name,
+      code,
+      department,
+      class_id,
+      status = 'ACTIVE',
+      credit_units,
+      course_type = 'CORE',
+      semester_tag,
+    } = req.body || {};
 
     if (!name || typeof name !== 'string' || !name.trim()) {
       return res.status(400).json({ error: 'MISSING_NAME', message: 'Subject/Course name is required.' });
     }
     const cleanName = name.trim();
+    const cleanClassId = class_id && String(class_id).trim() ? String(class_id).trim() : null;
+    const cleanCode = code && String(code).trim()
+      ? String(code).trim().toUpperCase().slice(0, 24)
+      : cleanName.replace(/[^A-Za-z0-9]/g, '').slice(0, 6).toUpperCase() || 'SUB';
+
     const dup = await dbGet(
-      `SELECT id FROM subjects WHERE school_id = $1 AND LOWER(name) = LOWER($2) AND (is_deleted = 0 OR is_deleted IS NULL)`,
-      `SELECT id FROM subjects WHERE school_id = ? AND LOWER(name) = LOWER(?) AND (is_deleted = 0 OR is_deleted IS NULL)`,
-      [schoolId, cleanName]
+      `SELECT id FROM subjects
+       WHERE school_id = $1
+         AND COALESCE(class_id, '') = COALESCE($2, '')
+         AND (LOWER(name) = LOWER($3) OR (code IS NOT NULL AND LOWER(code) = LOWER($4)))
+         AND (is_deleted = 0 OR is_deleted IS NULL)`,
+      `SELECT id FROM subjects
+       WHERE school_id = ?
+         AND COALESCE(class_id, '') = COALESCE(?, '')
+         AND (LOWER(name) = LOWER(?) OR (code IS NOT NULL AND LOWER(code) = LOWER(?)))
+         AND (is_deleted = 0 OR is_deleted IS NULL)`,
+      [schoolId, cleanClassId || '', cleanName, cleanCode]
     );
     if (dup) {
-      return res.status(409).json({ error: 'DUPLICATE_SUBJECT', message: `"${cleanName}" already exists.` });
+      return res.status(409).json({
+        error: 'DUPLICATE_SUBJECT',
+        message: `"${cleanName}" (${cleanCode}) already exists for this class/level scope.`,
+      });
     }
 
     const id = newId('sub');
-    const cleanCode = code ? String(code).trim().toUpperCase() : cleanName.slice(0, 4).toUpperCase();
     const validStatus = status === 'INACTIVE' ? 'INACTIVE' : 'ACTIVE';
-    const parsedUnits = Number(credit_units);
-    const cleanUnits = Number.isFinite(parsedUnits) && parsedUnits >= 1 && parsedUnits <= 12 ? Math.round(parsedUnits) : 3;
+    const hasExplicitUnits = credit_units !== undefined && credit_units !== null && String(credit_units).trim() !== '';
+    const parsedUnits = hasExplicitUnits ? Number(credit_units) : 3;
+    const cleanUnits =
+      Number.isFinite(parsedUnits) && parsedUnits >= 0 && parsedUnits <= 12
+        ? Math.round(parsedUnits)
+        : 3;
+    const validCourseType = ['CORE', 'ELECTIVE', 'GENERAL', 'CARRYOVER', 'PRACTICAL'].includes(
+      String(course_type || 'CORE').toUpperCase()
+    )
+      ? String(course_type || 'CORE').toUpperCase()
+      : 'CORE';
+    const cleanSemesterTag = semester_tag && String(semester_tag).trim() ? String(semester_tag).trim().slice(0, 64) : null;
+    const cleanDepartment = department && String(department).trim() ? String(department).trim() : null;
 
     await execWrite(
-      `INSERT INTO subjects (id, school_id, name, code, department, class_id, credit_units, status, is_deleted, created_at, updated_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
-      `INSERT INTO subjects (id, school_id, name, code, department, class_id, credit_units, status, is_deleted, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-       ON CONFLICT(id) DO UPDATE SET name = excluded.name, credit_units = excluded.credit_units`,
-      [id, schoolId, cleanName, cleanCode, department || null, class_id || null, cleanUnits, validStatus]
+      `INSERT INTO subjects (id, school_id, name, code, department, class_id, credit_units, course_type, semester_tag, status, is_deleted, created_at, updated_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+      `INSERT INTO subjects (id, school_id, name, code, department, class_id, credit_units, course_type, semester_tag, status, is_deleted, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+       ON CONFLICT(id) DO UPDATE SET name = excluded.name, credit_units = excluded.credit_units, course_type = excluded.course_type, semester_tag = excluded.semester_tag`,
+      [id, schoolId, cleanName, cleanCode, cleanDepartment, cleanClassId, cleanUnits, validCourseType, cleanSemesterTag, validStatus]
     );
 
     logAudit({
@@ -643,10 +691,14 @@ performanceRouter.post(
       action: 'CREATE_SUBJECT',
       entity: 'SUBJECT',
       entityId: id,
-      metadata: { name: cleanName, code: cleanCode, credit_units: cleanUnits },
+      metadata: { name: cleanName, code: cleanCode, credit_units: cleanUnits, course_type: validCourseType, class_id: cleanClassId },
     });
 
-    const subject = await dbGet(`SELECT * FROM subjects WHERE id = $1`, `SELECT * FROM subjects WHERE id = ?`, [id]);
+    const subject = await dbGet(
+      `SELECT sub.*, c.name as class_name FROM subjects sub LEFT JOIN classes c ON sub.class_id = c.id WHERE sub.id = $1`,
+      `SELECT sub.*, c.name as class_name FROM subjects sub LEFT JOIN classes c ON sub.class_id = c.id WHERE sub.id = ?`,
+      [id]
+    );
     return res.status(201).json({ success: true, subject });
   }
 );
@@ -659,7 +711,8 @@ performanceRouter.put(
   async (req: AuthenticatedRequest, res) => {
     const schoolId = req.targetSchoolId!;
     const { id } = req.params;
-    const { name, code, department, class_id, status, credit_units } = req.body || {};
+    const body = req.body || {};
+    const { name, code, department, class_id, status, credit_units, course_type, semester_tag } = body;
 
     const existing = await dbGet(
       `SELECT * FROM subjects WHERE id = $1 AND school_id = $2`,
@@ -670,22 +723,51 @@ performanceRouter.put(
       return res.status(404).json({ error: 'NOT_FOUND', message: 'Subject not found.' });
     }
 
-    const parsedUnits = credit_units !== undefined && credit_units !== null ? Number(credit_units) : null;
-    const cleanUnits = parsedUnits !== null && Number.isFinite(parsedUnits) && parsedUnits >= 1 && parsedUnits <= 12 ? Math.round(parsedUnits) : null;
+    const nextName = name !== undefined && String(name).trim() ? String(name).trim() : existing.name;
+    const nextCode = code !== undefined && String(code).trim() ? String(code).trim().toUpperCase().slice(0, 24) : existing.code;
+    const nextDepartment = Object.prototype.hasOwnProperty.call(body, 'department')
+      ? (department && String(department).trim() ? String(department).trim() : null)
+      : existing.department;
+    const nextClassId = Object.prototype.hasOwnProperty.call(body, 'class_id')
+      ? (class_id && String(class_id).trim() ? String(class_id).trim() : null)
+      : existing.class_id;
+    const nextSemesterTag = Object.prototype.hasOwnProperty.call(body, 'semester_tag')
+      ? (semester_tag && String(semester_tag).trim() ? String(semester_tag).trim().slice(0, 64) : null)
+      : existing.semester_tag || null;
+    const nextCourseType = course_type !== undefined && ['CORE', 'ELECTIVE', 'GENERAL', 'CARRYOVER', 'PRACTICAL'].includes(String(course_type).toUpperCase())
+      ? String(course_type).toUpperCase()
+      : (existing.course_type || 'CORE');
+    const nextStatus = status === 'INACTIVE' ? 'INACTIVE' : status === 'ACTIVE' ? 'ACTIVE' : (existing.status || 'ACTIVE');
+
+    let nextUnits = existing.credit_units !== null && existing.credit_units !== undefined ? Number(existing.credit_units) : 3;
+    if (Object.prototype.hasOwnProperty.call(body, 'credit_units') && credit_units !== null && credit_units !== undefined && String(credit_units).trim() !== '') {
+      const parsedUnits = Number(credit_units);
+      if (!Number.isFinite(parsedUnits) || parsedUnits < 0 || parsedUnits > 12) {
+        return res.status(400).json({
+          error: 'INVALID_CREDIT_UNITS',
+          message: 'Credit units must be a whole number between 0 and 12.',
+        });
+      }
+      nextUnits = Math.round(parsedUnits);
+    }
 
     await execWrite(
       `UPDATE subjects
-       SET name = COALESCE($1, name), code = COALESCE($2, code), department = COALESCE($3, department),
-           class_id = COALESCE($4, class_id), credit_units = COALESCE($5, credit_units), status = COALESCE($6, status), updated_at = CURRENT_TIMESTAMP
-       WHERE id = $7 AND school_id = $8`,
+       SET name = $1, code = $2, department = $3, class_id = $4, credit_units = $5,
+           course_type = $6, semester_tag = $7, status = $8, updated_at = CURRENT_TIMESTAMP
+       WHERE id = $9 AND school_id = $10`,
       `UPDATE subjects
-       SET name = COALESCE(?, name), code = COALESCE(?, code), department = COALESCE(?, department),
-           class_id = COALESCE(?, class_id), credit_units = COALESCE(?, credit_units), status = COALESCE(?, status), updated_at = CURRENT_TIMESTAMP
+       SET name = ?, code = ?, department = ?, class_id = ?, credit_units = ?,
+           course_type = ?, semester_tag = ?, status = ?, updated_at = CURRENT_TIMESTAMP
        WHERE id = ? AND school_id = ?`,
-      [name?.trim() || null, code?.trim().toUpperCase() || null, department ?? null, class_id ?? null, cleanUnits, status || null, id, schoolId]
+      [nextName, nextCode, nextDepartment, nextClassId, nextUnits, nextCourseType, nextSemesterTag, nextStatus, id, schoolId]
     );
 
-    const subject = await dbGet(`SELECT * FROM subjects WHERE id = $1`, `SELECT * FROM subjects WHERE id = ?`, [id]);
+    const subject = await dbGet(
+      `SELECT sub.*, c.name as class_name FROM subjects sub LEFT JOIN classes c ON sub.class_id = c.id WHERE sub.id = $1`,
+      `SELECT sub.*, c.name as class_name FROM subjects sub LEFT JOIN classes c ON sub.class_id = c.id WHERE sub.id = ?`,
+      [id]
+    );
     return res.json({ success: true, subject });
   }
 );

@@ -403,6 +403,14 @@ export async function initDatabase() {
             await client.query(mig010Sql);
             console.log('[Neon PostgreSQL] Verified/applied migration 010_student_progression_and_career_transcripts.sql');
           }
+
+          // Execute idempotent 011_course_registration_backlog_and_website_privacy.sql migration on Neon PostgreSQL
+          const mig011Path = path.resolve(process.cwd(), 'migrations/011_course_registration_backlog_and_website_privacy.sql');
+          if (fs.existsSync(mig011Path)) {
+            const mig011Sql = fs.readFileSync(mig011Path, 'utf8');
+            await client.query(mig011Sql);
+            console.log('[Neon PostgreSQL] Verified/applied migration 011_course_registration_backlog_and_website_privacy.sql');
+          }
         } finally {
           client.release();
         }
@@ -1028,15 +1036,94 @@ function migrateStep4Columns() {
     }
   }
 
-  // 2b. Ensure subjects table supports course credit_units for Higher Institutions (additive, default 3)
+  // 2b. Ensure subjects table supports course credit_units, course_type, semester_tag (additive)
   const subjectsTableExists = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='subjects'").get();
   if (subjectsTableExists) {
     const subCols = db.prepare('PRAGMA table_info(subjects)').all().map((c: any) => c.name);
-    if (!subCols.includes('credit_units')) {
+    for (const [col, def] of [
+      ['credit_units', 'INTEGER DEFAULT 3'],
+      ['course_type', "TEXT DEFAULT 'CORE'"],
+      ['semester_tag', 'TEXT'],
+    ] as const) {
+      if (!subCols.includes(col)) {
+        try {
+          db.exec(`ALTER TABLE subjects ADD COLUMN ${col} ${def};`);
+        } catch (e) {}
+      }
+    }
+  }
+
+  // 2b-ii. Ensure SQLite classes table has additive is_deleted column matching PostgreSQL
+  const classesTblExists = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='classes'").get();
+  if (classesTblExists) {
+    const clsCols = db.prepare('PRAGMA table_info(classes)').all().map((c: any) => c.name);
+    if (!clsCols.includes('is_deleted')) {
       try {
-        db.exec('ALTER TABLE subjects ADD COLUMN credit_units INTEGER DEFAULT 3;');
+        db.exec('ALTER TABLE classes ADD COLUMN is_deleted INTEGER DEFAULT 0;');
       } catch (e) {}
     }
+  }
+
+  // 2b-iii. Ensure school_academic_settings has min/max credit unit guardrails
+  const acadSettingsTbl = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='school_academic_settings'").get();
+  if (acadSettingsTbl) {
+    const asCols = db.prepare('PRAGMA table_info(school_academic_settings)').all().map((c: any) => c.name);
+    for (const [col, def] of [
+      ['min_credit_units_per_cycle', 'INTEGER DEFAULT 12'],
+      ['max_credit_units_per_cycle', 'INTEGER DEFAULT 24'],
+    ] as const) {
+      if (!asCols.includes(col)) {
+        try {
+          db.exec(`ALTER TABLE school_academic_settings ADD COLUMN ${col} ${def};`);
+        } catch (e) {}
+      }
+    }
+  }
+
+  // 2b-iv. Ensure school_website_profiles has privacy visibility toggles (hidden by default for enrollment & staff counts)
+  const webProfTbl = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='school_website_profiles'").get();
+  if (webProfTbl) {
+    const wpCols = db.prepare('PRAGMA table_info(school_website_profiles)').all().map((c: any) => c.name);
+    for (const [col, def] of [
+      ['show_enrollment_count', 'INTEGER DEFAULT 0'],
+      ['show_staff_count', 'INTEGER DEFAULT 0'],
+      ['show_classes_count', 'INTEGER DEFAULT 1'],
+      ['show_cbt_hall', 'INTEGER DEFAULT 1'],
+      ['show_admissions_form', 'INTEGER DEFAULT 1'],
+    ] as const) {
+      if (!wpCols.includes(col)) {
+        try {
+          db.exec(`ALTER TABLE school_website_profiles ADD COLUMN ${col} ${def};`);
+        } catch (e) {}
+      }
+    }
+  }
+
+  // 2b-v. Create student_course_registrations table in SQLite
+  try {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS student_course_registrations (
+        id TEXT PRIMARY KEY,
+        school_id TEXT NOT NULL REFERENCES schools(id) ON DELETE CASCADE,
+        student_id TEXT NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+        academic_session_id TEXT NOT NULL REFERENCES academic_sessions(id) ON DELETE CASCADE,
+        term_id TEXT NOT NULL REFERENCES terms(id) ON DELETE CASCADE,
+        class_id TEXT REFERENCES classes(id) ON DELETE SET NULL,
+        subject_id TEXT NOT NULL REFERENCES subjects(id) ON DELETE CASCADE,
+        credit_units_snapshot INTEGER DEFAULT 3,
+        registration_type TEXT DEFAULT 'REGULAR',
+        status TEXT DEFAULT 'REGISTERED',
+        registered_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(school_id, student_id, academic_session_id, term_id, subject_id)
+      );
+      CREATE INDEX IF NOT EXISTS idx_course_reg_school_ses_term ON student_course_registrations(school_id, academic_session_id, term_id);
+      CREATE INDEX IF NOT EXISTS idx_course_reg_student ON student_course_registrations(school_id, student_id, academic_session_id);
+      CREATE INDEX IF NOT EXISTS idx_course_reg_subject ON student_course_registrations(school_id, subject_id);
+    `);
+  } catch (e) {
+    console.warn('[DB Migration 011 SQLite Notice]', (e as any)?.message);
   }
 
   // 2c. Ensure students table has additive graduation & admission session columns + progression/career transcript tables

@@ -65,6 +65,11 @@ export const SchoolWebsiteManagerView: React.FC<SchoolWebsiteManagerViewProps> =
     theme_accent: 'emerald',
     admissions_open: 1,
     is_published: 1,
+    show_enrollment_count: 0,
+    show_staff_count: 0,
+    show_classes_count: 1,
+    show_cbt_hall: 1,
+    show_admissions_form: 1,
   });
 
   const [posts, setPosts] = useState<SchoolWebsitePost[]>([]);
@@ -139,7 +144,27 @@ export const SchoolWebsiteManagerView: React.FC<SchoolWebsiteManagerViewProps> =
 
       setUrls(profRes.urls);
       setSubdomainInput(profRes.urls?.portal_subdomain || '');
-      setProfileForm(profRes.website || { theme_accent: 'emerald', admissions_open: 1, is_published: 1 });
+      setProfileForm(
+        profRes.website
+          ? {
+              show_enrollment_count: 0,
+              show_staff_count: 0,
+              show_classes_count: 1,
+              show_cbt_hall: 1,
+              show_admissions_form: 1,
+              ...profRes.website,
+            }
+          : {
+              theme_accent: 'emerald',
+              admissions_open: 1,
+              is_published: 1,
+              show_enrollment_count: 0,
+              show_staff_count: 0,
+              show_classes_count: 1,
+              show_cbt_hall: 1,
+              show_admissions_form: 1,
+            }
+      );
       setPosts(postsRes.posts || []);
       setGallery(galRes.gallery || []);
       setEvents(evRes.events || []);
@@ -771,6 +796,94 @@ export const SchoolWebsiteManagerView: React.FC<SchoolWebsiteManagerViewProps> =
                     onChange={(e) => setProfileForm({ ...profileForm, principal_message: e.target.value })}
                     className="w-full px-3.5 py-2.5 bg-slate-50 border border-slate-300 rounded-xl"
                   />
+                </div>
+              </div>
+
+              {/* Front Page Privacy & Visitor Visibility Controls */}
+              <div className="pt-4 border-t border-slate-100 space-y-3">
+                <div>
+                  <h4 className="text-xs font-bold text-slate-900">
+                    Front Page Privacy &amp; Visitor Visibility Controls
+                  </h4>
+                  <p className="text-[11px] text-slate-500 mt-0.5">
+                    Control which institutional statistics and public sections visitors can view on your front page. Enrollment and staff counts are hidden by default and redacted server-side when turned off.
+                  </p>
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+                  <label className="flex items-start gap-2.5 p-3 rounded-xl border border-slate-200 bg-slate-50/70 hover:bg-slate-50 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={Number(profileForm.show_enrollment_count ?? 0) === 1}
+                      onChange={(e) =>
+                        setProfileForm({ ...profileForm, show_enrollment_count: e.target.checked ? 1 : 0 })
+                      }
+                      className="mt-0.5 rounded border-slate-300 text-emerald-600"
+                    />
+                    <div>
+                      <p className="font-semibold text-slate-900">Show Enrollment Count</p>
+                      <p className="text-[11px] text-slate-500">Hidden by default to protect internal student headcount.</p>
+                    </div>
+                  </label>
+
+                  <label className="flex items-start gap-2.5 p-3 rounded-xl border border-slate-200 bg-slate-50/70 hover:bg-slate-50 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={Number(profileForm.show_staff_count ?? 0) === 1}
+                      onChange={(e) =>
+                        setProfileForm({ ...profileForm, show_staff_count: e.target.checked ? 1 : 0 })
+                      }
+                      className="mt-0.5 rounded border-slate-300 text-emerald-600"
+                    />
+                    <div>
+                      <p className="font-semibold text-slate-900">Show Staff / Lecturer Count</p>
+                      <p className="text-[11px] text-slate-500">Hidden by default to protect internal workforce figures.</p>
+                    </div>
+                  </label>
+
+                  <label className="flex items-start gap-2.5 p-3 rounded-xl border border-slate-200 bg-slate-50/70 hover:bg-slate-50 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={Number(profileForm.show_classes_count ?? 1) === 1}
+                      onChange={(e) =>
+                        setProfileForm({ ...profileForm, show_classes_count: e.target.checked ? 1 : 0 })
+                      }
+                      className="mt-0.5 rounded border-slate-300 text-emerald-600"
+                    />
+                    <div>
+                      <p className="font-semibold text-slate-900">Show Classes / Levels Count</p>
+                      <p className="text-[11px] text-slate-500">Displays the number of active academic classes or levels.</p>
+                    </div>
+                  </label>
+
+                  <label className="flex items-start gap-2.5 p-3 rounded-xl border border-slate-200 bg-slate-50/70 hover:bg-slate-50 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={Number(profileForm.show_cbt_hall ?? 1) === 1}
+                      onChange={(e) =>
+                        setProfileForm({ ...profileForm, show_cbt_hall: e.target.checked ? 1 : 0 })
+                      }
+                      className="mt-0.5 rounded border-slate-300 text-emerald-600"
+                    />
+                    <div>
+                      <p className="font-semibold text-slate-900">Show Public CBT Exam Hall</p>
+                      <p className="text-[11px] text-slate-500">Lists scheduled public CBT exams and quick CBT login link.</p>
+                    </div>
+                  </label>
+
+                  <label className="flex items-start gap-2.5 p-3 rounded-xl border border-slate-200 bg-slate-50/70 hover:bg-slate-50 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={Number(profileForm.show_admissions_form ?? 1) === 1}
+                      onChange={(e) =>
+                        setProfileForm({ ...profileForm, show_admissions_form: e.target.checked ? 1 : 0 })
+                      }
+                      className="mt-0.5 rounded border-slate-300 text-emerald-600"
+                    />
+                    <div>
+                      <p className="font-semibold text-slate-900">Show Admissions Inquiry Form</p>
+                      <p className="text-[11px] text-slate-500">Allows prospective applicants &amp; parents to submit inquiries.</p>
+                    </div>
+                  </label>
                 </div>
               </div>
 

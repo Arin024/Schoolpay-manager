@@ -406,7 +406,7 @@ async function run() {
 
     // Open Classes & Arms view
     await cdp.clickButtonByText('Classes & Arms');
-    await cdp.waitForText('No classes configured for this school yet.');
+    await cdp.waitForText('No classes & arms configured yet.');
     await cdp.waitForText('Create Custom Class');
 
     // 4a. Create Custom Class with initial arms
@@ -422,7 +422,7 @@ async function run() {
 
     // 4b. Add multi-arms ("Diamond, Emerald") + Form Teacher
     await cdp.clickButtonByText('Add Arm');
-    await cdp.waitForText('Add Arm to Creche');
+    await cdp.waitForText('Add Arm / Stream to Creche');
     await cdp.fillInputByPlaceholder('e.g. Gold or Gold, Silver, Diamond', 'Diamond, Emerald');
     await cdp.evaluate(`
       const selects = Array.from(document.querySelectorAll('form select'));
@@ -474,7 +474,7 @@ async function run() {
     `);
     await cdp.waitForText('Remove Arm: Creche');
     await cdp.clickButtonByText('Confirm Remove');
-    await cdp.waitForText('ARMS / STREAMS (3)');
+    await cdp.waitForText('ARM / STREAMS (3)');
     console.log('  Delete Arm succeeded.');
 
     // 4e. Single-call Load Nigerian Classes

@@ -32,6 +32,9 @@ import {
   Commission,
   AcademicSettings,
   SubjectItem,
+  CourseRegistrationItem,
+  HistoricalBacklogInputRow,
+  ExamBroadsheetData,
   ExaminationItem,
   StudentScoreItem,
   ScoreCorrectionLogItem,
@@ -2103,7 +2106,16 @@ export const api = {
     });
   },
 
-  async createSubject(data: { name: string; code?: string; department?: string; class_id?: string; credit_units?: number; status?: string }): Promise<{ success: boolean; subject: SubjectItem }> {
+  async createSubject(data: {
+    name: string;
+    code?: string;
+    department?: string;
+    class_id?: string | null;
+    credit_units?: number;
+    course_type?: string;
+    semester_tag?: string | null;
+    status?: string;
+  }): Promise<{ success: boolean; subject: SubjectItem }> {
     return safeFetch(`${API_BASE}/school/subjects`, {
       method: 'POST',
       headers: getAuthHeaders(),
@@ -3417,7 +3429,226 @@ export const api = {
       headers: getAuthHeaders(),
     });
   },
+
+  // =========================================================================
+  // BULK SUBJECTS/COURSES, MODIFIABLE CREDIT UNITS, COURSE REGISTRATION,
+  // HISTORICAL BACKLOG ONBOARDING & MASTER BROADSHEET
+  // =========================================================================
+  async bulkUpsertSubjects(payload: {
+    courses: Array<{
+      name: string;
+      code?: string;
+      credit_units?: number;
+      department?: string | null;
+      class_id?: string | null;
+      class_name?: string | null;
+      course_type?: string;
+      semester_tag?: string | null;
+      status?: string;
+    }>;
+    update_existing?: boolean;
+  }): Promise<{
+    success: boolean;
+    message: string;
+    createdCount: number;
+    updatedCount: number;
+    skippedCount: number;
+    subjects: SubjectItem[];
+    errors: Array<{ row: number; message: string }>;
+  }> {
+    return safeFetch(`${API_BASE}/school/subjects/bulk`, {
+      method: 'POST',
+      headers: getAuthHeaders(),
+      body: JSON.stringify(payload),
+    });
+  },
+
+  async patchSubjectCreditUnits(
+    subjectId: string,
+    payload: { credit_units: number; sync_registrations?: boolean }
+  ): Promise<{ success: boolean; subject: SubjectItem }> {
+    return safeFetch(`${API_BASE}/school/subjects/${encodeURIComponent(subjectId)}/credit-units`, {
+      method: 'PATCH',
+      headers: getAuthHeaders(),
+      body: JSON.stringify(payload),
+    });
+  },
+
+  async getCourseRegistrations(params?: {
+    academic_session_id?: string;
+    term_id?: string;
+    class_id?: string;
+    student_id?: string;
+    subject_id?: string;
+  }): Promise<{
+    success: boolean;
+    count: number;
+    registrations: CourseRegistrationItem[];
+    studentSummaries: Array<{
+      student_id: string;
+      student_name: string;
+      admission_number: string | null;
+      class_name: string | null;
+      courses_count: number;
+      total_credit_units: number;
+      exceeds_max_units: boolean;
+      courses: CourseRegistrationItem[];
+    }>;
+    policy: { min_credit_units_per_cycle: number; max_credit_units_per_cycle: number };
+  }> {
+    const qs = new URLSearchParams();
+    if (params?.academic_session_id) qs.set('academic_session_id', params.academic_session_id);
+    if (params?.term_id) qs.set('term_id', params.term_id);
+    if (params?.class_id) qs.set('class_id', params.class_id);
+    if (params?.student_id) qs.set('student_id', params.student_id);
+    if (params?.subject_id) qs.set('subject_id', params.subject_id);
+    return safeFetch(`${API_BASE}/school/course-registrations?${qs.toString()}`, {
+      headers: getAuthHeaders(),
+    });
+  },
+
+  async bulkRegisterStudentCourses(payload: {
+    academic_session_id: string;
+    term_id: string;
+    class_id?: string | null;
+    student_ids?: string[];
+    subject_ids: Array<string | { subject_id: string; credit_units?: number; registration_type?: string }>;
+    registration_type?: 'REGULAR' | 'CARRYOVER' | 'ELECTIVE' | 'HISTORICAL';
+  }): Promise<{
+    success: boolean;
+    message: string;
+    registeredCount: number;
+    studentsAffected: number;
+    coursesPerStudent: number;
+  }> {
+    return safeFetch(`${API_BASE}/school/course-registrations/bulk`, {
+      method: 'POST',
+      headers: getAuthHeaders(),
+      body: JSON.stringify(payload),
+    });
+  },
+
+  async deleteCourseRegistration(registrationId: string): Promise<{ success: boolean; message: string }> {
+    return safeFetch(`${API_BASE}/school/course-registrations/${encodeURIComponent(registrationId)}`, {
+      method: 'DELETE',
+      headers: getAuthHeaders(),
+    });
+  },
+
+  async previewHistoricalBacklog(rows: HistoricalBacklogInputRow[]): Promise<{
+    success: boolean;
+    summary: {
+      total_rows: number;
+      valid_rows: number;
+      invalid_rows: number;
+      rows_with_scores: number;
+      rows_registration_only: number;
+      unique_students: number;
+      will_auto_create: {
+        sessions: string[];
+        classes: string[];
+        subjects: string[];
+      };
+    };
+    validRows: Array<{
+      row: number;
+      student_id: string;
+      student_name: string;
+      admission_number: string;
+      session_name: string;
+      term_name: string;
+      class_name: string;
+      subject_code: string;
+      subject_name: string;
+      credit_units: number;
+      ca_score: number | null;
+      exam_score: number | null;
+      total_score: number | null;
+      has_score: boolean;
+    }>;
+    invalidRows: Array<{ row: number; reason: string; raw: HistoricalBacklogInputRow }>;
+  }> {
+    return safeFetch(`${API_BASE}/school/historical-backlog/preview`, {
+      method: 'POST',
+      headers: getAuthHeaders(),
+      body: JSON.stringify({ rows }),
+    });
+  },
+
+  async importHistoricalBacklog(payload: {
+    rows: HistoricalBacklogInputRow[];
+    publish_scores?: boolean;
+  }): Promise<{
+    success: boolean;
+    message: string;
+    summary: {
+      rowsImported: number;
+      invalidRows: number;
+      sessionsCreated: number;
+      termsCreated: number;
+      classesCreated: number;
+      subjectsCreated: number;
+      registrationsSaved: number;
+      scoresSaved: number;
+    };
+    invalidRows: Array<{ row: number; reason: string }>;
+  }> {
+    return safeFetch(`${API_BASE}/school/historical-backlog/import`, {
+      method: 'POST',
+      headers: getAuthHeaders(),
+      body: JSON.stringify(payload),
+    });
+  },
+
+  async getExamBroadsheet(
+    examinationId: string,
+    classId?: string
+  ): Promise<{ success: boolean } & ExamBroadsheetData> {
+    const qs = classId ? `?class_id=${encodeURIComponent(classId)}` : '';
+    return safeFetch(`${API_BASE}/school/examinations/${encodeURIComponent(examinationId)}/broadsheet${qs}`, {
+      headers: getAuthHeaders(),
+    });
+  },
+
+  async getStudentCourseRegistrations(params?: {
+    academic_session_id?: string;
+    term_id?: string;
+  }): Promise<{
+    success: boolean;
+    registrations: CourseRegistrationItem[];
+    totalCourses: number;
+    totalCreditUnits: number;
+    minCreditUnits: number;
+    maxCreditUnits: number;
+  }> {
+    const qs = new URLSearchParams();
+    if (params?.academic_session_id) qs.set('academic_session_id', params.academic_session_id);
+    if (params?.term_id) qs.set('term_id', params.term_id);
+    return safeFetch(`${API_BASE}/portal/student/course-registrations?${qs.toString()}`, {
+      headers: getAuthHeaders(),
+    });
+  },
+
+  async getParentCourseRegistrations(
+    studentId: string,
+    params?: { academic_session_id?: string; term_id?: string }
+  ): Promise<{
+    success: boolean;
+    registrations: CourseRegistrationItem[];
+    totalCourses: number;
+    totalCreditUnits: number;
+    minCreditUnits: number;
+    maxCreditUnits: number;
+  }> {
+    const qs = new URLSearchParams({ student_id: studentId });
+    if (params?.academic_session_id) qs.set('academic_session_id', params.academic_session_id);
+    if (params?.term_id) qs.set('term_id', params.term_id);
+    return safeFetch(`${API_BASE}/portal/parent/course-registrations?${qs.toString()}`, {
+      headers: getAuthHeaders(),
+    });
+  },
 };
+
 
 
 

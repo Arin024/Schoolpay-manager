@@ -167,7 +167,16 @@ async function getOrBuildWebsiteProfile(school: any) {
     [school.id]
   );
 
-  if (existing) return existing;
+  if (existing) {
+    return {
+      ...existing,
+      show_enrollment_count: Number(existing.show_enrollment_count ?? 0),
+      show_staff_count: Number(existing.show_staff_count ?? 0),
+      show_classes_count: Number(existing.show_classes_count ?? 1),
+      show_cbt_hall: Number(existing.show_cbt_hall ?? 1),
+      show_admissions_form: Number(existing.show_admissions_form ?? 1),
+    };
+  }
 
   return {
     id: `web_${school.id}`,
@@ -178,22 +187,27 @@ async function getOrBuildWebsiteProfile(school: any) {
     hero_image_url: null,
     theme_accent: 'emerald',
     about_title: `About ${school.name}`,
-    about_body: `${school.name} delivers structured, NERDC-aligned instruction supported by dedicated educators, transparent family communication, and verifiable academic records.`,
-    vision: `To raise globally competitive, morally grounded students equipped for lifelong excellence.`,
-    mission: `To inspire academic diligence, good character, and seamless school-family collaboration.`,
+    about_body: `${school.name} delivers structured, accredited instruction supported by dedicated educators, transparent family communication, and verifiable academic records.`,
+    vision: `To raise globally competitive, morally grounded learners equipped for lifelong excellence.`,
+    mission: `To inspire academic diligence, good character, and seamless institutional collaboration.`,
     core_values: `Integrity · Academic Rigour · Discipline · Innovation · Community`,
     principal_name: null,
-    principal_title: 'The Principal / Head of School',
+    principal_title: 'Head of Institution',
     principal_message: `We welcome parents, guardians, students, and prospective families to the official digital campus of ${school.name}.`,
     principal_photo_url: null,
     admissions_open: 1,
-    admissions_summary: `Admissions are open across eligible classes. Submit an inquiry online or contact our Admissions Office directly.`,
+    admissions_summary: `Admissions are open across eligible classes and programmes. Submit an inquiry online or contact our Admissions Office directly.`,
     established_year: null,
-    facilities_text: `Science Laboratories · ICT Suite · School Library · Sports Grounds`,
+    facilities_text: `Science Laboratories · ICT Suite · Library · Sports & Activity Facilities`,
     social_whatsapp: null,
     social_facebook: null,
     social_instagram: null,
     is_published: 1,
+    show_enrollment_count: 0,
+    show_staff_count: 0,
+    show_classes_count: 1,
+    show_cbt_hall: 1,
+    show_admissions_form: 1,
   };
 }
 
@@ -333,39 +347,51 @@ publicWebsiteRouter.get('/schools/:slug/website', async (req, res) => {
     [school.id]
   );
 
-  const stuCountRow = await dbGet(
-    `SELECT COUNT(*) as c FROM students WHERE school_id = $1 AND (is_deleted = 0 OR is_deleted IS NULL)`,
-    `SELECT COUNT(*) as c FROM students WHERE school_id = ? AND (is_deleted = 0 OR is_deleted IS NULL)`,
-    [school.id]
-  );
-  const stfCountRow = await dbGet(
-    `SELECT COUNT(*) as c FROM staff WHERE school_id = $1 AND (is_deleted = 0 OR is_deleted IS NULL)`,
-    `SELECT COUNT(*) as c FROM staff WHERE school_id = ? AND (is_deleted = 0 OR is_deleted IS NULL)`,
-    [school.id]
-  );
+  const showEnrollment = Number(website.show_enrollment_count ?? 0) === 1;
+  const showStaff = Number(website.show_staff_count ?? 0) === 1;
+  const showClasses = Number(website.show_classes_count ?? 1) === 1;
+  const showCbtHall = Number(website.show_cbt_hall ?? 1) === 1;
+
+  // Strictly redact sensitive headcounts on the server when school privacy toggles are OFF
+  const stuCountRow = showEnrollment
+    ? await dbGet(
+        `SELECT COUNT(*) as c FROM students WHERE school_id = $1 AND (is_deleted = 0 OR is_deleted IS NULL)`,
+        `SELECT COUNT(*) as c FROM students WHERE school_id = ? AND (is_deleted = 0 OR is_deleted IS NULL)`,
+        [school.id]
+      )
+    : null;
+  const stfCountRow = showStaff
+    ? await dbGet(
+        `SELECT COUNT(*) as c FROM staff WHERE school_id = $1 AND (is_deleted = 0 OR is_deleted IS NULL)`,
+        `SELECT COUNT(*) as c FROM staff WHERE school_id = ? AND (is_deleted = 0 OR is_deleted IS NULL)`,
+        [school.id]
+      )
+    : null;
 
   // Strictly sanitized public CBT schedule summary (NEVER exposes questions, answers, or access codes)
   let publicCbtExams: any[] = [];
-  try {
-    publicCbtExams = await dbAll(
-      `SELECT e.id, e.title, e.subject_name, e.class_name, e.exam_mode, e.duration_minutes,
-              e.starts_at, e.ends_at,
-              (SELECT COUNT(*) FROM cbt_questions q WHERE q.cbt_exam_id = e.id AND (q.is_deleted = 0 OR q.is_deleted IS NULL)) as total_questions
-       FROM cbt_exams e
-       WHERE e.school_id = $1 AND e.status = 'PUBLISHED' AND (e.is_deleted = 0 OR e.is_deleted IS NULL)
-       ORDER BY e.created_at DESC
-       LIMIT 12`,
-      `SELECT e.id, e.title, e.subject_name, e.class_name, e.exam_mode, e.duration_minutes,
-              e.starts_at, e.ends_at,
-              (SELECT COUNT(*) FROM cbt_questions q WHERE q.cbt_exam_id = e.id AND (q.is_deleted = 0 OR q.is_deleted IS NULL)) as total_questions
-       FROM cbt_exams e
-       WHERE e.school_id = ? AND e.status = 'PUBLISHED' AND (e.is_deleted = 0 OR e.is_deleted IS NULL)
-       ORDER BY e.created_at DESC
-       LIMIT 12`,
-      [school.id]
-    );
-  } catch {
-    publicCbtExams = [];
+  if (showCbtHall) {
+    try {
+      publicCbtExams = await dbAll(
+        `SELECT e.id, e.title, e.subject_name, e.class_name, e.exam_mode, e.duration_minutes,
+                e.starts_at, e.ends_at,
+                (SELECT COUNT(*) FROM cbt_questions q WHERE q.cbt_exam_id = e.id AND (q.is_deleted = 0 OR q.is_deleted IS NULL)) as total_questions
+         FROM cbt_exams e
+         WHERE e.school_id = $1 AND e.status = 'PUBLISHED' AND (e.is_deleted = 0 OR e.is_deleted IS NULL)
+         ORDER BY e.created_at DESC
+         LIMIT 12`,
+        `SELECT e.id, e.title, e.subject_name, e.class_name, e.exam_mode, e.duration_minutes,
+                e.starts_at, e.ends_at,
+                (SELECT COUNT(*) FROM cbt_questions q WHERE q.cbt_exam_id = e.id AND (q.is_deleted = 0 OR q.is_deleted IS NULL)) as total_questions
+         FROM cbt_exams e
+         WHERE e.school_id = ? AND e.status = 'PUBLISHED' AND (e.is_deleted = 0 OR e.is_deleted IS NULL)
+         ORDER BY e.created_at DESC
+         LIMIT 12`,
+        [school.id]
+      );
+    } catch {
+      publicCbtExams = [];
+    }
   }
 
   return res.json({
@@ -400,24 +426,29 @@ publicWebsiteRouter.get('/schools/:slug/website', async (req, res) => {
     gallery,
     events,
     classes,
-    cbtSummary: {
-      activeExamsCount: publicCbtExams.length,
-      exams: publicCbtExams.map((e) => ({
-        id: e.id,
-        title: e.title,
-        subject_name: e.subject_name,
-        class_name: e.class_name || 'All Classes',
-        exam_mode: e.exam_mode,
-        duration_minutes: Number(e.duration_minutes || 30),
-        starts_at: e.starts_at || null,
-        ends_at: e.ends_at || null,
-        total_questions: Number(e.total_questions || 0),
-      })),
-    },
+    cbtSummary: showCbtHall
+      ? {
+          activeExamsCount: publicCbtExams.length,
+          exams: publicCbtExams.map((e) => ({
+            id: e.id,
+            title: e.title,
+            subject_name: e.subject_name,
+            class_name: e.class_name || 'All Classes',
+            exam_mode: e.exam_mode,
+            duration_minutes: Number(e.duration_minutes || 30),
+            starts_at: e.starts_at || null,
+            ends_at: e.ends_at || null,
+            total_questions: Number(e.total_questions || 0),
+          })),
+        }
+      : {
+          activeExamsCount: 0,
+          exams: [],
+        },
     stats: {
-      studentsCount: Number(stuCountRow?.c || 0),
-      classesCount: classes.length,
-      staffCount: Number(stfCountRow?.c || 0),
+      studentsCount: showEnrollment ? Number(stuCountRow?.c || 0) : null,
+      classesCount: showClasses ? classes.length : null,
+      staffCount: showStaff ? Number(stfCountRow?.c || 0) : null,
     },
   });
 });
@@ -637,6 +668,11 @@ schoolWebsiteRouter.put('/profile', ...websiteAdminGuard, async (req: Authentica
     social_facebook: req.body?.social_facebook !== undefined ? String(req.body.social_facebook || '').trim() || null : existing.social_facebook,
     social_instagram: req.body?.social_instagram !== undefined ? String(req.body.social_instagram || '').trim() || null : existing.social_instagram,
     is_published: req.body?.is_published !== undefined ? (req.body.is_published ? 1 : 0) : Number(existing.is_published ?? 1),
+    show_enrollment_count: req.body?.show_enrollment_count !== undefined ? (req.body.show_enrollment_count ? 1 : 0) : Number(existing.show_enrollment_count ?? 0),
+    show_staff_count: req.body?.show_staff_count !== undefined ? (req.body.show_staff_count ? 1 : 0) : Number(existing.show_staff_count ?? 0),
+    show_classes_count: req.body?.show_classes_count !== undefined ? (req.body.show_classes_count ? 1 : 0) : Number(existing.show_classes_count ?? 1),
+    show_cbt_hall: req.body?.show_cbt_hall !== undefined ? (req.body.show_cbt_hall ? 1 : 0) : Number(existing.show_cbt_hall ?? 1),
+    show_admissions_form: req.body?.show_admissions_form !== undefined ? (req.body.show_admissions_form ? 1 : 0) : Number(existing.show_admissions_form ?? 1),
   };
 
   await execWrite(
@@ -645,8 +681,9 @@ schoolWebsiteRouter.put('/profile', ...websiteAdminGuard, async (req: Authentica
        about_title, about_body, vision, mission, core_values,
        principal_name, principal_title, principal_message, principal_photo_url,
        admissions_open, admissions_summary, established_year, facilities_text,
-       social_whatsapp, social_facebook, social_instagram, is_published, updated_at
-     ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,CURRENT_TIMESTAMP)
+       social_whatsapp, social_facebook, social_instagram, is_published,
+       show_enrollment_count, show_staff_count, show_classes_count, show_cbt_hall, show_admissions_form, updated_at
+     ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,CURRENT_TIMESTAMP)
      ON CONFLICT (school_id) DO UPDATE SET
        tagline = EXCLUDED.tagline,
        hero_title = EXCLUDED.hero_title,
@@ -670,14 +707,20 @@ schoolWebsiteRouter.put('/profile', ...websiteAdminGuard, async (req: Authentica
        social_facebook = EXCLUDED.social_facebook,
        social_instagram = EXCLUDED.social_instagram,
        is_published = EXCLUDED.is_published,
+       show_enrollment_count = EXCLUDED.show_enrollment_count,
+       show_staff_count = EXCLUDED.show_staff_count,
+       show_classes_count = EXCLUDED.show_classes_count,
+       show_cbt_hall = EXCLUDED.show_cbt_hall,
+       show_admissions_form = EXCLUDED.show_admissions_form,
        updated_at = CURRENT_TIMESTAMP`,
     `INSERT INTO school_website_profiles (
        id, school_id, tagline, hero_title, hero_subtitle, hero_image_url, theme_accent,
        about_title, about_body, vision, mission, core_values,
        principal_name, principal_title, principal_message, principal_photo_url,
        admissions_open, admissions_summary, established_year, facilities_text,
-       social_whatsapp, social_facebook, social_instagram, is_published, updated_at
-     ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)
+       social_whatsapp, social_facebook, social_instagram, is_published,
+       show_enrollment_count, show_staff_count, show_classes_count, show_cbt_hall, show_admissions_form, updated_at
+     ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)
      ON CONFLICT(school_id) DO UPDATE SET
        tagline = excluded.tagline,
        hero_title = excluded.hero_title,
@@ -701,6 +744,11 @@ schoolWebsiteRouter.put('/profile', ...websiteAdminGuard, async (req: Authentica
        social_facebook = excluded.social_facebook,
        social_instagram = excluded.social_instagram,
        is_published = excluded.is_published,
+       show_enrollment_count = excluded.show_enrollment_count,
+       show_staff_count = excluded.show_staff_count,
+       show_classes_count = excluded.show_classes_count,
+       show_cbt_hall = excluded.show_cbt_hall,
+       show_admissions_form = excluded.show_admissions_form,
        updated_at = CURRENT_TIMESTAMP`,
     [
       nextProfile.id,
@@ -727,6 +775,11 @@ schoolWebsiteRouter.put('/profile', ...websiteAdminGuard, async (req: Authentica
       nextProfile.social_facebook,
       nextProfile.social_instagram,
       nextProfile.is_published,
+      nextProfile.show_enrollment_count,
+      nextProfile.show_staff_count,
+      nextProfile.show_classes_count,
+      nextProfile.show_cbt_hall,
+      nextProfile.show_admissions_form,
     ]
   );
 
@@ -737,7 +790,16 @@ schoolWebsiteRouter.put('/profile', ...websiteAdminGuard, async (req: Authentica
     action: 'WEBSITE_PROFILE_UPDATED',
     entity: 'school_website_profiles',
     entityId: nextProfile.id,
-    metadata: { portal_subdomain: updatedSubdomain, theme_accent: themeAccent, is_published: nextProfile.is_published },
+    metadata: {
+      portal_subdomain: updatedSubdomain,
+      theme_accent: themeAccent,
+      is_published: nextProfile.is_published,
+      show_enrollment_count: nextProfile.show_enrollment_count,
+      show_staff_count: nextProfile.show_staff_count,
+      show_classes_count: nextProfile.show_classes_count,
+      show_cbt_hall: nextProfile.show_cbt_hall,
+      show_admissions_form: nextProfile.show_admissions_form,
+    },
   });
 
   return res.json({

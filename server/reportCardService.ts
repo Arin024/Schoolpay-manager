@@ -171,23 +171,39 @@ export async function compileTermReportCard(
   const pubScoreClause = onlyPublished ? `AND ss.status = 'PUBLISHED' AND ex.status = 'PUBLISHED'` : '';
 
   const rawScores = await dbAll(
-    `SELECT ss.*, sub.name as subject_name, sub.code as subject_code, COALESCE(sub.credit_units, 3) as credit_units,
+    `SELECT ss.*, sub.name as subject_name, sub.code as subject_code,
+            COALESCE(scr.credit_units_snapshot, sub.credit_units, 3) as credit_units,
             ex.total_max_score, ex.ca_max_score, ex.exam_max_score,
             ex.title as examination_title, ex.created_at as exam_created_at
      FROM student_scores ss
      JOIN subjects sub ON ss.subject_id = sub.id
      JOIN examinations ex ON ss.examination_id = ex.id
+     LEFT JOIN student_course_registrations scr
+       ON scr.school_id = ss.school_id
+      AND scr.student_id = ss.student_id
+      AND scr.academic_session_id = ss.academic_session_id
+      AND scr.term_id = ss.term_id
+      AND scr.subject_id = ss.subject_id
+      AND scr.status != 'DROPPED'
      WHERE ss.school_id = $1 AND ss.student_id = $2 AND ss.academic_session_id = $3 AND ss.term_id = $4
        AND (ex.is_deleted = 0 OR ex.is_deleted IS NULL)
        ${pubScoreClause}
        ${examFilterId ? 'AND ss.examination_id = $5' : ''}
      ORDER BY sub.name ASC, ex.created_at DESC`,
-    `SELECT ss.*, sub.name as subject_name, sub.code as subject_code, COALESCE(sub.credit_units, 3) as credit_units,
+    `SELECT ss.*, sub.name as subject_name, sub.code as subject_code,
+            COALESCE(scr.credit_units_snapshot, sub.credit_units, 3) as credit_units,
             ex.total_max_score, ex.ca_max_score, ex.exam_max_score,
             ex.title as examination_title, ex.created_at as exam_created_at
      FROM student_scores ss
      JOIN subjects sub ON ss.subject_id = sub.id
      JOIN examinations ex ON ss.examination_id = ex.id
+     LEFT JOIN student_course_registrations scr
+       ON scr.school_id = ss.school_id
+      AND scr.student_id = ss.student_id
+      AND scr.academic_session_id = ss.academic_session_id
+      AND scr.term_id = ss.term_id
+      AND scr.subject_id = ss.subject_id
+      AND scr.status != 'DROPPED'
      WHERE ss.school_id = ? AND ss.student_id = ? AND ss.academic_session_id = ? AND ss.term_id = ?
        AND (ex.is_deleted = 0 OR ex.is_deleted IS NULL)
        ${pubScoreClause}
@@ -383,7 +399,8 @@ export async function compileTermReportCard(
   let totalQualityPoints = 0;
 
   const compiledSubjects = scores.map((s) => {
-    const units = Math.max(1, Math.round(Number(s.credit_units || 3)));
+    const rawUnits = s.credit_units !== null && s.credit_units !== undefined ? Number(s.credit_units) : 3;
+    const units = Number.isFinite(rawUnits) && rawUnits >= 0 ? Math.round(rawUnits) : 3;
     const maxScore = Number(s.total_max_score) > 0 ? Number(s.total_max_score) : 100;
     const pct = s.total_score !== null && s.total_score !== undefined ? (Number(s.total_score) / maxScore) * 100 : null;
     let gradePoint: number | null = null;
@@ -616,23 +633,39 @@ export async function compileSessionReportCard(
   const isGpaMode = instProfile.gradingMode === 'GPA_5' || instProfile.gradingMode === 'GPA_4';
 
   const rawScores = await dbAll(
-    `SELECT ss.*, sub.name as subject_name, sub.code as subject_code, COALESCE(sub.credit_units, 3) as credit_units,
+    `SELECT ss.*, sub.name as subject_name, sub.code as subject_code,
+            COALESCE(scr.credit_units_snapshot, sub.credit_units, 3) as credit_units,
             ex.total_max_score, ex.ca_max_score, ex.exam_max_score,
             ex.created_at as exam_created_at, t.name as term_name
      FROM student_scores ss
      JOIN subjects sub ON ss.subject_id = sub.id
      JOIN examinations ex ON ss.examination_id = ex.id
+     LEFT JOIN student_course_registrations scr
+       ON scr.school_id = ss.school_id
+      AND scr.student_id = ss.student_id
+      AND scr.academic_session_id = ss.academic_session_id
+      AND scr.term_id = ss.term_id
+      AND scr.subject_id = ss.subject_id
+      AND scr.status != 'DROPPED'
      LEFT JOIN terms t ON ss.term_id = t.id
      WHERE ss.school_id = $1 AND ss.student_id = $2 AND ss.academic_session_id = $3
        AND (ex.is_deleted = 0 OR ex.is_deleted IS NULL)
        ${pubScoreClause}
      ORDER BY sub.name ASC, ex.created_at DESC`,
-    `SELECT ss.*, sub.name as subject_name, sub.code as subject_code, COALESCE(sub.credit_units, 3) as credit_units,
+    `SELECT ss.*, sub.name as subject_name, sub.code as subject_code,
+            COALESCE(scr.credit_units_snapshot, sub.credit_units, 3) as credit_units,
             ex.total_max_score, ex.ca_max_score, ex.exam_max_score,
             ex.created_at as exam_created_at, t.name as term_name
      FROM student_scores ss
      JOIN subjects sub ON ss.subject_id = sub.id
      JOIN examinations ex ON ss.examination_id = ex.id
+     LEFT JOIN student_course_registrations scr
+       ON scr.school_id = ss.school_id
+      AND scr.student_id = ss.student_id
+      AND scr.academic_session_id = ss.academic_session_id
+      AND scr.term_id = ss.term_id
+      AND scr.subject_id = ss.subject_id
+      AND scr.status != 'DROPPED'
      LEFT JOIN terms t ON ss.term_id = t.id
      WHERE ss.school_id = ? AND ss.student_id = ? AND ss.academic_session_id = ?
        AND (ex.is_deleted = 0 OR ex.is_deleted IS NULL)
@@ -650,11 +683,12 @@ export async function compileSessionReportCard(
   const subjectTermMap = new Map<string, { subject_id: string; subject_name: string; subject_code: string; credit_units: number; byTerm: Map<string, any> }>();
   for (const s of rawScores) {
     if (!subjectTermMap.has(s.subject_id)) {
+      const rawUnits = s.credit_units !== null && s.credit_units !== undefined ? Number(s.credit_units) : 3;
       subjectTermMap.set(s.subject_id, {
         subject_id: s.subject_id,
         subject_name: s.subject_name,
         subject_code: s.subject_code,
-        credit_units: Math.max(1, Math.round(Number(s.credit_units || 3))),
+        credit_units: Number.isFinite(rawUnits) && rawUnits >= 0 ? Math.round(rawUnits) : 3,
         byTerm: new Map<string, any>(),
       });
     }
@@ -751,7 +785,8 @@ export async function compileSessionReportCard(
       let unitsSum = 0;
       let qpSum = 0;
       for (const p of scoredPairs) {
-        const u = Math.max(1, Number(p.sub.credit_units || 3));
+        const rawU = p.sub.credit_units !== null && p.sub.credit_units !== undefined ? Number(p.sub.credit_units) : 3;
+        const u = Number.isFinite(rawU) && rawU >= 0 ? Math.round(rawU) : 3;
         const band = computeGpaGradeBand(Number(p.ts!.percentage || 0), instProfile.gradingMode);
         unitsSum += u;
         qpSum += u * band.points;

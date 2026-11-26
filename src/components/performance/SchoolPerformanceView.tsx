@@ -17,6 +17,9 @@ import {
   History,
   Save,
   Award,
+  Layers,
+  FileSpreadsheet,
+  Upload,
 } from 'lucide-react';
 import { api } from '../../services/api.js';
 import { useAuth } from '../../context/AuthContext.js';
@@ -35,13 +38,17 @@ import {
 } from '../../types/index.js';
 import { WorkflowStatusBadge } from '../common/StatusBadge.js';
 import { PrintableReportCardModal } from './PrintableReportCardModal.js';
+import { BulkCoursesModal } from './BulkCoursesModal.js';
+import { CourseRegistrationPanel } from './CourseRegistrationPanel.js';
+import { HistoricalBacklogImportModal } from './HistoricalBacklogImportModal.js';
+import { ExamBroadsheetModal } from './ExamBroadsheetModal.js';
 import { resolveInstitutionProfile } from '../../utils/institutionMode.js';
 
 interface SchoolPerformanceViewProps {
   readOnly?: boolean;
 }
 
-type PerfSubTab = 'analytics' | 'subjects' | 'exams' | 'reports' | 'settings';
+type PerfSubTab = 'analytics' | 'subjects' | 'course_reg' | 'exams' | 'reports' | 'settings';
 
 export const SchoolPerformanceView: React.FC<SchoolPerformanceViewProps> = ({ readOnly = false }) => {
   const { activeSchool, activeSettings } = useAuth();
@@ -72,15 +79,20 @@ export const SchoolPerformanceView: React.FC<SchoolPerformanceViewProps> = ({ re
   const [overviewLoading, setOverviewLoading] = useState(true);
   const [overviewError, setOverviewError] = useState<string | null>(null);
 
-  // Subjects / Courses modal
+  // Subjects / Courses modal & Bulk / Backlog / Broadsheet modals
   const [subjectModalOpen, setSubjectModalOpen] = useState(false);
+  const [bulkCoursesOpen, setBulkCoursesOpen] = useState(false);
+  const [historicalBacklogOpen, setHistoricalBacklogOpen] = useState(false);
+  const [broadsheetExamId, setBroadsheetExamId] = useState<string | null>(null);
+  const [inlineUnitSavingId, setInlineUnitSavingId] = useState<string | null>(null);
   const [editingSubject, setEditingSubject] = useState<SubjectItem | null>(null);
   const [subjectForm, setSubjectForm] = useState({
     name: '',
     code: '',
     department: '',
     class_id: '',
-    credit_units: 3,
+    credit_units: '3',
+    course_type: 'CORE' as 'CORE' | 'ELECTIVE' | 'GENERAL',
     status: 'ACTIVE',
   });
   const [subjectSaving, setSubjectSaving] = useState(false);
@@ -331,17 +343,24 @@ export const SchoolPerformanceView: React.FC<SchoolPerformanceViewProps> = ({ re
     e.preventDefault();
     setSubjectSaving(true);
     try {
+      const trimmedUnits = String(subjectForm.credit_units ?? '').trim();
+      const rawNum = trimmedUnits === '' ? 3 : Number(trimmedUnits);
+      const safeUnits = Number.isFinite(rawNum) ? Math.max(0, Math.min(12, Math.round(rawNum))) : 3;
       const payload = {
-        ...subjectForm,
-        credit_units: Number(subjectForm.credit_units) || 3,
+        name: subjectForm.name.trim(),
+        code: subjectForm.code.trim(),
+        department: subjectForm.department.trim(),
+        class_id: subjectForm.class_id || null,
+        credit_units: safeUnits,
+        course_type: subjectForm.course_type,
         status: subjectForm.status as 'ACTIVE' | 'INACTIVE',
       };
       if (editingSubject) {
         await api.updateSubject(editingSubject.id, payload);
-        showMsg('ok', `${instLabels.subject} updated.`);
+        showMsg('ok', `${instLabels.subject} updated (${safeUnits} credit unit${safeUnits === 1 ? '' : 's'}).`);
       } else {
         await api.createSubject(payload);
-        showMsg('ok', `${instLabels.subject} created.`);
+        showMsg('ok', `${instLabels.subject} created (${safeUnits} credit unit${safeUnits === 1 ? '' : 's'}).`);
       }
       const res = await api.getSubjects();
       setSubjects(res.subjects || []);
@@ -351,6 +370,23 @@ export const SchoolPerformanceView: React.FC<SchoolPerformanceViewProps> = ({ re
       showMsg('err', err?.message || 'Failed to save subject');
     } finally {
       setSubjectSaving(false);
+    }
+  };
+
+  const handleInlineCreditUnitsChange = async (sub: SubjectItem, nextUnits: number) => {
+    const safeUnits = Math.max(0, Math.min(12, Math.round(nextUnits)));
+    if (Number(sub.credit_units ?? 3) === safeUnits) return;
+    setInlineUnitSavingId(sub.id);
+    try {
+      const res = await api.patchSubjectCreditUnits(sub.id, { credit_units: safeUnits, sync_registrations: true });
+      setSubjects((prev) =>
+        prev.map((item) => (item.id === sub.id ? { ...item, credit_units: res.subject?.credit_units ?? safeUnits } : item))
+      );
+      showMsg('ok', `Updated ${sub.code || sub.name} to ${safeUnits} credit unit${safeUnits === 1 ? '' : 's'}.`);
+    } catch (err: any) {
+      showMsg('err', err?.message || 'Failed to update credit units');
+    } finally {
+      setInlineUnitSavingId(null);
     }
   };
 
@@ -679,6 +715,11 @@ export const SchoolPerformanceView: React.FC<SchoolPerformanceViewProps> = ({ re
             [
               { key: 'analytics', label: 'Analytics & Rankings', icon: BarChart3 },
               { key: 'subjects', label: instLabels.subjectPlural, icon: BookOpen },
+              {
+                key: 'course_reg',
+                label: isTertiary ? 'Course Registration' : 'Subject Registration',
+                icon: Layers,
+              },
               { key: 'exams', label: 'Examinations & Scores', icon: ClipboardCheck },
               { key: 'reports', label: isTertiary ? 'Results & Transcripts' : 'Report Cards', icon: FileText },
               ...(!readOnly ? [{ key: 'settings', label: 'Policy Settings', icon: Sliders }] : []),
@@ -1190,30 +1231,68 @@ export const SchoolPerformanceView: React.FC<SchoolPerformanceViewProps> = ({ re
               </h3>
               <p className="text-xs text-slate-500">
                 {showCreditUnits
-                  ? `${instLabels.subjectPlural} and Credit Units used to compute weighted GPA & CGPA transcripts.`
-                  : 'Subjects assessed in examinations and report cards.'}
+                  ? `${instLabels.subjectPlural} and modifiable Credit Units (0–12) used to compute weighted GPA & CGPA transcripts.`
+                  : `${instLabels.subjectPlural} assessed in examinations and report cards. Credit units can be adjusted anytime (e.g. 1, 2, 3, or 4 units).`}
               </p>
             </div>
             {!readOnly && (
-              <button
-                type="button"
-                onClick={() => {
-                  setEditingSubject(null);
-                  setSubjectForm({ name: '', code: '', department: '', class_id: '', credit_units: 3, status: 'ACTIVE' });
-                  setSubjectModalOpen(true);
-                }}
-                className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold inline-flex items-center gap-1.5 cursor-pointer self-start"
-              >
-                <Plus className="w-4 h-4" />
-                <span>Add {instLabels.subject}</span>
-              </button>
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setHistoricalBacklogOpen(true)}
+                  className="px-3.5 py-2 bg-slate-100 hover:bg-slate-200 text-slate-800 border border-slate-200 rounded-xl text-xs font-semibold inline-flex items-center gap-1.5 cursor-pointer"
+                >
+                  <History className="w-3.5 h-3.5 text-slate-600" />
+                  <span>Upload Previous Years</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setBulkCoursesOpen(true)}
+                  className="px-3.5 py-2 bg-slate-900 hover:bg-slate-800 text-white rounded-xl text-xs font-bold inline-flex items-center gap-1.5 cursor-pointer"
+                >
+                  <Upload className="w-3.5 h-3.5" />
+                  <span>Bulk Add {instLabels.subjectPlural}</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setEditingSubject(null);
+                    setSubjectForm({
+                      name: '',
+                      code: '',
+                      department: '',
+                      class_id: '',
+                      credit_units: '3',
+                      course_type: 'CORE',
+                      status: 'ACTIVE',
+                    });
+                    setSubjectModalOpen(true);
+                  }}
+                  className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold inline-flex items-center gap-1.5 cursor-pointer"
+                >
+                  <Plus className="w-4 h-4" />
+                  <span>Add {instLabels.subject}</span>
+                </button>
+              </div>
             )}
           </div>
 
           {subjects.length === 0 ? (
-            <p className="py-10 text-center text-xs text-slate-400">
-              No {instLabels.subjectPlural.toLowerCase()} configured yet.
-            </p>
+            <div className="py-10 text-center space-y-2">
+              <p className="text-xs text-slate-400">
+                No {instLabels.subjectPlural.toLowerCase()} configured yet.
+              </p>
+              {!readOnly && (
+                <button
+                  type="button"
+                  onClick={() => setBulkCoursesOpen(true)}
+                  className="px-4 py-2 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-200 rounded-xl text-xs font-semibold inline-flex items-center gap-1.5 cursor-pointer"
+                >
+                  <Upload className="w-3.5 h-3.5" />
+                  <span>Load Preset or Bulk Add {instLabels.subjectPlural}</span>
+                </button>
+              )}
+            </div>
           ) : (
             <div className="overflow-x-auto">
               <table className="w-full text-left text-xs">
@@ -1221,7 +1300,7 @@ export const SchoolPerformanceView: React.FC<SchoolPerformanceViewProps> = ({ re
                   <tr className="border-b border-slate-200 text-slate-500 bg-slate-50/70">
                     <th className="py-2.5 px-3">Code</th>
                     <th className="py-2.5 px-3">{instLabels.subject} Title</th>
-                    {showCreditUnits && <th className="py-2.5 px-3 text-right">Credit Units</th>}
+                    <th className="py-2.5 px-3">Credit Units</th>
                     <th className="py-2.5 px-3">Department</th>
                     <th className="py-2.5 px-3">Target {instLabels.classLabel}</th>
                     <th className="py-2.5 px-3">Status</th>
@@ -1229,64 +1308,133 @@ export const SchoolPerformanceView: React.FC<SchoolPerformanceViewProps> = ({ re
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100">
-                  {subjects.map((sub) => (
-                    <tr key={sub.id} className="hover:bg-slate-50/60">
-                      <td className="py-2.5 px-3 font-mono text-slate-700 font-semibold">{sub.code}</td>
-                      <td className="py-2.5 px-3 font-semibold text-slate-900">{sub.name}</td>
-                      {showCreditUnits && (
-                        <td className="py-2.5 px-3 text-right font-bold tabular-nums text-emerald-700">
-                          {sub.credit_units ?? 3}
+                  {subjects.map((sub) => {
+                    const currentUnits = Number(sub.credit_units ?? 3);
+                    const isSavingUnits = inlineUnitSavingId === sub.id;
+                    return (
+                      <tr key={sub.id} className="hover:bg-slate-50/60">
+                        <td className="py-2.5 px-3 font-mono text-slate-700 font-semibold">{sub.code}</td>
+                        <td className="py-2.5 px-3 font-semibold text-slate-900">
+                          <span>{sub.name}</span>
+                          {sub.course_type && sub.course_type !== 'CORE' && (
+                            <span className="ml-2 text-[10px] font-medium uppercase tracking-wide text-slate-500">
+                              · {sub.course_type}
+                            </span>
+                          )}
                         </td>
-                      )}
-                      <td className="py-2.5 px-3 text-slate-600">{sub.department || 'General'}</td>
-                      <td className="py-2.5 px-3 text-slate-600">{sub.class_name || `All ${instLabels.classPlural}`}</td>
-                      <td className="py-2.5 px-3">
-                        <span
-                          className={`text-[11px] font-semibold ${
-                            sub.status === 'ACTIVE' ? 'text-emerald-700' : 'text-slate-400'
-                          }`}
-                        >
-                          {sub.status}
-                        </span>
-                      </td>
-                      {!readOnly && (
-                        <td className="py-2.5 px-3 text-right">
-                          <div className="flex items-center justify-end gap-1">
-                            <button
-                              type="button"
-                              onClick={() => {
-                                setEditingSubject(sub);
-                                setSubjectForm({
-                                  name: sub.name,
-                                  code: sub.code,
-                                  department: sub.department || '',
-                                  class_id: sub.class_id || '',
-                                  credit_units: Number(sub.credit_units ?? 3),
-                                  status: sub.status,
-                                });
-                                setSubjectModalOpen(true);
-                              }}
-                              className="p-1.5 text-slate-500 hover:text-blue-700 rounded-lg hover:bg-blue-50"
-                            >
-                              <Edit2 className="w-3.5 h-3.5" />
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => handleDeleteSubject(sub)}
-                              className="p-1.5 text-slate-500 hover:text-rose-700 rounded-lg hover:bg-rose-50"
-                            >
-                              <Trash2 className="w-3.5 h-3.5" />
-                            </button>
-                          </div>
+                        <td className="py-2.5 px-3">
+                          {readOnly ? (
+                            <span className="font-bold tabular-nums text-emerald-700">{currentUnits}u</span>
+                          ) : (
+                            <div className="inline-flex items-center gap-1">
+                              {[1, 2, 3, 4].map((u) => (
+                                <button
+                                  key={u}
+                                  type="button"
+                                  disabled={isSavingUnits}
+                                  onClick={() => handleInlineCreditUnitsChange(sub, u)}
+                                  title={`Set ${sub.code || sub.name} to ${u} credit unit${u === 1 ? '' : 's'}`}
+                                  className={`w-6 h-6 rounded-md text-[11px] font-bold tabular-nums transition cursor-pointer ${
+                                    currentUnits === u
+                                      ? 'bg-emerald-600 text-white'
+                                      : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+                                  }`}
+                                >
+                                  {u}
+                                </button>
+                              ))}
+                              <select
+                                aria-label={`Credit units for ${sub.name}`}
+                                disabled={isSavingUnits}
+                                value={String(currentUnits)}
+                                onChange={(e) => handleInlineCreditUnitsChange(sub, Number(e.target.value))}
+                                className="ml-0.5 px-1.5 py-1 bg-slate-50 border border-slate-300 rounded-md text-[11px] font-semibold tabular-nums text-slate-700"
+                              >
+                                {[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12].map((u) => (
+                                  <option key={u} value={u}>
+                                    {u}u
+                                  </option>
+                                ))}
+                              </select>
+                            </div>
+                          )}
                         </td>
-                      )}
-                    </tr>
-                  ))}
+                        <td className="py-2.5 px-3 text-slate-600">{sub.department || 'General'}</td>
+                        <td className="py-2.5 px-3 text-slate-600">{sub.class_name || `All ${instLabels.classPlural}`}</td>
+                        <td className="py-2.5 px-3">
+                          <span
+                            className={`text-[11px] font-semibold ${
+                              sub.status === 'ACTIVE' ? 'text-emerald-700' : 'text-slate-400'
+                            }`}
+                          >
+                            {sub.status}
+                          </span>
+                        </td>
+                        {!readOnly && (
+                          <td className="py-2.5 px-3 text-right">
+                            <div className="flex items-center justify-end gap-1">
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setEditingSubject(sub);
+                                  setSubjectForm({
+                                    name: sub.name,
+                                    code: sub.code,
+                                    department: sub.department || '',
+                                    class_id: sub.class_id || '',
+                                    credit_units: String(sub.credit_units ?? 3),
+                                    course_type: (sub.course_type as 'CORE' | 'ELECTIVE' | 'GENERAL') || 'CORE',
+                                    status: sub.status,
+                                  });
+                                  setSubjectModalOpen(true);
+                                }}
+                                className="p-1.5 text-slate-500 hover:text-blue-700 rounded-lg hover:bg-blue-50"
+                                title={`Edit ${instLabels.subject}`}
+                              >
+                                <Edit2 className="w-3.5 h-3.5" />
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => handleDeleteSubject(sub)}
+                                className="p-1.5 text-slate-500 hover:text-rose-700 rounded-lg hover:bg-rose-50"
+                                title={`Delete ${instLabels.subject}`}
+                              >
+                                <Trash2 className="w-3.5 h-3.5" />
+                              </button>
+                            </div>
+                          </td>
+                        )}
+                      </tr>
+                    );
+                  })}
                 </tbody>
               </table>
             </div>
           )}
         </div>
+      )}
+
+      {/* ===================================================================== */}
+      {/* SUB-TAB 2B: BULK COURSE / SUBJECT REGISTRATION */}
+      {/* ===================================================================== */}
+      {subTab === 'course_reg' && (
+        <CourseRegistrationPanel
+          sessions={sessions}
+          classes={classes}
+          subjects={subjects}
+          students={rosterStudents}
+          isAdmin={!readOnly}
+          isTertiary={isTertiary}
+          subjectLabel={instLabels.subject}
+          subjectPlural={instLabels.subjectPlural}
+          classLabel={instLabels.classLabel}
+          cycleLabel={instLabels.cycle}
+          learnerLabel={isTertiary ? 'Student' : 'Learner'}
+          learnerPlural={isTertiary ? 'Students' : 'Learners'}
+          onOpenHistoricalBacklog={() => setHistoricalBacklogOpen(true)}
+          onOpenBulkCourses={() => setBulkCoursesOpen(true)}
+          onToast={(type, text) => showMsg(type === 'success' ? 'ok' : 'err', text)}
+        />
       )}
 
       {/* ===================================================================== */}
@@ -1378,6 +1526,15 @@ export const SchoolPerformanceView: React.FC<SchoolPerformanceViewProps> = ({ re
                               className="px-2.5 py-1 rounded-lg bg-slate-900 hover:bg-slate-800 text-white text-[11px] font-semibold cursor-pointer"
                             >
                               {readOnly ? 'View Scores' : 'Score Sheet'}
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setBroadsheetExamId(ex.id)}
+                              className="px-2.5 py-1 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-800 border border-slate-200 text-[11px] font-semibold inline-flex items-center gap-1 cursor-pointer"
+                              title="Open Master Class / Level Broadsheet"
+                            >
+                              <FileSpreadsheet className="w-3 h-3 text-emerald-700" />
+                              <span>Broadsheet</span>
                             </button>
                             {!readOnly && ex.status === 'DRAFT' && (
                               <button
@@ -2142,6 +2299,51 @@ export const SchoolPerformanceView: React.FC<SchoolPerformanceViewProps> = ({ re
             </div>
           </div>
 
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 pt-2 border-t border-slate-100">
+            <div>
+              <label className="block font-semibold text-slate-700 mb-1">
+                Min Credit Units per {instLabels.cycle} (Guardrail)
+              </label>
+              <input
+                type="number"
+                min={0}
+                max={60}
+                value={settings.min_credit_units_per_cycle ?? 12}
+                onChange={(e) =>
+                  setSettings({
+                    ...settings,
+                    min_credit_units_per_cycle: Math.max(0, Math.min(60, Number(e.target.value || 0))),
+                  })
+                }
+                className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl tabular-nums"
+              />
+              <p className="text-[11px] text-slate-500 mt-1">
+                Advisory minimum credit load during {instLabels.subject.toLowerCase()} registration.
+              </p>
+            </div>
+            <div>
+              <label className="block font-semibold text-slate-700 mb-1">
+                Max Credit Units per {instLabels.cycle} (Guardrail)
+              </label>
+              <input
+                type="number"
+                min={1}
+                max={60}
+                value={settings.max_credit_units_per_cycle ?? 24}
+                onChange={(e) =>
+                  setSettings({
+                    ...settings,
+                    max_credit_units_per_cycle: Math.max(1, Math.min(60, Number(e.target.value || 24))),
+                  })
+                }
+                className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl tabular-nums"
+              />
+              <p className="text-[11px] text-slate-500 mt-1">
+                Warns registrars when a learner exceeds standard {instLabels.cycle.toLowerCase()} unit limits (e.g. 24 units).
+              </p>
+            </div>
+          </div>
+
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-2 border-t border-slate-100">
             <label className="flex items-center gap-2.5 p-3 rounded-xl border border-slate-200 cursor-pointer hover:bg-slate-50">
               <input
@@ -2243,46 +2445,69 @@ export const SchoolPerformanceView: React.FC<SchoolPerformanceViewProps> = ({ re
                     className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl font-mono"
                   />
                 </div>
-                {showCreditUnits ? (
-                  <div>
-                    <label className="block font-semibold text-slate-700 mb-1">Credit Units *</label>
-                    <input
-                      type="number"
-                      min={1}
-                      max={12}
-                      required
-                      value={subjectForm.credit_units}
-                      onChange={(e) =>
-                        setSubjectForm({ ...subjectForm, credit_units: Math.max(1, Math.min(12, Number(e.target.value) || 3)) })
-                      }
-                      className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl font-bold tabular-nums"
-                    />
-                  </div>
-                ) : (
-                  <div>
-                    <label className="block font-semibold text-slate-700 mb-1">Department</label>
-                    <input
-                      type="text"
-                      value={subjectForm.department}
-                      onChange={(e) => setSubjectForm({ ...subjectForm, department: e.target.value })}
-                      placeholder="Sciences, Arts..."
-                      className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl"
-                    />
-                  </div>
-                )}
-              </div>
-              {showCreditUnits && (
                 <div>
-                  <label className="block font-semibold text-slate-700 mb-1">Department / Faculty</label>
+                  <label className="block font-semibold text-slate-700 mb-1">Credit Units (0–12) *</label>
+                  <input
+                    type="number"
+                    min={0}
+                    max={12}
+                    step={1}
+                    value={subjectForm.credit_units}
+                    onChange={(e) => setSubjectForm({ ...subjectForm, credit_units: e.target.value })}
+                    placeholder="e.g. 1, 2, 3, 4"
+                    className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl font-bold tabular-nums"
+                  />
+                  <div className="flex items-center gap-1 mt-1.5">
+                    {[1, 2, 3, 4, 6].map((u) => (
+                      <button
+                        key={u}
+                        type="button"
+                        onClick={() => setSubjectForm({ ...subjectForm, credit_units: String(u) })}
+                        className={`px-2 py-0.5 rounded-md text-[11px] font-bold tabular-nums cursor-pointer ${
+                          subjectForm.credit_units === String(u)
+                            ? 'bg-emerald-600 text-white'
+                            : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+                        }`}
+                      >
+                        {u}u
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block font-semibold text-slate-700 mb-1">
+                    {isTertiary ? 'Department / Faculty' : 'Department'}
+                  </label>
                   <input
                     type="text"
                     value={subjectForm.department}
                     onChange={(e) => setSubjectForm({ ...subjectForm, department: e.target.value })}
-                    placeholder="e.g. Computer Science, Accounting, General Studies"
+                    placeholder={isTertiary ? 'e.g. Computer Science, GST' : 'Sciences, Arts...'}
                     className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl"
                   />
                 </div>
-              )}
+                <div>
+                  <label className="block font-semibold text-slate-700 mb-1">
+                    {isTertiary ? 'Course Category' : 'Subject Type'}
+                  </label>
+                  <select
+                    value={subjectForm.course_type}
+                    onChange={(e) =>
+                      setSubjectForm({
+                        ...subjectForm,
+                        course_type: e.target.value as 'CORE' | 'ELECTIVE' | 'GENERAL',
+                      })
+                    }
+                    className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl"
+                  >
+                    <option value="CORE">Core / Compulsory</option>
+                    <option value="ELECTIVE">Elective / Optional</option>
+                    <option value="GENERAL">General Studies (GST/GNS)</option>
+                  </select>
+                </div>
+              </div>
               <div>
                 <label className="block font-semibold text-slate-700 mb-1">
                   Target {instLabels.classLabel} (Optional)
@@ -2667,6 +2892,48 @@ export const SchoolPerformanceView: React.FC<SchoolPerformanceViewProps> = ({ re
         isOpen={Boolean(printingRc)}
         onClose={() => setPrintingRc(null)}
       />
+
+      {bulkCoursesOpen && (
+        <BulkCoursesModal
+          classes={classes}
+          isTertiary={isTertiary}
+          subjectLabel={instLabels.subject}
+          subjectPlural={instLabels.subjectPlural}
+          classLabel={instLabels.classLabel}
+          cycleLabel={instLabels.cycle}
+          onClose={() => setBulkCoursesOpen(false)}
+          onSaved={async (msg) => {
+            setBulkCoursesOpen(false);
+            showMsg('ok', msg);
+            await loadBootstrap();
+          }}
+        />
+      )}
+
+      {historicalBacklogOpen && (
+        <HistoricalBacklogImportModal
+          students={rosterStudents}
+          isTertiary={isTertiary}
+          subjectLabel={instLabels.subject}
+          subjectPlural={instLabels.subjectPlural}
+          classLabel={instLabels.classLabel}
+          cycleLabel={instLabels.cycle}
+          learnerLabel={isTertiary ? 'Student' : 'Learner'}
+          onClose={() => setHistoricalBacklogOpen(false)}
+          onImported={async (msg) => {
+            setHistoricalBacklogOpen(false);
+            showMsg('ok', msg);
+            await loadBootstrap();
+          }}
+        />
+      )}
+
+      {broadsheetExamId && (
+        <ExamBroadsheetModal
+          examinationId={broadsheetExamId}
+          onClose={() => setBroadsheetExamId(null)}
+        />
+      )}
     </div>
   );
 };

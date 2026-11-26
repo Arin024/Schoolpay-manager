@@ -1613,3 +1613,138 @@ portalRouter.get(
   }
 );
 
+// ==============================================================================
+// REGISTERED COURSES / SUBJECTS & CREDIT UNITS (COURSE SLIP) FOR STUDENT & PARENT PORTALS
+// ==============================================================================
+async function fetchStudentCourseRegistrationsForPortal(
+  schoolId: string,
+  studentId: string,
+  academicSessionId?: string,
+  termId?: string
+) {
+  let pgSql = `
+    SELECT scr.id, scr.academic_session_id, scr.term_id, scr.class_id, scr.subject_id,
+           scr.credit_units_snapshot, scr.registration_type, scr.status, scr.created_at,
+           sub.name as subject_name, sub.code as subject_code,
+           COALESCE(scr.credit_units_snapshot, sub.credit_units, 3) as credit_units,
+           COALESCE(sub.course_type, 'CORE') as course_type,
+           sub.department,
+           ses.name as session_name, t.name as term_name, c.name as class_name
+    FROM student_course_registrations scr
+    JOIN subjects sub ON scr.subject_id = sub.id
+    LEFT JOIN academic_sessions ses ON scr.academic_session_id = ses.id
+    LEFT JOIN terms t ON scr.term_id = t.id
+    LEFT JOIN classes c ON scr.class_id = c.id
+    WHERE scr.school_id = $1 AND scr.student_id = $2 AND scr.status != 'DROPPED'
+  `;
+  let sqSql = `
+    SELECT scr.id, scr.academic_session_id, scr.term_id, scr.class_id, scr.subject_id,
+           scr.credit_units_snapshot, scr.registration_type, scr.status, scr.created_at,
+           sub.name as subject_name, sub.code as subject_code,
+           COALESCE(scr.credit_units_snapshot, sub.credit_units, 3) as credit_units,
+           COALESCE(sub.course_type, 'CORE') as course_type,
+           sub.department,
+           ses.name as session_name, t.name as term_name, c.name as class_name
+    FROM student_course_registrations scr
+    JOIN subjects sub ON scr.subject_id = sub.id
+    LEFT JOIN academic_sessions ses ON scr.academic_session_id = ses.id
+    LEFT JOIN terms t ON scr.term_id = t.id
+    LEFT JOIN classes c ON scr.class_id = c.id
+    WHERE scr.school_id = ? AND scr.student_id = ? AND scr.status != 'DROPPED'
+  `;
+  const params: any[] = [schoolId, studentId];
+  let idx = 3;
+  if (academicSessionId) {
+    pgSql += ` AND scr.academic_session_id = $${idx++}`;
+    sqSql += ` AND scr.academic_session_id = ?`;
+    params.push(academicSessionId);
+  }
+  if (termId) {
+    pgSql += ` AND scr.term_id = $${idx++}`;
+    sqSql += ` AND scr.term_id = ?`;
+    params.push(termId);
+  }
+  pgSql += ` ORDER BY ses.name DESC, t.name ASC, sub.code ASC, sub.name ASC`;
+  sqSql += ` ORDER BY ses.name DESC, t.name ASC, sub.code ASC, sub.name ASC`;
+
+  const rows = await dbAll(pgSql, sqSql, params);
+  const totalCreditUnits = rows.reduce((sum, r) => sum + Number(r.credit_units ?? 0), 0);
+  const settings = await getSchoolAcademicSettings(schoolId);
+
+  return {
+    registrations: rows,
+    totalCourses: rows.length,
+    totalCreditUnits,
+    minCreditUnits: Number(settings.min_credit_units_per_cycle ?? 12),
+    maxCreditUnits: Number(settings.max_credit_units_per_cycle ?? 24),
+  };
+}
+
+portalRouter.get(
+  '/student/course-registrations',
+  requireAuth,
+  requireTenant,
+  requireRole(STUDENT_PORTAL_ROLES),
+  async (req: AuthenticatedRequest, res) => {
+    const schoolId = req.targetSchoolId!;
+    const roleName = getEffectiveRoleName(req);
+    let targetStudentId = String(req.query.student_id || '').trim();
+
+    if (roleName === 'STUDENT') {
+      const own = await dbGet(
+        `SELECT id FROM students WHERE user_id = $1 AND school_id = $2 AND (is_deleted = 0 OR is_deleted IS NULL) LIMIT 1`,
+        `SELECT id FROM students WHERE user_id = ? AND school_id = ? AND (is_deleted = 0 OR is_deleted IS NULL) LIMIT 1`,
+        [req.user!.id, schoolId]
+      );
+      if (!own) {
+        return res.status(404).json({ error: 'STUDENT_NOT_LINKED', message: 'No student profile linked to your account.' });
+      }
+      targetStudentId = own.id;
+    }
+
+    if (!targetStudentId || !(await canAccessStudent(req, targetStudentId))) {
+      return res.status(403).json({
+        error: 'UNAUTHORIZED_STUDENT_ACCESS',
+        message: 'You are not authorized to view course registrations for this learner.',
+      });
+    }
+
+    const data = await fetchStudentCourseRegistrationsForPortal(
+      schoolId,
+      targetStudentId,
+      String(req.query.academic_session_id || '').trim() || undefined,
+      String(req.query.term_id || '').trim() || undefined
+    );
+    return res.json({ success: true, ...data });
+  }
+);
+
+portalRouter.get(
+  '/parent/course-registrations',
+  requireAuth,
+  requireTenant,
+  requireRole(PARENT_PORTAL_ROLES),
+  async (req: AuthenticatedRequest, res) => {
+    const schoolId = req.targetSchoolId!;
+    const targetStudentId = String(req.query.student_id || '').trim();
+    if (!targetStudentId) {
+      return res.status(400).json({ error: 'MISSING_STUDENT_ID', message: 'student_id is required.' });
+    }
+    if (!(await canAccessStudent(req, targetStudentId))) {
+      return res.status(403).json({
+        error: 'UNAUTHORIZED_STUDENT_ACCESS',
+        message: 'You are not authorized to view course registrations for this learner.',
+      });
+    }
+
+    const data = await fetchStudentCourseRegistrationsForPortal(
+      schoolId,
+      targetStudentId,
+      String(req.query.academic_session_id || '').trim() || undefined,
+      String(req.query.term_id || '').trim() || undefined
+    );
+    return res.json({ success: true, ...data });
+  }
+);
+
+

@@ -46,6 +46,7 @@ import { publicWebsiteRouter, schoolWebsiteRouter } from './schoolWebsiteRoutes.
 import { staffWorkspaceRouter } from './staffWorkspaceRoutes.ts';
 import { cbtRouter } from './cbtRoutes.ts';
 import { progressionRouter } from './progressionRoutes.ts';
+import { courseAndBacklogRouter } from './courseAndBacklogRoutes.ts';
 import {
   getCurrentNigerianCalendar,
   generateNextAdmissionNumber,
@@ -143,6 +144,8 @@ apiRouter.use('/v1/school', financeRouter);
 apiRouter.use('/v1/school', performanceRouter);
 // Mount Student Progression, Batch Promotion/Graduation, Rollback & Multi-Year Career Transcripts module
 apiRouter.use('/v1/school', progressionRouter);
+// Mount Bulk Courses, Course Registration, Historical Backlog Onboarding & Exam Broadsheet module
+apiRouter.use('/v1/school', courseAndBacklogRouter);
 
 // Mount Parent & Student Read-Only Portals
 apiRouter.use('/v1/portal', portalRouter);

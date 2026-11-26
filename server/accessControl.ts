@@ -27,6 +27,8 @@ export interface SchoolAcademicSettingsRecord {
   students_can_view_fees: number;
   teachers_can_view_fees: number;
   require_review_before_approve: number;
+  min_credit_units_per_cycle?: number;
+  max_credit_units_per_cycle?: number;
   pass_mark?: number;
   updated_by?: string | null;
   updated_at?: string;
@@ -274,6 +276,8 @@ export async function getSchoolAcademicSettings(schoolId: string): Promise<Schoo
       students_can_view_fees: 1,
       teachers_can_view_fees: 0,
       require_review_before_approve: 0,
+      min_credit_units_per_cycle: 12,
+      max_credit_units_per_cycle: 24,
     };
   }
 
@@ -291,6 +295,8 @@ export async function getSchoolAcademicSettings(schoolId: string): Promise<Schoo
     students_can_view_fees: Number(row.students_can_view_fees ?? 1),
     teachers_can_view_fees: Number(row.teachers_can_view_fees ?? 0),
     require_review_before_approve: Number(row.require_review_before_approve ?? 0),
+    min_credit_units_per_cycle: Number(row.min_credit_units_per_cycle ?? 12),
+    max_credit_units_per_cycle: Number(row.max_credit_units_per_cycle ?? 24),
     updated_by: row.updated_by || null,
     updated_at: row.updated_at || undefined,
   };

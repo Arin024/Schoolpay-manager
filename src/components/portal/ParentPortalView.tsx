@@ -22,6 +22,7 @@ import {
   Lock,
   Calendar,
   MonitorCheck,
+  BookOpen,
 } from 'lucide-react';
 import { api } from '../../services/api.js';
 import { useAuth } from '../../context/AuthContext.js';
@@ -29,6 +30,7 @@ import { resolveInstitutionProfile } from '../../utils/institutionMode.js';
 import {
   AcademicSessionItem,
   CbtParentResultItem,
+  CourseRegistrationItem,
   ParentDashboardData,
   ReceiptItem,
   ReportCardItem,
@@ -41,6 +43,7 @@ import { PrintableReceiptModal } from '../school/PrintableReceiptModal.js';
 
 type ParentTab =
   | 'overview'
+  | 'courses'
   | 'results'
   | 'cbt'
   | 'reports'
@@ -87,6 +90,9 @@ export const ParentPortalView: React.FC = () => {
   const [statusMsg, setStatusMsg] = useState<{ type: 'ok' | 'err'; text: string } | null>(null);
   const [cbtResults, setCbtResults] = useState<CbtParentResultItem[]>([]);
   const [cbtLoading, setCbtLoading] = useState(false);
+  const [courseRegs, setCourseRegs] = useState<CourseRegistrationItem[]>([]);
+  const [courseRegsTotalUnits, setCourseRegsTotalUnits] = useState(0);
+  const [courseRegsLoading, setCourseRegsLoading] = useState(false);
 
   const loadDashboard = async (
     studentId = selectedChildId,
@@ -154,6 +160,40 @@ export const ParentPortalView: React.FC = () => {
       cancelled = true;
     };
   }, [selectedChildId, data?.selectedChild?.id, activeSchoolId]);
+
+  useEffect(() => {
+    const activeChildId = selectedChildId || data?.selectedChild?.id;
+    if (!activeChildId) {
+      setCourseRegs([]);
+      setCourseRegsTotalUnits(0);
+      return;
+    }
+    let cancelled = false;
+    setCourseRegsLoading(true);
+    api
+      .getParentCourseRegistrations(activeChildId, {
+        academic_session_id: selectedSessionId || undefined,
+        term_id: selectedTermId || undefined,
+      })
+      .then((res) => {
+        if (!cancelled) {
+          setCourseRegs(res.registrations || []);
+          setCourseRegsTotalUnits(Number(res.totalCreditUnits || 0));
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setCourseRegs([]);
+          setCourseRegsTotalUnits(0);
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setCourseRegsLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedChildId, data?.selectedChild?.id, activeSchoolId, selectedSessionId, selectedTermId]);
 
   const handleChildChange = (childId: string) => {
     setSelectedChildId(childId);
@@ -414,6 +454,7 @@ export const ParentPortalView: React.FC = () => {
           {(
             [
               { key: 'overview', label: isTertiary ? 'My Ward(s)' : 'My Children', icon: Users },
+              { key: 'courses', label: isTertiary ? 'Registered Courses' : 'Registered Subjects', icon: BookOpen },
               { key: 'results', label: 'Examination Results', icon: BarChart3 },
               { key: 'cbt', label: 'CBT Results', icon: MonitorCheck },
               { key: 'reports', label: isTertiary ? 'Results & Transcripts' : 'Report Cards', icon: FileText },
@@ -476,6 +517,80 @@ export const ParentPortalView: React.FC = () => {
           <button type="button" onClick={() => setStatusMsg(null)}>
             <X className="w-4 h-4" />
           </button>
+        </div>
+      )}
+
+      {/* REGISTERED COURSES / SUBJECTS */}
+      {tab === 'courses' && (
+        <div className="bg-white rounded-2xl border border-slate-200 p-6 space-y-4 text-xs">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-4 border-b border-slate-200">
+            <div>
+              <h3 className="text-sm font-bold text-slate-900">
+                Registered {instLabels.subjectPlural} &amp; Credit Load
+              </h3>
+              <p className="text-slate-500 mt-0.5">
+                {data.selectedChild?.full_name} · {instLabels.studentId}:{' '}
+                <span className="font-mono font-semibold text-slate-700">{data.selectedChild?.admission_number}</span> ·{' '}
+                <span className="font-semibold text-emerald-700 tabular-nums">
+                  {courseRegs.length} {instLabels.subject.toLowerCase()}(s) · {courseRegsTotalUnits} Total Credit Units
+                </span>
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={() => window.print()}
+              className="px-3.5 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 text-white font-semibold inline-flex items-center gap-1.5 cursor-pointer self-start print:hidden"
+            >
+              <Printer className="w-3.5 h-3.5" />
+              <span>Print Course Slip</span>
+            </button>
+          </div>
+
+          {courseRegsLoading ? (
+            <p className="py-10 text-center text-slate-400">
+              Loading registered {instLabels.subjectPlural.toLowerCase()}...
+            </p>
+          ) : courseRegs.length === 0 ? (
+            <div className="py-10 text-center text-slate-400 space-y-1">
+              <p>No {instLabels.subjectPlural.toLowerCase()} registered for this selection yet.</p>
+              <p className="text-[11px]">Switch the session filter above to view previous years or contact the school.</p>
+            </div>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full text-left text-xs">
+                <thead>
+                  <tr className="border-b border-slate-200 bg-slate-50/70 text-slate-500">
+                    <th className="py-2.5 px-3">Code</th>
+                    <th className="py-2.5 px-3">{instLabels.subject} Title</th>
+                    <th className="py-2.5 px-3 text-right">Units</th>
+                    <th className="py-2.5 px-3">Session · {instLabels.cycle}</th>
+                    <th className="py-2.5 px-3">{instLabels.classLabel}</th>
+                    <th className="py-2.5 px-3">Status</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100">
+                  {courseRegs.map((reg) => (
+                    <tr key={reg.id} className="hover:bg-slate-50/60">
+                      <td className="py-2.5 px-3 font-mono font-semibold text-slate-700">{reg.subject_code || '—'}</td>
+                      <td className="py-2.5 px-3 font-semibold text-slate-900">{reg.subject_name}</td>
+                      <td className="py-2.5 px-3 text-right font-bold tabular-nums text-emerald-700">
+                        {reg.credit_units_snapshot ?? reg.credit_units}
+                      </td>
+                      <td className="py-2.5 px-3 text-slate-600">
+                        {reg.session_name || '—'} · {reg.term_name || 'All'}
+                      </td>
+                      <td className="py-2.5 px-3 text-slate-600">
+                        {reg.class_name || data.selectedChild?.class_name || '—'}
+                      </td>
+                      <td className="py-2.5 px-3 text-[11px] font-semibold text-slate-700">
+                        {reg.registration_type === 'HISTORICAL' ? 'Historical Record' : reg.status}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
         </div>
       )}
 

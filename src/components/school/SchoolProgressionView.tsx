@@ -17,6 +17,7 @@ import { api } from '../../services/api.js';
 import { useAuth } from '../../context/AuthContext.js';
 import { resolveInstitutionProfile } from '../../utils/institutionMode.js';
 import { PrintableCareerTranscriptModal } from '../performance/PrintableCareerTranscriptModal.js';
+import { HistoricalBacklogImportModal } from '../performance/HistoricalBacklogImportModal.js';
 
 type ProgressionSubTab = 'promote' | 'transcripts' | 'batches' | 'alumni';
 type DecisionAction = 'PROMOTE' | 'RETAIN' | 'PROBATION' | 'GRADUATE' | 'SKIP';
@@ -64,6 +65,7 @@ export const SchoolProgressionView: React.FC = () => {
   const [alumni, setAlumni] = useState<any[]>([]);
   const [alumniLoading, setAlumniLoading] = useState(false);
   const [alumniSearch, setAlumniSearch] = useState('');
+  const [backlogModalOpen, setBacklogModalOpen] = useState(false);
 
   const loadReferenceData = useCallback(async () => {
     setLoadingInit(true);
@@ -318,8 +320,17 @@ export const SchoolProgressionView: React.FC = () => {
           </p>
         </div>
 
-        {/* Sub-Tab Bar */}
-        <div className="inline-flex flex-wrap items-center gap-1 bg-slate-100 p-1 rounded-xl border border-slate-200">
+        {/* Right Controls: Historical Backlog Upload + Sub-Tab Bar */}
+        <div className="flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            onClick={() => setBacklogModalOpen(true)}
+            className="px-3 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold inline-flex items-center gap-1.5 cursor-pointer whitespace-nowrap shrink-0"
+          >
+            <History className="w-3.5 h-3.5" />
+            <span>Upload Previous Years / {labels.classPlural}</span>
+          </button>
+          <div className="inline-flex flex-wrap items-center gap-1 bg-slate-100 p-1 rounded-xl border border-slate-200">
           {[
             { id: 'promote', label: 'Promote & Graduate', icon: ArrowRight },
             { id: 'transcripts', label: 'Career Transcripts', icon: FileText },
@@ -342,6 +353,7 @@ export const SchoolProgressionView: React.FC = () => {
               </button>
             );
           })}
+          </div>
         </div>
       </div>
 
@@ -940,6 +952,24 @@ export const SchoolProgressionView: React.FC = () => {
           onClose={() => setActiveTranscript(null)}
           canPublish
           onPublish={handlePublishCareerTranscript}
+        />
+      )}
+
+      {backlogModalOpen && (
+        <HistoricalBacklogImportModal
+          students={allStudents}
+          isTertiary={isTertiary}
+          subjectLabel={labels.subject}
+          subjectPlural={labels.subjectPlural}
+          classLabel={labels.classLabel}
+          cycleLabel={labels.cycle}
+          learnerLabel={isTertiary ? 'Student' : 'Learner'}
+          onClose={() => setBacklogModalOpen(false)}
+          onImported={async (msg) => {
+            setBacklogModalOpen(false);
+            setBanner({ type: 'success', text: msg });
+            await loadReferenceData();
+          }}
         />
       )}
     </div>
