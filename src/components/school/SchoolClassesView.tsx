@@ -26,6 +26,7 @@ const K12_ARM_QUICK_PRESETS = [
 ];
 
 const TERTIARY_DEPT_QUICK_PRESETS = [
+  { label: 'Family Healthcare, CHEW, Public Health, Med Lab', value: 'Family Healthcare, Community Health Extension Workers (CHEW), Public Health, Medical Laboratory' },
   { label: 'Computer Science, Accounting, Business Admin', value: 'Computer Science, Accounting, Business Admin' },
   { label: 'Mass Comm, Economics, Political Science', value: 'Mass Communication, Economics, Political Science' },
   { label: 'Nursing, Public Health, Med Lab', value: 'Nursing Science, Public Health, Medical Laboratory' },

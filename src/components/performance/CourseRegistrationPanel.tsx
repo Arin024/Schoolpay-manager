@@ -12,12 +12,16 @@ import {
   RefreshCw,
   Layers,
   Award,
+  Building2,
+  ClipboardCheck,
+  ArrowRight,
 } from 'lucide-react';
 import { api } from '../../services/api';
 import {
   AcademicSessionItem,
   ClassItem,
   CourseRegistrationItem,
+  DepartmentSummaryItem,
   Student,
   SubjectItem,
 } from '../../types';
@@ -33,6 +37,7 @@ interface CourseRegistrationPanelProps {
   classes: ClassItem[];
   subjects: SubjectItem[];
   students: Student[];
+  departments?: DepartmentSummaryItem[];
   isAdmin: boolean;
   isTertiary: boolean;
   subjectLabel: string;
@@ -43,16 +48,32 @@ interface CourseRegistrationPanelProps {
   learnerLabel: string;
   learnerPlural: string;
   onOpenHistoricalBacklog: () => void;
-  onOpenBulkCourses: (prefillClassId?: string, prefillSemesterTag?: CanonicalSemesterTag) => void;
+  onOpenBulkCourses: (
+    prefillClassId?: string,
+    prefillSemesterTag?: CanonicalSemesterTag,
+    prefillDepartment?: string
+  ) => void;
   onOpenSessionReports?: () => void;
+  onLaunchGradingFromRegistrations?: (params: {
+    academic_session_id: string;
+    term_id: string;
+    class_id?: string | null;
+    department?: string | null;
+  }) => Promise<void> | void;
   onToast: (type: 'success' | 'error', text: string) => void;
 }
+
+const isGeneralOrSharedCourse = (sub: SubjectItem): boolean => {
+  const dept = (sub.department || '').trim().toLowerCase();
+  return !dept || dept === 'general' || dept === 'shared' || dept === 'all' || sub.course_type === 'GENERAL';
+};
 
 export const CourseRegistrationPanel: React.FC<CourseRegistrationPanelProps> = ({
   sessions,
   classes,
   subjects,
   students,
+  departments = [],
   isAdmin,
   isTertiary,
   subjectLabel,
@@ -65,6 +86,7 @@ export const CourseRegistrationPanel: React.FC<CourseRegistrationPanelProps> = (
   onOpenHistoricalBacklog,
   onOpenBulkCourses,
   onOpenSessionReports,
+  onLaunchGradingFromRegistrations,
   onToast,
 }) => {
   const activeSession = sessions.find((s) => s.status === 'ACTIVE') || sessions[0];
@@ -72,6 +94,8 @@ export const CourseRegistrationPanel: React.FC<CourseRegistrationPanelProps> = (
   // termId === '__ALL__' shows Full-Session Combined aggregation across all semesters/terms
   const [termId, setTermId] = useState(activeSession?.terms?.[0]?.id || '');
   const [classId, setClassId] = useState('');
+  const [department, setDepartment] = useState('');
+  const [includeGeneralCourses, setIncludeGeneralCourses] = useState(true);
   const [targetMode, setTargetMode] = useState<'CLASS' | 'STUDENTS'>('CLASS');
   const [selectedStudentIds, setSelectedStudentIds] = useState<string[]>([]);
   const [selectedSubjectIds, setSelectedSubjectIds] = useState<string[]>([]);
@@ -81,6 +105,7 @@ export const CourseRegistrationPanel: React.FC<CourseRegistrationPanelProps> = (
 
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [launchingGrading, setLaunchingGrading] = useState(false);
   const [registrations, setRegistrations] = useState<CourseRegistrationItem[]>([]);
   const [studentSummaries, setStudentSummaries] = useState<
     Array<{
@@ -88,6 +113,7 @@ export const CourseRegistrationPanel: React.FC<CourseRegistrationPanelProps> = (
       student_name: string;
       admission_number: string | null;
       class_name: string | null;
+      department?: string | null;
       courses_count: number;
       total_credit_units: number;
       exceeds_max_units: boolean;
@@ -100,6 +126,9 @@ export const CourseRegistrationPanel: React.FC<CourseRegistrationPanelProps> = (
       }>;
       courses: CourseRegistrationItem[];
     }>
+  >([]);
+  const [departmentSummaries, setDepartmentSummaries] = useState<
+    Array<{ department: string; registered_students_count: number; registrations_count: number }>
   >([]);
   const [policy, setPolicy] = useState({ min_credit_units_per_cycle: 12, max_credit_units_per_cycle: 24 });
   const [printingStudentId, setPrintingStudentId] = useState<string | null>(null);
@@ -115,6 +144,24 @@ export const CourseRegistrationPanel: React.FC<CourseRegistrationPanelProps> = (
     () => (selectedTerm ? normalizeSemesterTag(selectedTerm.name) : ''),
     [selectedTerm]
   );
+
+  // Discover canonical list of departments/arms across API summary, class arms, students, and courses
+  const availableDepartments = useMemo(() => {
+    const map = new Map<string, string>();
+    const add = (val?: string | null) => {
+      const cleaned = (val || '').trim();
+      if (!cleaned) return;
+      const lower = cleaned.toLowerCase();
+      if (lower === 'general' || lower === 'general / unassigned') return;
+      if (!map.has(lower)) map.set(lower, cleaned);
+    };
+    departments.forEach((d) => add(d.name));
+    classes.forEach((c) => (c.arms || []).forEach((a) => add(a.name)));
+    students.forEach((s) => add(s.class_arm_name));
+    subjects.forEach((s) => add(s.department));
+    departmentSummaries.forEach((d) => add(d.department));
+    return Array.from(map.values()).sort((a, b) => a.localeCompare(b));
+  }, [departments, classes, students, subjects, departmentSummaries]);
 
   useEffect(() => {
     if (!sessionId && sessions.length > 0) {
@@ -138,9 +185,11 @@ export const CourseRegistrationPanel: React.FC<CourseRegistrationPanelProps> = (
         academic_session_id: sessionId || undefined,
         term_id: isFullSessionView ? undefined : termId || undefined,
         class_id: classId || undefined,
+        department: department || undefined,
       });
       setRegistrations(res.registrations || []);
       setStudentSummaries(res.studentSummaries || []);
+      setDepartmentSummaries(res.departmentSummaries || []);
       if (res.policy) setPolicy(res.policy);
     } catch (err: any) {
       onToast('error', err?.message || 'Failed to load course registrations.');
@@ -151,31 +200,44 @@ export const CourseRegistrationPanel: React.FC<CourseRegistrationPanelProps> = (
 
   useEffect(() => {
     loadRegistrations();
-  }, [sessionId, termId, classId]);
+  }, [sessionId, termId, classId, department]);
 
   const filteredStudents = useMemo(() => {
-    if (!classId) return students;
-    return students.filter((s) => s.class_id === classId);
-  }, [students, classId]);
+    const deptKey = department.trim().toLowerCase();
+    return students.filter((s) => {
+      if (classId && s.class_id !== classId) return false;
+      if (deptKey) {
+        const stuDept = (s.class_arm_name || '').trim().toLowerCase();
+        if (stuDept !== deptKey) return false;
+      }
+      return true;
+    });
+  }, [students, classId, department]);
 
   const activeSubjects = useMemo(() => {
     return subjects.filter((s) => s.status !== 'INACTIVE');
   }, [subjects]);
 
-  // Courses strictly matching the selected Level (classId) AND selected Semester/Term
+  // Courses strictly matching the selected Level (classId), Department, AND selected Semester/Term
   const matchingCycleSubjects = useMemo(() => {
+    const deptKey = department.trim().toLowerCase();
     return activeSubjects.filter((s) => {
       const matchesClass = !classId || !s.class_id || s.class_id === classId;
       const matchesSem = selectedTerm ? termMatchesSemesterTag(selectedTerm.name, s.semester_tag) : true;
-      return matchesClass && matchesSem;
+      if (!matchesClass || !matchesSem) return false;
+      if (!deptKey) return true;
+      const subDept = (s.department || '').trim().toLowerCase();
+      if (subDept === deptKey) return true;
+      if (includeGeneralCourses && isGeneralOrSharedCourse(s)) return true;
+      return false;
     });
-  }, [activeSubjects, classId, selectedTerm]);
+  }, [activeSubjects, classId, selectedTerm, department, includeGeneralCourses]);
 
   const displayedSubjects = useMemo(() => {
     if (showOtherSemesters || registrationType === 'CARRYOVER') {
       return activeSubjects;
     }
-    return matchingCycleSubjects.length > 0 ? matchingCycleSubjects : activeSubjects;
+    return matchingCycleSubjects;
   }, [activeSubjects, matchingCycleSubjects, showOtherSemesters, registrationType]);
 
   const hiddenOtherCount = Math.max(0, activeSubjects.length - matchingCycleSubjects.length);
@@ -201,6 +263,12 @@ export const CourseRegistrationPanel: React.FC<CourseRegistrationPanelProps> = (
     setSelectedSubjectIds([]);
   };
 
+  const handleSelectDepartment = (nextDept: string) => {
+    setDepartment(nextDept);
+    setSelectedStudentIds([]);
+    setSelectedSubjectIds([]);
+  };
+
   const handleBulkRegister = async () => {
     if (!sessionId || !termId || isFullSessionView) {
       onToast('error', `Select a specific Academic Session and ${cycleLabel} first.`);
@@ -210,8 +278,8 @@ export const CourseRegistrationPanel: React.FC<CourseRegistrationPanelProps> = (
       onToast('error', `Select at least one ${subjectLabel.toLowerCase()} to register.`);
       return;
     }
-    if (targetMode === 'CLASS' && !classId) {
-      onToast('error', `Select a ${classLabel} or switch to specific ${learnerPlural.toLowerCase()}.`);
+    if (targetMode === 'CLASS' && !classId && !department) {
+      onToast('error', `Select a ${classLabel} or Department, or switch to specific ${learnerPlural.toLowerCase()}.`);
       return;
     }
     if (targetMode === 'STUDENTS' && selectedStudentIds.length === 0) {
@@ -239,6 +307,7 @@ export const CourseRegistrationPanel: React.FC<CourseRegistrationPanelProps> = (
         academic_session_id: sessionId,
         term_id: termId,
         class_id: classId || null,
+        department: department || null,
         student_ids: targetMode === 'STUDENTS' ? selectedStudentIds : undefined,
         subject_ids: subjectPayload,
         registration_type: registrationType,
@@ -263,11 +332,28 @@ export const CourseRegistrationPanel: React.FC<CourseRegistrationPanelProps> = (
     }
   };
 
+  const handleLaunchGrading = async () => {
+    if (!onLaunchGradingFromRegistrations || !sessionId || !termId || isFullSessionView) return;
+    setLaunchingGrading(true);
+    try {
+      await onLaunchGradingFromRegistrations({
+        academic_session_id: sessionId,
+        term_id: termId,
+        class_id: classId || null,
+        department: department || null,
+      });
+    } finally {
+      setLaunchingGrading(false);
+    }
+  };
+
   const printingStudent = printingStudentId
     ? studentSummaries.find((s) => s.student_id === printingStudentId) || null
     : null;
 
   const selectedClassName = classId ? classes.find((c) => c.id === classId)?.name || '' : '';
+  const deptLabel = isTertiary ? 'Department / Programme' : 'Department / Arm';
+  const cohortTitle = [selectedClassName, department].filter(Boolean).join(' · ') || classLabel;
 
   return (
     <div className="space-y-5">
@@ -276,18 +362,18 @@ export const CourseRegistrationPanel: React.FC<CourseRegistrationPanelProps> = (
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div>
             <h3 className="text-sm font-bold text-slate-900">
-              Bulk {subjectLabel} Registration &amp; Credit Unit Allocation
+              Department &amp; {cycleLabel} Bulk {subjectLabel} Registration
             </h3>
             <p className="text-xs text-slate-500 mt-0.5">
-              Register each {classLabel.toLowerCase()} separately by {cycleLabel.toLowerCase()} (e.g. 100L 1st {cycleLabel} vs 2nd {cycleLabel}). At the end of the session, all {cycleLabel.toLowerCase()}s automatically aggregate into the combined Sessional Result &amp; CGPA.
+              Register each {deptLabel.toLowerCase()} &amp; {classLabel.toLowerCase()} independently per {cycleLabel.toLowerCase()} (e.g. Family Healthcare vs CHEW vs Public Health). Registered {subjectPlural.toLowerCase()} flow directly into Exam Grading &amp; CGPA compilation.
             </p>
           </div>
           {isAdmin && (
             <div className="flex flex-wrap items-center gap-2">
               <button
                 type="button"
-                onClick={() => onOpenBulkCourses(classId || '', activeSemesterCanonical)}
-                className="px-3 py-1.5 text-xs font-semibold text-slate-700 bg-white border border-slate-200 rounded-lg hover:bg-slate-50 flex items-center gap-1.5"
+                onClick={() => onOpenBulkCourses(classId || '', activeSemesterCanonical, department || '')}
+                className="px-3 py-1.5 text-xs font-semibold text-slate-700 bg-white border border-slate-200 rounded-lg hover:bg-slate-50 flex items-center gap-1.5 cursor-pointer"
               >
                 <BookOpen className="w-3.5 h-3.5 text-emerald-700" />
                 Bulk Add {subjectPlural}
@@ -295,7 +381,7 @@ export const CourseRegistrationPanel: React.FC<CourseRegistrationPanelProps> = (
               <button
                 type="button"
                 onClick={onOpenHistoricalBacklog}
-                className="px-3 py-1.5 text-xs font-semibold text-white bg-slate-900 rounded-lg hover:bg-slate-800 flex items-center gap-1.5"
+                className="px-3 py-1.5 text-xs font-semibold text-white bg-slate-900 rounded-lg hover:bg-slate-800 flex items-center gap-1.5 cursor-pointer"
               >
                 <History className="w-3.5 h-3.5 text-emerald-400" />
                 Upload Previous Years / Backlog
@@ -304,8 +390,8 @@ export const CourseRegistrationPanel: React.FC<CourseRegistrationPanelProps> = (
           )}
         </div>
 
-        {/* Cycle & Class Filters */}
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+        {/* Cycle, Class, Department & Type Filters */}
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3">
           <div>
             <label className="block text-[11px] font-semibold text-slate-600 uppercase tracking-wider mb-1">
               Academic Session
@@ -373,6 +459,25 @@ export const CourseRegistrationPanel: React.FC<CourseRegistrationPanelProps> = (
 
           <div>
             <label className="block text-[11px] font-semibold text-slate-600 uppercase tracking-wider mb-1">
+              {deptLabel}
+            </label>
+            <select
+              value={department}
+              onChange={(e) => handleSelectDepartment(e.target.value)}
+              aria-label={`Filter by ${deptLabel}`}
+              className="w-full px-3 py-2 text-xs bg-white border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500 font-medium"
+            >
+              <option value="">All Departments</option>
+              {availableDepartments.map((d) => (
+                <option key={d} value={d}>
+                  {d}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <div>
+            <label className="block text-[11px] font-semibold text-slate-600 uppercase tracking-wider mb-1">
               Registration Type
             </label>
             <select
@@ -387,6 +492,52 @@ export const CourseRegistrationPanel: React.FC<CourseRegistrationPanelProps> = (
             </select>
           </div>
         </div>
+
+        {/* One-Click Department Switcher Bar */}
+        {availableDepartments.length > 0 && (
+          <div className="pt-2 border-t border-slate-100 flex flex-wrap items-center gap-1.5">
+            <span className="text-[11px] font-semibold text-slate-500 mr-1 flex items-center gap-1">
+              <Building2 className="w-3.5 h-3.5 text-emerald-600" />
+              {deptLabel}:
+            </span>
+            <button
+              type="button"
+              onClick={() => handleSelectDepartment('')}
+              className={`px-2.5 py-1 text-xs font-semibold rounded-lg border transition-colors cursor-pointer ${
+                !department
+                  ? 'bg-slate-900 text-white border-slate-900'
+                  : 'bg-white text-slate-700 border-slate-200 hover:bg-slate-50'
+              }`}
+            >
+              All ({students.filter((s) => !classId || s.class_id === classId).length})
+            </button>
+            {availableDepartments.map((deptName) => {
+              const deptStuCount = students.filter(
+                (s) =>
+                  (!classId || s.class_id === classId) &&
+                  (s.class_arm_name || '').trim().toLowerCase() === deptName.toLowerCase()
+              ).length;
+              const isSelected = department.toLowerCase() === deptName.toLowerCase();
+              return (
+                <button
+                  key={deptName}
+                  type="button"
+                  onClick={() => handleSelectDepartment(deptName)}
+                  className={`px-2.5 py-1 text-xs font-semibold rounded-lg border transition-colors cursor-pointer ${
+                    isSelected
+                      ? 'bg-emerald-600 text-white border-emerald-600'
+                      : 'bg-white text-slate-700 border-slate-200 hover:bg-slate-50'
+                  }`}
+                >
+                  {deptName}{' '}
+                  <span className={`tabular-nums ${isSelected ? 'text-emerald-100' : 'text-slate-400'}`}>
+                    ({deptStuCount})
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+        )}
 
         {/* One-Click Level x Semester Switcher Bar */}
         {sessionTerms.length > 0 && (
@@ -433,6 +584,23 @@ export const CourseRegistrationPanel: React.FC<CourseRegistrationPanelProps> = (
                 Compile End-of-Session Results / CGPA
               </button>
             )}
+
+            {!isFullSessionView && isAdmin && onLaunchGradingFromRegistrations && registrations.length > 0 && (
+              <button
+                type="button"
+                disabled={launchingGrading}
+                onClick={handleLaunchGrading}
+                className="px-3 py-1.5 text-xs font-bold text-white bg-slate-900 hover:bg-emerald-700 rounded-lg transition-colors flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
+              >
+                <ClipboardCheck className="w-3.5 h-3.5 text-emerald-400" />
+                <span>
+                  {launchingGrading
+                    ? 'Opening Grading Queue...'
+                    : `Grade Registered ${subjectPlural}${department ? ` (${department})` : ''}`}
+                </span>
+                <ArrowRight className="w-3.5 h-3.5" />
+              </button>
+            )}
           </div>
         )}
       </div>
@@ -465,22 +633,24 @@ export const CourseRegistrationPanel: React.FC<CourseRegistrationPanelProps> = (
       {isAdmin && !isFullSessionView && (
         <div className="bg-white border border-slate-200 rounded-xl p-4 space-y-4">
           <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-100 pb-3">
-            <div className="flex items-center gap-2">
+            <div className="flex flex-wrap items-center gap-2">
               <button
                 type="button"
                 onClick={() => setTargetMode('CLASS')}
-                className={`px-3 py-1.5 text-xs font-semibold rounded-lg border ${
+                className={`px-3 py-1.5 text-xs font-semibold rounded-lg border cursor-pointer ${
                   targetMode === 'CLASS'
                     ? 'bg-emerald-600 text-white border-emerald-600'
                     : 'bg-white text-slate-700 border-slate-200 hover:bg-slate-50'
                 }`}
               >
-                Whole {classLabel} ({classId ? filteredStudents.length : 0})
+                {department
+                  ? `Whole ${cohortTitle} Cohort (${classId || department ? filteredStudents.length : 0})`
+                  : `Whole ${classLabel} (${classId ? filteredStudents.length : 0})`}
               </button>
               <button
                 type="button"
                 onClick={() => setTargetMode('STUDENTS')}
-                className={`px-3 py-1.5 text-xs font-semibold rounded-lg border ${
+                className={`px-3 py-1.5 text-xs font-semibold rounded-lg border cursor-pointer ${
                   targetMode === 'STUDENTS'
                     ? 'bg-emerald-600 text-white border-emerald-600'
                     : 'bg-white text-slate-700 border-slate-200 hover:bg-slate-50'
@@ -549,7 +719,12 @@ export const CourseRegistrationPanel: React.FC<CourseRegistrationPanelProps> = (
                       ) : (
                         <Square className="w-3.5 h-3.5 text-slate-400 shrink-0" />
                       )}
-                      <span className="truncate font-medium">{stu.full_name}</span>
+                      <div className="min-w-0 flex-1">
+                        <span className="truncate block font-medium">{stu.full_name}</span>
+                        {stu.class_arm_name && (
+                          <span className="text-[10px] text-slate-500 truncate block">{stu.class_arm_name}</span>
+                        )}
+                      </div>
                       <span className="ml-auto text-[10px] font-mono text-slate-500 shrink-0">{stu.admission_number}</span>
                     </button>
                   );
@@ -563,9 +738,21 @@ export const CourseRegistrationPanel: React.FC<CourseRegistrationPanelProps> = (
             <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
               <div className="flex flex-wrap items-center gap-2">
                 <span className="font-semibold text-slate-700">
-                  Select {selectedTerm ? `${selectedTerm.name} ` : ''}
+                  Select {department ? `${department} ` : ''}
+                  {selectedTerm ? `${selectedTerm.name} ` : ''}
                   {subjectPlural} (adjust credit units inline if needed)
                 </span>
+                {department && (
+                  <label className="inline-flex items-center gap-1.5 text-[11px] text-slate-700 cursor-pointer bg-emerald-50/70 px-2 py-0.5 rounded border border-emerald-200">
+                    <input
+                      type="checkbox"
+                      checked={includeGeneralCourses}
+                      onChange={(e) => setIncludeGeneralCourses(e.target.checked)}
+                      className="rounded border-slate-300 text-emerald-600"
+                    />
+                    Include General / Shared (GST/GNS)
+                  </label>
+                )}
                 {hiddenOtherCount > 0 && registrationType !== 'CARRYOVER' && (
                   <label className="inline-flex items-center gap-1.5 text-[11px] text-slate-600 cursor-pointer bg-slate-50 px-2 py-0.5 rounded border border-slate-200">
                     <input
@@ -574,7 +761,7 @@ export const CourseRegistrationPanel: React.FC<CourseRegistrationPanelProps> = (
                       onChange={(e) => setShowOtherSemesters(e.target.checked)}
                       className="rounded border-slate-300 text-emerald-600"
                     />
-                    Show {hiddenOtherCount} from other {classLabel.toLowerCase()}s / {cycleLabel.toLowerCase()}s (carryovers)
+                    Show {hiddenOtherCount} from other departments / levels (carryovers)
                   </label>
                 )}
               </div>
@@ -584,15 +771,15 @@ export const CourseRegistrationPanel: React.FC<CourseRegistrationPanelProps> = (
                   onClick={() => {
                     setSelectedSubjectIds(matchingCycleSubjects.map((s) => s.id));
                   }}
-                  className="text-emerald-700 hover:underline font-medium"
+                  className="text-emerald-700 hover:underline font-medium cursor-pointer"
                 >
-                  Select Matching {selectedTerm ? `${selectedTerm.name} ` : ''}{subjectPlural} ({matchingCycleSubjects.length})
+                  Select Matching ({matchingCycleSubjects.length})
                 </button>
                 <span className="text-slate-300">·</span>
                 <button
                   type="button"
                   onClick={() => setSelectedSubjectIds([])}
-                  className="text-slate-500 hover:underline"
+                  className="text-slate-500 hover:underline cursor-pointer"
                 >
                   Clear
                 </button>
@@ -603,6 +790,29 @@ export const CourseRegistrationPanel: React.FC<CourseRegistrationPanelProps> = (
               <div className="p-6 text-center border border-dashed border-slate-300 rounded-lg text-xs text-slate-500">
                 No {subjectPlural.toLowerCase()} configured yet. Click <strong>Bulk Add {subjectPlural}</strong> above to add your curriculum in seconds.
               </div>
+            ) : displayedSubjects.length === 0 ? (
+              <div className="p-6 text-center border border-dashed border-slate-300 rounded-lg text-xs text-slate-500 space-y-2">
+                <p>
+                  No {subjectPlural.toLowerCase()} tagged for <strong>{department || 'this filter'}</strong> in{' '}
+                  <strong>{selectedTerm?.name || cycleLabel}</strong> yet.
+                </p>
+                <div className="flex flex-wrap items-center justify-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => onOpenBulkCourses(classId || '', activeSemesterCanonical, department || '')}
+                    className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg font-semibold cursor-pointer"
+                  >
+                    Bulk Upload {department ? `${department} ` : ''}{subjectPlural}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setShowOtherSemesters(true)}
+                    className="px-3 py-1.5 bg-white border border-slate-200 text-slate-700 rounded-lg font-medium hover:bg-slate-50 cursor-pointer"
+                  >
+                    Show All {activeSubjects.length} Catalog {subjectPlural}
+                  </button>
+                </div>
+              </div>
             ) : (
               <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-2 max-h-64 overflow-y-auto pr-1">
                 {displayedSubjects.map((sub) => {
@@ -612,6 +822,7 @@ export const CourseRegistrationPanel: React.FC<CourseRegistrationPanelProps> = (
                       ? unitOverrides[sub.id]
                       : String(sub.credit_units ?? 3);
                   const semLabel = formatSemesterTagLabel(sub.semester_tag, cycleLabel, cycleLabels);
+                  const deptDisplay = (sub.department || '').trim() || 'General / Shared';
                   return (
                     <div
                       key={sub.id}
@@ -624,7 +835,7 @@ export const CourseRegistrationPanel: React.FC<CourseRegistrationPanelProps> = (
                       <button
                         type="button"
                         onClick={() => toggleSubject(sub.id)}
-                        className="flex items-center gap-2 text-left min-w-0 flex-1"
+                        className="flex items-center gap-2 text-left min-w-0 flex-1 cursor-pointer"
                       >
                         {checked ? (
                           <CheckSquare className="w-4 h-4 text-emerald-600 shrink-0" />
@@ -637,7 +848,8 @@ export const CourseRegistrationPanel: React.FC<CourseRegistrationPanelProps> = (
                             {sub.name}
                           </p>
                           <p className="text-[11px] text-slate-500 truncate">
-                            {sub.class_name || `All ${classLabel}s`} · {semLabel} · {sub.course_type || 'CORE'}
+                            <span className="font-medium text-slate-700">{deptDisplay}</span> ·{' '}
+                            {sub.class_name || `All ${classLabel}s`} · {semLabel}
                           </p>
                         </div>
                       </button>
@@ -677,13 +889,13 @@ export const CourseRegistrationPanel: React.FC<CourseRegistrationPanelProps> = (
               type="button"
               disabled={saving || selectedSubjectIds.length === 0}
               onClick={handleBulkRegister}
-              className="px-4 py-2 text-xs font-semibold text-white bg-emerald-600 rounded-lg hover:bg-emerald-700 disabled:opacity-50 flex items-center gap-1.5"
+              className="px-4 py-2 text-xs font-semibold text-white bg-emerald-600 rounded-lg hover:bg-emerald-700 disabled:opacity-50 flex items-center gap-1.5 cursor-pointer"
             >
               <CheckCircle2 className="w-4 h-4" />
               {saving
                 ? 'Registering...'
                 : targetMode === 'CLASS'
-                ? `Bulk Register ${selectedSubjectIds.length} ${subjectPlural} for ${selectedClassName || classLabel} (${selectedTerm?.name || cycleLabel})`
+                ? `Bulk Register ${selectedSubjectIds.length} ${subjectPlural} for ${cohortTitle} (${selectedTerm?.name || cycleLabel})`
                 : `Register ${selectedSubjectIds.length} ${subjectPlural} for ${selectedStudentIds.length} ${learnerPlural}`}
             </button>
           </div>
@@ -692,23 +904,36 @@ export const CourseRegistrationPanel: React.FC<CourseRegistrationPanelProps> = (
 
       {/* Registered Roster Table */}
       <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
-        <div className="px-4 py-3 border-b border-slate-200 flex items-center justify-between gap-2">
+        <div className="px-4 py-3 border-b border-slate-200 flex flex-wrap items-center justify-between gap-2">
           <div>
             <h4 className="text-xs font-bold text-slate-900 uppercase tracking-wider">
               {isFullSessionView
                 ? `Full-Session Aggregated ${subjectPlural} Ledger (${selectedSession?.name || ''})`
-                : `Registered ${subjectPlural} Ledger · ${selectedTerm?.name || ''}`}{' '}
+                : `Registered ${subjectPlural} Ledger · ${selectedTerm?.name || ''}${department ? ` · ${department}` : ''}`}{' '}
               ({registrations.length} registrations · {studentSummaries.length} {learnerPlural.toLowerCase()})
             </h4>
           </div>
-          <button
-            type="button"
-            onClick={loadRegistrations}
-            className="text-xs text-slate-600 hover:text-slate-900 flex items-center gap-1"
-          >
-            <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} />
-            Refresh
-          </button>
+          <div className="flex items-center gap-2">
+            {!isFullSessionView && isAdmin && onLaunchGradingFromRegistrations && registrations.length > 0 && (
+              <button
+                type="button"
+                disabled={launchingGrading}
+                onClick={handleLaunchGrading}
+                className="px-3 py-1.5 text-xs font-bold text-emerald-800 bg-emerald-50 border border-emerald-200 rounded-lg hover:bg-emerald-100 flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
+              >
+                <ClipboardCheck className="w-3.5 h-3.5" />
+                <span>Grade Registered {subjectPlural} →</span>
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={loadRegistrations}
+              className="text-xs text-slate-600 hover:text-slate-900 flex items-center gap-1 cursor-pointer"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} />
+              Refresh
+            </button>
+          </div>
         </div>
 
         {loading ? (
@@ -723,15 +948,20 @@ export const CourseRegistrationPanel: React.FC<CourseRegistrationPanelProps> = (
               <div key={stu.student_id} className="p-4 space-y-2.5">
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <div>
-                    <p className="text-sm font-semibold text-slate-900">
-                      {stu.student_name}
+                    <p className="text-sm font-semibold text-slate-900 flex flex-wrap items-center gap-2">
+                      <span>{stu.student_name}</span>
                       {stu.admission_number && (
-                        <span className="ml-2 text-xs font-mono font-normal text-slate-500">
+                        <span className="text-xs font-mono font-normal text-slate-500">
                           {stu.admission_number}
                         </span>
                       )}
+                      {stu.department && (
+                        <span className="text-[11px] font-semibold px-2 py-0.5 rounded bg-slate-100 text-slate-700 border border-slate-200">
+                          {stu.department}
+                        </span>
+                      )}
                     </p>
-                    <p className="text-xs text-slate-500 tabular-nums">
+                    <p className="text-xs text-slate-500 tabular-nums mt-0.5">
                       {stu.class_name || 'Unassigned'} · {stu.courses_count} {subjectPlural.toLowerCase()} ·{' '}
                       <span className={stu.exceeds_max_units ? 'text-red-600 font-semibold' : 'text-slate-700 font-semibold'}>
                         {stu.total_credit_units} {isFullSessionView ? 'Session Total Credit Units' : 'Credit Units'}
@@ -759,7 +989,7 @@ export const CourseRegistrationPanel: React.FC<CourseRegistrationPanelProps> = (
                   <button
                     type="button"
                     onClick={() => setPrintingStudentId(stu.student_id)}
-                    className="px-2.5 py-1.5 text-xs font-medium text-slate-700 bg-white border border-slate-200 rounded-lg hover:bg-slate-50 flex items-center gap-1.5"
+                    className="px-2.5 py-1.5 text-xs font-medium text-slate-700 bg-white border border-slate-200 rounded-lg hover:bg-slate-50 flex items-center gap-1.5 cursor-pointer"
                   >
                     <Printer className="w-3.5 h-3.5" />
                     {isFullSessionView ? 'Session Course Form' : 'Course Form Slip'}
@@ -773,6 +1003,7 @@ export const CourseRegistrationPanel: React.FC<CourseRegistrationPanelProps> = (
                         {isFullSessionView && <th className="py-1.5 pr-3">{cycleLabel}</th>}
                         <th className="py-1.5 pr-3">Code</th>
                         <th className="py-1.5 pr-3">{subjectLabel}</th>
+                        <th className="py-1.5 pr-3">Department</th>
                         <th className="py-1.5 pr-3">Units</th>
                         <th className="py-1.5 pr-3">Type</th>
                         {isAdmin && <th className="py-1.5 text-right">Action</th>}
@@ -788,6 +1019,7 @@ export const CourseRegistrationPanel: React.FC<CourseRegistrationPanelProps> = (
                           )}
                           <td className="py-1.5 pr-3 font-mono font-semibold text-slate-700">{c.subject_code}</td>
                           <td className="py-1.5 pr-3 text-slate-800">{c.subject_name}</td>
+                          <td className="py-1.5 pr-3 text-slate-500">{c.subject_department || 'General'}</td>
                           <td className="py-1.5 pr-3 font-semibold tabular-nums text-slate-900">{c.credit_units}</td>
                           <td className="py-1.5 pr-3 text-slate-500">{c.registration_type}</td>
                           {isAdmin && (
@@ -795,7 +1027,7 @@ export const CourseRegistrationPanel: React.FC<CourseRegistrationPanelProps> = (
                               <button
                                 type="button"
                                 onClick={() => handleDropRegistration(c.id)}
-                                className="text-slate-400 hover:text-red-600 p-1"
+                                className="text-slate-400 hover:text-red-600 p-1 cursor-pointer"
                                 title="Drop registration"
                               >
                                 <Trash2 className="w-3.5 h-3.5" />
@@ -825,7 +1057,7 @@ export const CourseRegistrationPanel: React.FC<CourseRegistrationPanelProps> = (
                 <button
                   type="button"
                   onClick={() => window.print()}
-                  className="px-3 py-1.5 text-xs font-semibold bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 flex items-center gap-1.5"
+                  className="px-3 py-1.5 text-xs font-semibold bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 flex items-center gap-1.5 cursor-pointer"
                 >
                   <Printer className="w-3.5 h-3.5" />
                   Print Slip
@@ -833,7 +1065,7 @@ export const CourseRegistrationPanel: React.FC<CourseRegistrationPanelProps> = (
                 <button
                   type="button"
                   onClick={() => setPrintingStudentId(null)}
-                  className="px-3 py-1.5 text-xs font-semibold text-slate-600 bg-slate-100 rounded-lg hover:bg-slate-200"
+                  className="px-3 py-1.5 text-xs font-semibold text-slate-600 bg-slate-100 rounded-lg hover:bg-slate-200 cursor-pointer"
                 >
                   Close
                 </button>
@@ -846,6 +1078,11 @@ export const CourseRegistrationPanel: React.FC<CourseRegistrationPanelProps> = (
                   <p className="text-xs text-slate-600 mt-0.5">
                     ID: <span className="font-mono font-semibold">{printingStudent.admission_number || '—'}</span> ·{' '}
                     {classLabel}: <strong>{printingStudent.class_name || '—'}</strong>
+                    {printingStudent.department && (
+                      <>
+                        {' '}· Department: <strong>{printingStudent.department}</strong>
+                      </>
+                    )}
                   </p>
                 </div>
                 <div className="text-right text-xs text-slate-600">

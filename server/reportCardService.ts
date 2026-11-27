@@ -235,14 +235,42 @@ export async function compileTermReportCard(
     const max = Number(s.total_max_score) > 0 ? Number(s.total_max_score) : 100;
     return acc + (Number(s.total_score) / max) * 100;
   }, 0);
-  const activeSubjects = await dbAll(
-    `SELECT id FROM subjects WHERE school_id = $1 AND status = 'ACTIVE' AND (is_deleted = 0 OR is_deleted IS NULL)`,
-    `SELECT id FROM subjects WHERE school_id = ? AND status = 'ACTIVE' AND (is_deleted = 0 OR is_deleted IS NULL)`,
-    [schoolId]
-  );
+  // Scope expected subject count under missing_score_policy='ZERO':
+  // Prefer student's actual registered courses for this cycle; otherwise scope by class + department (never cross-department!)
+  let expectedSubjectCount = valid.length;
+  if (settings.missing_score_policy === 'ZERO') {
+    const regSubs = await dbAll(
+      `SELECT DISTINCT subject_id FROM student_course_registrations
+       WHERE school_id = $1 AND student_id = $2 AND academic_session_id = $3 AND term_id = $4 AND status != 'DROPPED'`,
+      `SELECT DISTINCT subject_id FROM student_course_registrations
+       WHERE school_id = ? AND student_id = ? AND academic_session_id = ? AND term_id = ? AND status != 'DROPPED'`,
+      [schoolId, studentId, academicSessionId, termId]
+    );
+    if (regSubs.length > 0) {
+      expectedSubjectCount = regSubs.length;
+    } else {
+      const stuDept = String(student.class_arm_name || '').trim();
+      const sParams: any[] = [schoolId];
+      let sPg = `SELECT id FROM subjects WHERE school_id = $1 AND status = 'ACTIVE' AND (is_deleted = 0 OR is_deleted IS NULL)`;
+      let sSq = `SELECT id FROM subjects WHERE school_id = ? AND status = 'ACTIVE' AND (is_deleted = 0 OR is_deleted IS NULL)`;
+      let sIdx = 2;
+      if (student.class_id) {
+        sPg += ` AND (class_id IS NULL OR class_id = $${sIdx++})`;
+        sSq += ` AND (class_id IS NULL OR class_id = ?)`;
+        sParams.push(student.class_id);
+      }
+      if (stuDept) {
+        sPg += ` AND (department IS NULL OR TRIM(department) = '' OR LOWER(TRIM(department)) = LOWER(TRIM($${sIdx++})))`;
+        sSq += ` AND (department IS NULL OR TRIM(department) = '' OR LOWER(TRIM(department)) = LOWER(TRIM(?)))`;
+        sParams.push(stuDept);
+      }
+      const activeSubjects = await dbAll(sPg, sSq, sParams);
+      expectedSubjectCount = activeSubjects.length;
+    }
+  }
   const denom =
-    settings.missing_score_policy === 'ZERO' && activeSubjects.length > valid.length
-      ? activeSubjects.length
+    settings.missing_score_policy === 'ZERO' && expectedSubjectCount > valid.length
+      ? expectedSubjectCount
       : valid.length;
   const computedAvg = denom > 0 ? Math.round((pctSum / denom) * 100) / 100 : 0;
 
@@ -810,26 +838,44 @@ export async function compileSessionReportCard(
     };
   });
 
-  const activeSubjects = student.class_id
-    ? await dbAll(
-        `SELECT id FROM subjects
-         WHERE school_id = $1 AND status = 'ACTIVE' AND (is_deleted = 0 OR is_deleted IS NULL)
-           AND (class_id IS NULL OR class_id = $2)`,
-        `SELECT id FROM subjects
-         WHERE school_id = ? AND status = 'ACTIVE' AND (is_deleted = 0 OR is_deleted IS NULL)
-           AND (class_id IS NULL OR class_id = ?)`,
-        [schoolId, student.class_id]
-      )
-    : await dbAll(
-        `SELECT id FROM subjects WHERE school_id = $1 AND status = 'ACTIVE' AND (is_deleted = 0 OR is_deleted IS NULL)`,
-        `SELECT id FROM subjects WHERE school_id = ? AND status = 'ACTIVE' AND (is_deleted = 0 OR is_deleted IS NULL)`,
-        [schoolId]
-      );
+  // Scope expected subject count for full session under missing_score_policy='ZERO':
+  // Prefer student's actual registered courses across this session; otherwise scope by class + department
+  let expectedSessionSubjects = subjects.length;
+  if (settings.missing_score_policy === 'ZERO') {
+    const regSesSubs = await dbAll(
+      `SELECT DISTINCT subject_id FROM student_course_registrations
+       WHERE school_id = $1 AND student_id = $2 AND academic_session_id = $3 AND status != 'DROPPED'`,
+      `SELECT DISTINCT subject_id FROM student_course_registrations
+       WHERE school_id = ? AND student_id = ? AND academic_session_id = ? AND status != 'DROPPED'`,
+      [schoolId, studentId, academicSessionId]
+    );
+    if (regSesSubs.length > 0) {
+      expectedSessionSubjects = regSesSubs.length;
+    } else {
+      const stuDept = String(student.class_arm_name || '').trim();
+      const sParams: any[] = [schoolId];
+      let sPg = `SELECT id FROM subjects WHERE school_id = $1 AND status = 'ACTIVE' AND (is_deleted = 0 OR is_deleted IS NULL)`;
+      let sSq = `SELECT id FROM subjects WHERE school_id = ? AND status = 'ACTIVE' AND (is_deleted = 0 OR is_deleted IS NULL)`;
+      let sIdx = 2;
+      if (student.class_id) {
+        sPg += ` AND (class_id IS NULL OR class_id = $${sIdx++})`;
+        sSq += ` AND (class_id IS NULL OR class_id = ?)`;
+        sParams.push(student.class_id);
+      }
+      if (stuDept) {
+        sPg += ` AND (department IS NULL OR TRIM(department) = '' OR LOWER(TRIM(department)) = LOWER(TRIM($${sIdx++})))`;
+        sSq += ` AND (department IS NULL OR TRIM(department) = '' OR LOWER(TRIM(department)) = LOWER(TRIM(?)))`;
+        sParams.push(stuDept);
+      }
+      const activeSubjects = await dbAll(sPg, sSq, sParams);
+      expectedSessionSubjects = activeSubjects.length;
+    }
+  }
 
   const sessionTotal = Math.round(subjects.reduce((acc, s) => acc + Number(s.cumulative_total || 0), 0) * 100) / 100;
   const denom =
-    settings.missing_score_policy === 'ZERO' && activeSubjects.length > subjects.length
-      ? activeSubjects.length
+    settings.missing_score_policy === 'ZERO' && expectedSessionSubjects > subjects.length
+      ? expectedSessionSubjects
       : subjects.length;
   const sessionAverage =
     denom > 0

@@ -25,6 +25,7 @@ export const ExamBroadsheetModal: React.FC<ExamBroadsheetModalProps> = ({
   onClose,
 }) => {
   const [data, setData] = useState<ExamBroadsheetData | null>(null);
+  const [selectedDepartment, setSelectedDepartment] = useState('');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -33,7 +34,7 @@ export const ExamBroadsheetModal: React.FC<ExamBroadsheetModalProps> = ({
     setLoading(true);
     setError(null);
     api
-      .getExamBroadsheet(examinationId)
+      .getExamBroadsheet(examinationId, selectedDepartment ? { department: selectedDepartment } : undefined)
       .then((res) => {
         if (active) setData(res);
       })
@@ -46,7 +47,7 @@ export const ExamBroadsheetModal: React.FC<ExamBroadsheetModalProps> = ({
     return () => {
       active = false;
     };
-  }, [examinationId]);
+  }, [examinationId, selectedDepartment]);
 
   const handleDownloadCsv = () => {
     if (!data) return;
@@ -54,6 +55,7 @@ export const ExamBroadsheetModal: React.FC<ExamBroadsheetModalProps> = ({
       'Rank',
       'Admission / Matric No',
       'Student Name',
+      'Department / Programme',
       ...data.subjects.map((s) => `${s.code} (${s.credit_units}u)`),
       'Courses Taken',
       'Total Score',
@@ -67,6 +69,7 @@ export const ExamBroadsheetModal: React.FC<ExamBroadsheetModalProps> = ({
           formatOrdinal(r.position),
           r.admission_number || '',
           r.student_name,
+          r.department || '',
           ...data.subjects.map((s) => {
             const sc = r.scores[s.id];
             return sc ? `${sc.total} (${sc.grade})` : '—';
@@ -109,7 +112,22 @@ export const ExamBroadsheetModal: React.FC<ExamBroadsheetModalProps> = ({
             </div>
           </div>
 
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 flex-wrap">
+            {data && (data.available_departments?.length || 0) > 0 && (
+              <select
+                value={selectedDepartment}
+                onChange={(e) => setSelectedDepartment(e.target.value)}
+                aria-label="Filter broadsheet by department"
+                className="px-2.5 py-1.5 text-xs font-medium text-slate-700 bg-slate-50 border border-slate-200 rounded-lg"
+              >
+                <option value="">All Departments ({data.available_departments?.length})</option>
+                {(data.available_departments || []).map((dept) => (
+                  <option key={dept} value={dept}>
+                    {dept}
+                  </option>
+                ))}
+              </select>
+            )}
             {data && data.rows.length > 0 && (
               <>
                 <button
@@ -203,9 +221,16 @@ export const ExamBroadsheetModal: React.FC<ExamBroadsheetModalProps> = ({
                         </td>
                         <td className="px-3 py-2 border-r border-slate-200">
                           <div className="font-semibold text-slate-900">{r.student_name}</div>
-                          {r.admission_number && (
-                            <div className="text-[10px] font-mono text-slate-500">{r.admission_number}</div>
-                          )}
+                          <div className="flex items-center gap-1.5 flex-wrap">
+                            {r.admission_number && (
+                              <span className="text-[10px] font-mono text-slate-500">{r.admission_number}</span>
+                            )}
+                            {r.department && (
+                              <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-slate-100 text-slate-600">
+                                {r.department}
+                              </span>
+                            )}
+                          </div>
                         </td>
                         {data.subjects.map((sub) => {
                           const sc = r.scores[sub.id];

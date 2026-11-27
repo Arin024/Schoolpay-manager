@@ -28,15 +28,18 @@ interface BulkCoursesModalProps {
   classLabel: string;
   cycleLabel: string;
   cycleLabels?: string[];
+  availableDepartments?: string[];
   initialClassId?: string;
   initialSemesterTag?: CanonicalSemesterTag;
+  initialDepartment?: string;
   onClose: () => void;
   onSaved: (message: string) => void;
 }
 
 const makeEmptyRow = (
   defaultClassId = '',
-  defaultSemesterTag: CanonicalSemesterTag = ''
+  defaultSemesterTag: CanonicalSemesterTag = '',
+  defaultDepartment = ''
 ): BulkCourseDraftRow => ({
   id: `row_${Math.random().toString(36).slice(2, 9)}`,
   name: '',
@@ -44,7 +47,7 @@ const makeEmptyRow = (
   credit_units: '2',
   course_type: 'CORE',
   class_id: defaultClassId,
-  department: '',
+  department: defaultDepartment,
   semester_tag: defaultSemesterTag,
 });
 
@@ -88,6 +91,42 @@ const CURRICULUM_PRESETS: Record<
       { code: 'PHY108', name: 'General Physics Practical II', units: 1, type: 'CORE', dept: 'Physics', sem: '2ND' },
       { code: 'COS102', name: 'Problem Solving & Programming', units: 3, type: 'CORE', dept: 'Computer Science', sem: '2ND' },
       { code: 'STA112', name: 'Probability I', units: 2, type: 'ELECTIVE', dept: 'Statistics', sem: '2ND' },
+    ],
+  },
+  health_fhc_100l_sem1: {
+    label: 'Health Tech — Family Healthcare (100L · 1st Sem)',
+    tertiary: true,
+    semesterTag: '1ST',
+    rows: [
+      { code: 'FHC 111', name: 'Introduction to Family Health Care', units: 2, type: 'CORE', dept: 'Family Healthcare', sem: '1ST' },
+      { code: 'FHC 112', name: 'Anatomy and Physiology I', units: 3, type: 'CORE', dept: 'Family Healthcare', sem: '1ST' },
+      { code: 'FHC 113', name: 'Maternal and Child Health Nursing', units: 3, type: 'CORE', dept: 'Family Healthcare', sem: '1ST' },
+      { code: 'FHC 114', name: 'Nutrition in Family Health', units: 2, type: 'CORE', dept: 'Family Healthcare', sem: '1ST' },
+      { code: 'GNS 101', name: 'Use of English I', units: 2, type: 'GENERAL', dept: '', sem: '1ST' },
+    ],
+  },
+  health_chew_100l_sem1: {
+    label: 'Health Tech — CHEW (100L · 1st Sem)',
+    tertiary: true,
+    semesterTag: '1ST',
+    rows: [
+      { code: 'CHE 111', name: 'Introduction to Community Health', units: 2, type: 'CORE', dept: 'Community Health Extension Workers (CHEW)', sem: '1ST' },
+      { code: 'CHE 112', name: 'Anatomy and Physiology I', units: 3, type: 'CORE', dept: 'Community Health Extension Workers (CHEW)', sem: '1ST' },
+      { code: 'CHE 113', name: 'Primary Health Care & Standing Orders', units: 3, type: 'CORE', dept: 'Community Health Extension Workers (CHEW)', sem: '1ST' },
+      { code: 'CHE 114', name: 'Community Mobilization & Health Education', units: 2, type: 'CORE', dept: 'Community Health Extension Workers (CHEW)', sem: '1ST' },
+      { code: 'GNS 101', name: 'Use of English I', units: 2, type: 'GENERAL', dept: '', sem: '1ST' },
+    ],
+  },
+  health_pub_100l_sem1: {
+    label: 'Health Tech — Public Health (100L · 1st Sem)',
+    tertiary: true,
+    semesterTag: '1ST',
+    rows: [
+      { code: 'PHC 111', name: 'Principles of Public Health & Epidemiology', units: 3, type: 'CORE', dept: 'Public Health', sem: '1ST' },
+      { code: 'PHC 112', name: 'Environmental Health & Sanitation', units: 2, type: 'CORE', dept: 'Public Health', sem: '1ST' },
+      { code: 'PHC 113', name: 'Biostatistics I', units: 2, type: 'CORE', dept: 'Public Health', sem: '1ST' },
+      { code: 'PHC 114', name: 'Disease Surveillance & Control', units: 3, type: 'CORE', dept: 'Public Health', sem: '1ST' },
+      { code: 'GNS 101', name: 'Use of English I', units: 2, type: 'GENERAL', dept: '', sem: '1ST' },
     ],
   },
   poly_nd1_sem1: {
@@ -453,8 +492,10 @@ export const BulkCoursesModal: React.FC<BulkCoursesModalProps> = ({
   classLabel,
   cycleLabel,
   cycleLabels,
+  availableDepartments = [],
   initialClassId = '',
   initialSemesterTag,
+  initialDepartment = '',
   onClose,
   onSaved,
 }) => {
@@ -464,12 +505,13 @@ export const BulkCoursesModal: React.FC<BulkCoursesModalProps> = ({
   const [mode, setMode] = useState<'GRID' | 'PASTE'>('GRID');
   const [defaultClassId, setDefaultClassId] = useState(initialClassId);
   const [defaultSemesterTag, setDefaultSemesterTag] = useState<CanonicalSemesterTag>(defaultSemInitial);
+  const [defaultDepartment, setDefaultDepartment] = useState(initialDepartment);
   const [updateExisting, setUpdateExisting] = useState(true);
   const [rows, setRows] = useState<BulkCourseDraftRow[]>([
-    makeEmptyRow(initialClassId, defaultSemInitial),
-    makeEmptyRow(initialClassId, defaultSemInitial),
-    makeEmptyRow(initialClassId, defaultSemInitial),
-    makeEmptyRow(initialClassId, defaultSemInitial),
+    makeEmptyRow(initialClassId, defaultSemInitial, initialDepartment),
+    makeEmptyRow(initialClassId, defaultSemInitial, initialDepartment),
+    makeEmptyRow(initialClassId, defaultSemInitial, initialDepartment),
+    makeEmptyRow(initialClassId, defaultSemInitial, initialDepartment),
   ]);
   const [pasteText, setPasteText] = useState('');
   const [parseNotice, setParseNotice] = useState<string | null>(null);
@@ -481,6 +523,16 @@ export const BulkCoursesModal: React.FC<BulkCoursesModalProps> = ({
     () => getSemesterTagOptions(cycleLabel, isTertiary, cycleLabels),
     [cycleLabel, isTertiary, cycleLabels]
   );
+
+  const deptSuggestions = useMemo(() => {
+    const set = new Set<string>(availableDepartments.filter(Boolean));
+    for (const c of classes) {
+      for (const arm of c.arms || []) {
+        if (arm.name?.trim()) set.add(arm.name.trim());
+      }
+    }
+    return Array.from(set).sort((a, b) => a.localeCompare(b));
+  }, [availableDepartments, classes]);
 
   const updateRow = (id: string, patch: Partial<BulkCourseDraftRow>) => {
     setRows((prev) => prev.map((r) => (r.id === id ? { ...r, ...patch } : r)));
@@ -530,7 +582,11 @@ export const BulkCoursesModal: React.FC<BulkCoursesModalProps> = ({
       return;
     }
 
-    setRows(parsed);
+    const withDept = parsed.map((r) => ({
+      ...r,
+      department: r.department || (r.course_type === 'GENERAL' ? '' : defaultDepartment),
+    }));
+    setRows(withDept);
     setParseNotice(notice);
     setMode('GRID');
     setError(null);
@@ -567,7 +623,7 @@ export const BulkCoursesModal: React.FC<BulkCoursesModalProps> = ({
           credit_units: cleanUnits,
           course_type: r.course_type,
           class_id: r.class_id || defaultClassId || null,
-          department: r.department.trim() || null,
+          department: r.department.trim() || (r.course_type === 'GENERAL' ? null : defaultDepartment.trim() || null),
           semester_tag: r.semester_tag || null,
           status: 'ACTIVE',
         };
@@ -577,6 +633,7 @@ export const BulkCoursesModal: React.FC<BulkCoursesModalProps> = ({
         courses: payloadCourses,
         update_existing: updateExisting,
         default_semester_tag: defaultSemesterTag || null,
+        default_department: defaultDepartment.trim() || null,
       });
 
       if (res.errors && res.errors.length > 0) {
@@ -690,6 +747,32 @@ export const BulkCoursesModal: React.FC<BulkCoursesModalProps> = ({
               ))}
             </select>
 
+            <div className="relative flex items-center">
+              <input
+                type="text"
+                list="bursariq-bulk-dept-options"
+                value={defaultDepartment}
+                onChange={(e) => {
+                  const nextDept = e.target.value;
+                  const prevDept = defaultDepartment;
+                  setDefaultDepartment(nextDept);
+                  setRows((prev) =>
+                    prev.map((r) =>
+                      r.department === '' || r.department === prevDept ? { ...r, department: nextDept } : r
+                    )
+                  );
+                }}
+                placeholder="Department (blank = General / Shared)"
+                aria-label="Default Department"
+                className="text-xs px-2.5 py-1.5 bg-white border border-sky-300 rounded-lg text-slate-800 font-medium w-56 focus:outline-none focus:ring-2 focus:ring-sky-500"
+              />
+              <datalist id="bursariq-bulk-dept-options">
+                {deptSuggestions.map((d) => (
+                  <option key={d} value={d} />
+                ))}
+              </datalist>
+            </div>
+
             <select
               defaultValue=""
               onChange={(e) => {
@@ -746,7 +829,8 @@ export const BulkCoursesModal: React.FC<BulkCoursesModalProps> = ({
                 </p>
                 <p className="text-[11px] text-slate-500">
                   Target scope for pasted rows: <strong>{selectedClassName || `All ${classLabel}s`}</strong> ·{' '}
-                  <strong>{selectedSemesterLabel}</strong> (you can adjust individual rows after parsing).
+                  <strong>{selectedSemesterLabel}</strong> ·{' '}
+                  <strong>{defaultDepartment.trim() || 'General / Shared (All Departments)'}</strong> (you can adjust individual rows after parsing).
                 </p>
                 <pre className="font-mono text-[11px] text-slate-600 whitespace-pre-wrap bg-white p-2 rounded border border-slate-200">
 {isTertiary
@@ -887,9 +971,10 @@ export const BulkCoursesModal: React.FC<BulkCoursesModalProps> = ({
                         <td className="px-2 py-2">
                           <input
                             type="text"
+                            list="bursariq-bulk-dept-options"
                             value={row.department}
                             onChange={(e) => updateRow(row.id, { department: e.target.value })}
-                            placeholder="Optional"
+                            placeholder="General / Shared"
                             aria-label={`Row ${idx + 1} Department`}
                             className="w-full px-2 py-1.5 border border-slate-200 rounded text-xs focus:outline-none focus:ring-1 focus:ring-emerald-500"
                           />
@@ -901,7 +986,7 @@ export const BulkCoursesModal: React.FC<BulkCoursesModalProps> = ({
                               setRows((prev) =>
                                 prev.length > 1
                                   ? prev.filter((r) => r.id !== row.id)
-                                  : [makeEmptyRow(defaultClassId, defaultSemesterTag)]
+                                  : [makeEmptyRow(defaultClassId, defaultSemesterTag, defaultDepartment)]
                               )
                             }
                             className="p-1 text-slate-400 hover:text-red-600 rounded"
@@ -921,7 +1006,7 @@ export const BulkCoursesModal: React.FC<BulkCoursesModalProps> = ({
                   <button
                     type="button"
                     onClick={() =>
-                      setRows((prev) => [...prev, makeEmptyRow(defaultClassId, defaultSemesterTag)])
+                      setRows((prev) => [...prev, makeEmptyRow(defaultClassId, defaultSemesterTag, defaultDepartment)])
                     }
                     className="px-3 py-1.5 text-xs font-semibold text-slate-700 bg-white border border-slate-200 rounded-lg hover:bg-slate-50 flex items-center gap-1"
                   >
@@ -933,11 +1018,11 @@ export const BulkCoursesModal: React.FC<BulkCoursesModalProps> = ({
                     onClick={() =>
                       setRows((prev) => [
                         ...prev,
-                        makeEmptyRow(defaultClassId, defaultSemesterTag),
-                        makeEmptyRow(defaultClassId, defaultSemesterTag),
-                        makeEmptyRow(defaultClassId, defaultSemesterTag),
-                        makeEmptyRow(defaultClassId, defaultSemesterTag),
-                        makeEmptyRow(defaultClassId, defaultSemesterTag),
+                        makeEmptyRow(defaultClassId, defaultSemesterTag, defaultDepartment),
+                        makeEmptyRow(defaultClassId, defaultSemesterTag, defaultDepartment),
+                        makeEmptyRow(defaultClassId, defaultSemesterTag, defaultDepartment),
+                        makeEmptyRow(defaultClassId, defaultSemesterTag, defaultDepartment),
+                        makeEmptyRow(defaultClassId, defaultSemesterTag, defaultDepartment),
                       ])
                     }
                     className="px-3 py-1.5 text-xs font-medium text-slate-600 bg-white border border-slate-200 rounded-lg hover:bg-slate-50"
@@ -967,6 +1052,7 @@ export const BulkCoursesModal: React.FC<BulkCoursesModalProps> = ({
             {subjectPlural.toLowerCase()} ·{' '}
             <span className="font-semibold text-slate-900">{totalUnits}</span> total credit units ·{' '}
             <span className="font-medium text-emerald-800">
+              {defaultDepartment.trim() ? `${defaultDepartment.trim()} · ` : 'General · '}
               {selectedClassName ? `${selectedClassName} · ` : ''}
               {selectedSemesterLabel}
             </span>

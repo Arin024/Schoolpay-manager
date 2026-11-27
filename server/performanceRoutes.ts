@@ -640,26 +640,29 @@ performanceRouter.post(
       ? String(code).trim().toUpperCase().slice(0, 32)
       : cleanName.replace(/[^A-Za-z0-9]/g, '').slice(0, 6).toUpperCase() || 'SUB';
     const cleanSemesterTag: string | null = normalizeSemesterTag(semester_tag) || null;
+    const cleanDepartment = department && String(department).trim() ? String(department).trim().slice(0, 120) : null;
 
     const dup = await dbGet(
       `SELECT id FROM subjects
        WHERE school_id = $1
          AND COALESCE(class_id, '') = COALESCE($2, '')
          AND COALESCE(semester_tag, '') = COALESCE($3, '')
-         AND (LOWER(name) = LOWER($4) OR (code IS NOT NULL AND LOWER(code) = LOWER($5)))
+         AND LOWER(COALESCE(department, '')) = LOWER(COALESCE($4, ''))
+         AND (LOWER(name) = LOWER($5) OR (code IS NOT NULL AND LOWER(code) = LOWER($6)))
          AND (is_deleted = 0 OR is_deleted IS NULL)`,
       `SELECT id FROM subjects
        WHERE school_id = ?
          AND COALESCE(class_id, '') = COALESCE(?, '')
          AND COALESCE(semester_tag, '') = COALESCE(?, '')
+         AND LOWER(COALESCE(department, '')) = LOWER(COALESCE(?, ''))
          AND (LOWER(name) = LOWER(?) OR (code IS NOT NULL AND LOWER(code) = LOWER(?)))
          AND (is_deleted = 0 OR is_deleted IS NULL)`,
-      [schoolId, cleanClassId || '', cleanSemesterTag || '', cleanName, cleanCode]
+      [schoolId, cleanClassId || '', cleanSemesterTag || '', cleanDepartment || '', cleanName, cleanCode]
     );
     if (dup) {
       return res.status(409).json({
         error: 'DUPLICATE_SUBJECT',
-        message: `"${cleanName}" (${cleanCode}) already exists for this level and semester/term scope.`,
+        message: `"${cleanName}" (${cleanCode}) already exists for this department, level, and semester/term scope.`,
       });
     }
 
@@ -675,13 +678,12 @@ performanceRouter.post(
     )
       ? String(course_type || 'CORE').toUpperCase()
       : 'CORE';
-    const cleanDepartment = department && String(department).trim() ? String(department).trim().slice(0, 120) : null;
 
     // Cleanly reactivate soft-deleted matching subject instead of failing on legacy unique constraints
     const deletedMatch = await dbGet(
-      `SELECT id FROM subjects WHERE school_id = $1 AND LOWER(name) = LOWER($2) AND is_deleted = 1 LIMIT 1`,
-      `SELECT id FROM subjects WHERE school_id = ? AND LOWER(name) = LOWER(?) AND is_deleted = 1 LIMIT 1`,
-      [schoolId, cleanName]
+      `SELECT id FROM subjects WHERE school_id = $1 AND LOWER(name) = LOWER($2) AND LOWER(COALESCE(department, '')) = LOWER(COALESCE($3, '')) AND is_deleted = 1 LIMIT 1`,
+      `SELECT id FROM subjects WHERE school_id = ? AND LOWER(name) = LOWER(?) AND LOWER(COALESCE(department, '')) = LOWER(COALESCE(?, '')) AND is_deleted = 1 LIMIT 1`,
+      [schoolId, cleanName, cleanDepartment || '']
     );
 
     const id = deletedMatch ? deletedMatch.id : newId('sub');
@@ -903,6 +905,8 @@ performanceRouter.post(
       academic_session_id,
       term_id,
       class_id,
+      class_arm_id,
+      department,
       ca_max_score,
       exam_max_score,
       component_weights_json,
@@ -920,24 +924,29 @@ performanceRouter.post(
       return res.status(400).json({ error: 'INVALID_WEIGHTS', message: 'Exam max scores must be positive.' });
     }
 
+    const cleanDept = department && String(department).trim() ? String(department).trim().slice(0, 120) : null;
+    const cleanArmId = class_arm_id && String(class_arm_id).trim() ? String(class_arm_id).trim() : null;
+
     const id = newId('exm');
     await execWrite(
       `INSERT INTO examinations (
-         id, school_id, academic_session_id, term_id, class_id, title, exam_type,
+         id, school_id, academic_session_id, term_id, class_id, class_arm_id, department, title, exam_type,
          ca_max_score, exam_max_score, total_max_score, component_weights_json,
          status, created_by, is_deleted, created_at, updated_at
-       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 'DRAFT', $12, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, 'DRAFT', $14, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
       `INSERT INTO examinations (
-         id, school_id, academic_session_id, term_id, class_id, title, exam_type,
+         id, school_id, academic_session_id, term_id, class_id, class_arm_id, department, title, exam_type,
          ca_max_score, exam_max_score, total_max_score, component_weights_json,
          status, created_by, is_deleted, created_at, updated_at
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'DRAFT', ?, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'DRAFT', ?, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
       [
         id,
         schoolId,
         academic_session_id || null,
         term_id || null,
         class_id || null,
+        cleanArmId,
+        cleanDept,
         title.trim(),
         exam_type,
         caMax,
@@ -1170,7 +1179,7 @@ performanceRouter.get(
   async (req: AuthenticatedRequest, res) => {
     const schoolId = req.targetSchoolId!;
     const { examId } = req.params;
-    const { subject_id, class_id } = req.query as Record<string, string>;
+    const { subject_id, class_id, department, registered_only } = req.query as Record<string, string>;
 
     const exam = await dbGet(
       `SELECT ex.*, ses.name as session_name, t.name as term_name, c.name as class_name
@@ -1190,30 +1199,190 @@ performanceRouter.get(
     if (!exam) return res.status(404).json({ error: 'NOT_FOUND', message: 'Examination not found.' });
 
     const effectiveClassId = class_id || exam.class_id || null;
-    const roster = await dbAll(
-      `SELECT id, admission_number, full_name, class_id, class_name
-       FROM students
-       WHERE school_id = $1 AND (is_deleted = 0 OR is_deleted IS NULL)
-         ${effectiveClassId ? 'AND class_id = $2' : ''}
-       ORDER BY full_name ASC`,
-      `SELECT id, admission_number, full_name, class_id, class_name
-       FROM students
-       WHERE school_id = ? AND (is_deleted = 0 OR is_deleted IS NULL)
-         ${effectiveClassId ? 'AND class_id = ?' : ''}
-       ORDER BY full_name ASC`,
-      effectiveClassId ? [schoolId, effectiveClassId] : [schoolId]
-    );
+    const effectiveDept = String(department !== undefined ? department : exam.department || '').trim() || null;
+
+    // 1. Discover registered courses for this exam's session + term + level (+ optional department)
+    let registeredSubjects: Array<{
+      subject_id: string;
+      code: string | null;
+      name: string;
+      department: string | null;
+      semester_tag: string | null;
+      course_type: string;
+      credit_units: number;
+      registered_count: number;
+      scored_count: number;
+    }> = [];
+
+    if (exam.academic_session_id && exam.term_id) {
+      const rParams: any[] = [examId, schoolId, exam.academic_session_id, exam.term_id];
+      let rPg = `
+        SELECT sub.id as subject_id, sub.code, sub.name, sub.department, sub.semester_tag, sub.course_type,
+               MAX(COALESCE(r.credit_units_snapshot, sub.credit_units, 3)) as credit_units,
+               COUNT(DISTINCT r.student_id) as registered_count,
+               COUNT(DISTINCT ss.student_id) as scored_count
+        FROM student_course_registrations r
+        JOIN students s ON r.student_id = s.id AND (s.is_deleted = 0 OR s.is_deleted IS NULL)
+        JOIN subjects sub ON r.subject_id = sub.id AND (sub.is_deleted = 0 OR sub.is_deleted IS NULL)
+        LEFT JOIN student_scores ss
+          ON ss.school_id = r.school_id
+         AND ss.examination_id = $1
+         AND ss.student_id = r.student_id
+         AND ss.subject_id = r.subject_id
+        WHERE r.school_id = $2 AND r.academic_session_id = $3 AND r.term_id = $4 AND r.status != 'DROPPED'
+      `;
+      let rSq = `
+        SELECT sub.id as subject_id, sub.code, sub.name, sub.department, sub.semester_tag, sub.course_type,
+               MAX(COALESCE(r.credit_units_snapshot, sub.credit_units, 3)) as credit_units,
+               COUNT(DISTINCT r.student_id) as registered_count,
+               COUNT(DISTINCT ss.student_id) as scored_count
+        FROM student_course_registrations r
+        JOIN students s ON r.student_id = s.id AND (s.is_deleted = 0 OR s.is_deleted IS NULL)
+        JOIN subjects sub ON r.subject_id = sub.id AND (sub.is_deleted = 0 OR sub.is_deleted IS NULL)
+        LEFT JOIN student_scores ss
+          ON ss.school_id = r.school_id
+         AND ss.examination_id = ?
+         AND ss.student_id = r.student_id
+         AND ss.subject_id = r.subject_id
+        WHERE r.school_id = ? AND r.academic_session_id = ? AND r.term_id = ? AND r.status != 'DROPPED'
+      `;
+      let rIdx = 5;
+      if (effectiveClassId) {
+        const c1 = rIdx++;
+        const c2 = rIdx++;
+        rPg += ` AND (COALESCE(r.class_id, s.class_id) = $${c1} OR sub.class_id = $${c2})`;
+        rSq += ` AND (COALESCE(r.class_id, s.class_id) = ? OR sub.class_id = ?)`;
+        rParams.push(effectiveClassId, effectiveClassId);
+      }
+      if (effectiveDept) {
+        rPg += ` AND LOWER(TRIM(COALESCE(s.class_arm_name, ''))) = LOWER(TRIM($${rIdx++}))`;
+        rSq += ` AND LOWER(TRIM(COALESCE(s.class_arm_name, ''))) = LOWER(TRIM(?))`;
+        rParams.push(effectiveDept);
+      }
+      rPg += ` GROUP BY sub.id, sub.code, sub.name, sub.department, sub.semester_tag, sub.course_type ORDER BY sub.code ASC, sub.name ASC`;
+      rSq += ` GROUP BY sub.id, sub.code, sub.name, sub.department, sub.semester_tag, sub.course_type ORDER BY sub.code ASC, sub.name ASC`;
+
+      registeredSubjects = (await dbAll(rPg, rSq, rParams)).map((row: any) => ({
+        subject_id: row.subject_id,
+        code: row.code || null,
+        name: row.name,
+        department: row.department || null,
+        semester_tag: row.semester_tag || null,
+        course_type: row.course_type || 'CORE',
+        credit_units: Number(row.credit_units ?? 3),
+        registered_count: Number(row.registered_count || 0),
+        scored_count: Number(row.scored_count || 0),
+      }));
+    }
+
+    // 2. Fetch registrations for the active subject_id in this session + term (including carryover learners!)
+    const registeredMap = new Map<string, { registration_type: string; student: any }>();
+    if (subject_id && exam.academic_session_id && exam.term_id) {
+      const regStuParams: any[] = [schoolId, exam.academic_session_id, exam.term_id, subject_id];
+      let rsPg = `
+        SELECT r.student_id, r.registration_type,
+               s.id, s.admission_number, s.full_name, s.class_id, s.class_name, s.class_arm_id, s.class_arm_name
+        FROM student_course_registrations r
+        JOIN students s ON r.student_id = s.id AND (s.is_deleted = 0 OR s.is_deleted IS NULL)
+        WHERE r.school_id = $1 AND r.academic_session_id = $2 AND r.term_id = $3 AND r.subject_id = $4 AND r.status != 'DROPPED'
+      `;
+      let rsSq = `
+        SELECT r.student_id, r.registration_type,
+               s.id, s.admission_number, s.full_name, s.class_id, s.class_name, s.class_arm_id, s.class_arm_name
+        FROM student_course_registrations r
+        JOIN students s ON r.student_id = s.id AND (s.is_deleted = 0 OR s.is_deleted IS NULL)
+        WHERE r.school_id = ? AND r.academic_session_id = ? AND r.term_id = ? AND r.subject_id = ? AND r.status != 'DROPPED'
+      `;
+      if (effectiveDept) {
+        rsPg += ` AND LOWER(TRIM(COALESCE(s.class_arm_name, ''))) = LOWER(TRIM($5))`;
+        rsSq += ` AND LOWER(TRIM(COALESCE(s.class_arm_name, ''))) = LOWER(TRIM(?))`;
+        regStuParams.push(effectiveDept);
+      }
+      rsPg += ` ORDER BY s.full_name ASC`;
+      rsSq += ` ORDER BY s.full_name ASC`;
+      const regStudents = await dbAll(rsPg, rsSq, regStuParams);
+      for (const rs of regStudents) {
+        registeredMap.set(rs.student_id, {
+          registration_type: rs.registration_type || 'REGULAR',
+          student: {
+            id: rs.id,
+            admission_number: rs.admission_number,
+            full_name: rs.full_name,
+            class_id: rs.class_id,
+            class_name: rs.class_name,
+            class_arm_id: rs.class_arm_id || null,
+            class_arm_name: rs.class_arm_name || null,
+          },
+        });
+      }
+    }
+
+    const wantRegisteredOnly = registered_only === 'true' || registered_only === '1';
+    const hasSubjectRegistrations = registeredMap.size > 0;
+
+    let roster: any[] = [];
+    if (wantRegisteredOnly && hasSubjectRegistrations) {
+      roster = Array.from(registeredMap.values()).map((entry) => ({
+        ...entry.student,
+        is_registered: true,
+        registration_type: entry.registration_type,
+      }));
+    } else {
+      const rosterParams: any[] = [schoolId];
+      let rostPg = `SELECT id, admission_number, full_name, class_id, class_name, class_arm_id, class_arm_name
+                    FROM students
+                    WHERE school_id = $1 AND (is_deleted = 0 OR is_deleted IS NULL)`;
+      let rostSq = `SELECT id, admission_number, full_name, class_id, class_name, class_arm_id, class_arm_name
+                    FROM students
+                    WHERE school_id = ? AND (is_deleted = 0 OR is_deleted IS NULL)`;
+      let pIdx = 2;
+      if (effectiveClassId) {
+        rostPg += ` AND class_id = $${pIdx++}`;
+        rostSq += ` AND class_id = ?`;
+        rosterParams.push(effectiveClassId);
+      }
+      if (effectiveDept) {
+        rostPg += ` AND LOWER(TRIM(COALESCE(class_arm_name, ''))) = LOWER(TRIM($${pIdx++}))`;
+        rostSq += ` AND LOWER(TRIM(COALESCE(class_arm_name, ''))) = LOWER(TRIM(?))`;
+        rosterParams.push(effectiveDept);
+      }
+      rostPg += ` ORDER BY full_name ASC`;
+      rostSq += ` ORDER BY full_name ASC`;
+      const baseRoster = await dbAll(rostPg, rostSq, rosterParams);
+      const seenIds = new Set<string>();
+      roster = baseRoster.map((st: any) => {
+        seenIds.add(st.id);
+        const reg = registeredMap.get(st.id);
+        return {
+          ...st,
+          is_registered: Boolean(reg),
+          registration_type: reg?.registration_type || null,
+        };
+      });
+      // Append any carryover learners from other levels who registered for this course!
+      for (const [sid, entry] of registeredMap.entries()) {
+        if (!seenIds.has(sid)) {
+          roster.push({
+            ...entry.student,
+            is_registered: true,
+            registration_type: entry.registration_type,
+          });
+        }
+      }
+    }
 
     const scoreParams: any[] = [schoolId, examId];
     let scorePg = `
-      SELECT ss.*, s.full_name as student_name, s.admission_number, sub.name as subject_name, sub.code as subject_code
+      SELECT ss.*, s.full_name as student_name, s.admission_number, s.class_arm_name as student_department,
+             sub.name as subject_name, sub.code as subject_code
       FROM student_scores ss
       JOIN students s ON ss.student_id = s.id
       JOIN subjects sub ON ss.subject_id = sub.id
       WHERE ss.school_id = $1 AND ss.examination_id = $2
     `;
     let scoreSq = `
-      SELECT ss.*, s.full_name as student_name, s.admission_number, sub.name as subject_name, sub.code as subject_code
+      SELECT ss.*, s.full_name as student_name, s.admission_number, s.class_arm_name as student_department,
+             sub.name as subject_name, sub.code as subject_code
       FROM student_scores ss
       JOIN students s ON ss.student_id = s.id
       JOIN subjects sub ON ss.subject_id = sub.id
@@ -1247,7 +1416,16 @@ performanceRouter.get(
       [schoolId, examId]
     );
 
-    return res.json({ success: true, examination: exam, roster, scores, corrections });
+    return res.json({
+      success: true,
+      examination: exam,
+      roster,
+      scores,
+      corrections,
+      registered_subjects: registeredSubjects,
+      registered_count_for_subject: registeredMap.size,
+      filtered_by_registration: wantRegisteredOnly && hasSubjectRegistrations,
+    });
   }
 );
 

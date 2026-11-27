@@ -794,11 +794,32 @@ export interface SubjectItem {
   created_at?: string;
 }
 
+export interface DepartmentSummaryItem {
+  name: string;
+  student_count: number;
+  course_count: number;
+  class_arms: Array<{ id: string; class_id: string; class_name: string }>;
+}
+
+export interface RegisteredCourseProgressItem {
+  subject_id: string;
+  code: string | null;
+  name: string;
+  department: string | null;
+  semester_tag: string | null;
+  course_type: string;
+  credit_units: number;
+  registered_count: number;
+  scored_count: number;
+}
+
 export interface CourseRegistrationItem {
   id: string;
   school_id?: string;
   student_id: string;
   student_name?: string;
+  student_department?: string | null;
+  student_class_arm_id?: string | null;
   admission_number?: string;
   academic_session_id: string;
   session_name?: string;
@@ -809,6 +830,7 @@ export interface CourseRegistrationItem {
   subject_id: string;
   subject_name: string;
   subject_code?: string;
+  subject_department?: string | null;
   credit_units: number;
   credit_units_snapshot?: number;
   course_type?: string | null;
@@ -840,21 +862,26 @@ export interface ExamBroadsheetData {
     session_name?: string | null;
     term_name?: string | null;
     class_name?: string | null;
+    department?: string | null;
     status: string;
     total_max_score: number;
   };
   gradingMode: 'PERCENTAGE' | 'GPA_5' | 'GPA_4';
   isGpaMode: boolean;
+  available_departments?: string[];
+  active_department?: string | null;
   subjects: Array<{
     id: string;
     code: string;
     name: string;
     credit_units: number;
+    department?: string | null;
   }>;
   rows: Array<{
     student_id: string;
     admission_number: string | null;
     student_name: string;
+    department?: string | null;
     scores: Record<string, { total: number; grade: string; percentage: number }>;
     subjects_count: number;
     total_score: number;
@@ -874,6 +901,8 @@ export interface ExaminationItem {
   term_name?: string | null;
   class_id?: string | null;
   class_name?: string | null;
+  class_arm_id?: string | null;
+  department?: string | null;
   title: string;
   exam_type: string;
   ca_max_score: number;

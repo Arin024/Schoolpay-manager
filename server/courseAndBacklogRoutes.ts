@@ -124,11 +124,16 @@ courseAndBacklogRouter.post(
         const rawCode = String(raw.code || '').trim().toUpperCase().slice(0, 32);
         const cleanCode = rawCode || generateDefaultCode(cleanName).slice(0, 32);
         const cleanUnits = sanitizeCreditUnits(raw.credit_units, 3);
-        const cleanDept =
-          raw.department !== undefined && String(raw.department || '').trim() !== ''
-            ? String(raw.department).trim().slice(0, 120)
-            : null;
         const cleanType = sanitizeCourseType(raw.course_type);
+        const rawDept =
+          raw.department !== undefined
+            ? String(raw.department || '').trim()
+            : cleanType === 'GENERAL'
+            ? ''
+            : body.default_department !== undefined
+            ? String(body.default_department || '').trim()
+            : '';
+        const cleanDept = rawDept ? rawDept.slice(0, 120) : null;
         const canonicalSem = normalizeSemesterTag(raw.semester_tag ?? body.default_semester_tag ?? '');
         const cleanSemTag: string | null = canonicalSem || null;
         const validStatus = String(raw.status || 'ACTIVE').toUpperCase() === 'INACTIVE' ? 'INACTIVE' : 'ACTIVE';
@@ -142,26 +147,30 @@ courseAndBacklogRouter.post(
           if (match) resolvedClassId = match.id;
         }
 
-        // 1. Match active subject within same tenant + same class + same semester scope by code or name
+        // 1. Match active subject within same tenant + same class + same semester + same department scope by code or name
+        const normDept = (cleanDept || '').toLowerCase();
         let existing = existingSubjects.find((s) => {
           if (Number(s.is_deleted || 0) === 1) return false;
           const sameClass = (s.class_id || null) === resolvedClassId;
           const sameSem = (normalizeSemesterTag(s.semester_tag) || null) === cleanSemTag;
-          if (!sameClass || !sameSem) return false;
+          const sameDept = String(s.department || '').trim().toLowerCase() === normDept;
+          if (!sameClass || !sameSem || !sameDept) return false;
           const sameCode = cleanCode && String(s.code || '').trim().toUpperCase() === cleanCode;
           const sameName = String(s.name || '').trim().toLowerCase() === cleanName.toLowerCase();
           return sameCode || sameName;
         });
 
-        // 2. If not active in this scope, check for a soft-deleted subject with the same name/code so we cleanly reactivate it
+        // 2. If not active in this scope, check for a soft-deleted subject with the same name+department/code so we cleanly reactivate it
         if (!existing) {
           existing = existingSubjects.find((s) => {
             if (Number(s.is_deleted || 0) !== 1) return false;
-            const sameName = String(s.name || '').trim().toLowerCase() === cleanName.toLowerCase();
+            const sameDept = String(s.department || '').trim().toLowerCase() === normDept;
+            const sameName = String(s.name || '').trim().toLowerCase() === cleanName.toLowerCase() && sameDept;
             const sameCode =
               cleanCode &&
               String(s.code || '').trim().toUpperCase() === cleanCode &&
-              (s.class_id || null) === resolvedClassId;
+              (s.class_id || null) === resolvedClassId &&
+              sameDept;
             return sameName || sameCode;
           });
         }
@@ -250,9 +259,11 @@ courseAndBacklogRouter.post(
           const msg = String(rowErr?.message || '');
           const isDup = rowErr?.code === '23505' || /unique|duplicate/i.test(msg);
           if (isDup) {
-            // Fallback: find any existing row with the same name in this school and update if allowed
+            // Fallback: find any existing row with the same name + department in this school and update if allowed
             const fallbackRow = existingSubjects.find(
-              (s) => String(s.name || '').trim().toLowerCase() === cleanName.toLowerCase()
+              (s) =>
+                String(s.name || '').trim().toLowerCase() === cleanName.toLowerCase() &&
+                String(s.department || '').trim().toLowerCase() === normDept
             );
             if (fallbackRow && update_existing) {
               try {
@@ -418,6 +429,221 @@ courseAndBacklogRouter.patch(
 );
 
 // ==============================================================================
+// 2b. DISCOVER SCHOOL DEPARTMENTS / PROGRAMMES & BULK-ASSIGN EXISTING COURSES
+// GET   /api/v1/school/departments
+// PATCH /api/v1/school/subjects/bulk-assign
+// ==============================================================================
+courseAndBacklogRouter.get(
+  '/departments',
+  requireAuth,
+  requireTenant,
+  requireRole(ACADEMIC_READ_ROLES),
+  async (req: AuthenticatedRequest, res) => {
+    try {
+      const schoolId = req.targetSchoolId!;
+      const [arms, subjectDepts, studentDepts] = await Promise.all([
+        dbAll(
+          `SELECT ca.id, ca.name, ca.class_id, c.name as class_name
+           FROM class_arms ca
+           JOIN classes c ON ca.class_id = c.id
+           WHERE ca.school_id = $1 AND (c.is_deleted = 0 OR c.is_deleted IS NULL)
+           ORDER BY ca.name ASC`,
+          `SELECT ca.id, ca.name, ca.class_id, c.name as class_name
+           FROM class_arms ca
+           JOIN classes c ON ca.class_id = c.id
+           WHERE ca.school_id = ? AND (c.is_deleted = 0 OR c.is_deleted IS NULL)
+           ORDER BY ca.name ASC`,
+          [schoolId]
+        ),
+        dbAll(
+          `SELECT department, COUNT(*) as course_count
+           FROM subjects
+           WHERE school_id = $1 AND (is_deleted = 0 OR is_deleted IS NULL)
+             AND department IS NOT NULL AND TRIM(department) != ''
+           GROUP BY department`,
+          `SELECT department, COUNT(*) as course_count
+           FROM subjects
+           WHERE school_id = ? AND (is_deleted = 0 OR is_deleted IS NULL)
+             AND department IS NOT NULL AND TRIM(department) != ''
+           GROUP BY department`,
+          [schoolId]
+        ),
+        dbAll(
+          `SELECT COALESCE(NULLIF(TRIM(s.class_arm_name), ''), ca.name) as department, COUNT(*) as student_count
+           FROM students s
+           LEFT JOIN class_arms ca ON s.class_arm_id = ca.id
+           WHERE s.school_id = $1 AND (s.is_deleted = 0 OR s.is_deleted IS NULL)
+             AND UPPER(COALESCE(s.student_status, 'ACTIVE')) = 'ACTIVE'
+             AND COALESCE(NULLIF(TRIM(s.class_arm_name), ''), ca.name) IS NOT NULL
+             AND TRIM(COALESCE(NULLIF(TRIM(s.class_arm_name), ''), ca.name)) != ''
+           GROUP BY COALESCE(NULLIF(TRIM(s.class_arm_name), ''), ca.name)`,
+          `SELECT COALESCE(NULLIF(TRIM(s.class_arm_name), ''), ca.name) as department, COUNT(*) as student_count
+           FROM students s
+           LEFT JOIN class_arms ca ON s.class_arm_id = ca.id
+           WHERE s.school_id = ? AND (s.is_deleted = 0 OR s.is_deleted IS NULL)
+             AND UPPER(COALESCE(s.student_status, 'ACTIVE')) = 'ACTIVE'
+             AND COALESCE(NULLIF(TRIM(s.class_arm_name), ''), ca.name) IS NOT NULL
+             AND TRIM(COALESCE(NULLIF(TRIM(s.class_arm_name), ''), ca.name)) != ''
+           GROUP BY COALESCE(NULLIF(TRIM(s.class_arm_name), ''), ca.name)`,
+          [schoolId]
+        ),
+      ]);
+
+      const deptMap = new Map<string, {
+        name: string;
+        student_count: number;
+        course_count: number;
+        class_arms: Array<{ id: string; class_id: string; class_name: string }>;
+      }>();
+
+      const ensureDept = (rawName: string) => {
+        const clean = String(rawName || '').trim();
+        if (!clean) return null;
+        const key = clean.toLowerCase();
+        if (!deptMap.has(key)) {
+          deptMap.set(key, { name: clean, student_count: 0, course_count: 0, class_arms: [] });
+        }
+        return deptMap.get(key)!;
+      };
+
+      for (const a of arms) {
+        const d = ensureDept(a.name);
+        if (d) d.class_arms.push({ id: a.id, class_id: a.class_id, class_name: a.class_name });
+      }
+      for (const s of subjectDepts) {
+        const d = ensureDept(s.department);
+        if (d) d.course_count += Number(s.course_count || 0);
+      }
+      for (const st of studentDepts) {
+        const d = ensureDept(st.department);
+        if (d) d.student_count += Number(st.student_count || 0);
+      }
+
+      const departments = Array.from(deptMap.values()).sort((a, b) => a.name.localeCompare(b.name));
+      return res.json({ success: true, departments });
+    } catch (err: any) {
+      console.error('[Departments Discovery Error]', err);
+      return res.status(500).json({
+        error: 'DEPARTMENTS_FETCH_FAILED',
+        message: safeClientError(err, 'Failed to load departments.'),
+      });
+    }
+  }
+);
+
+courseAndBacklogRouter.patch(
+  '/subjects/bulk-assign',
+  requireAuth,
+  requireTenant,
+  requireRole(ADMIN_ONLY_ROLES),
+  async (req: AuthenticatedRequest, res) => {
+    try {
+      const schoolId = req.targetSchoolId!;
+      const body = req.body || {};
+      const subjectIds: string[] = Array.isArray(body.subject_ids)
+        ? Array.from(new Set(body.subject_ids.map((x: any) => String(x || '').trim()).filter(Boolean)))
+        : [];
+
+      if (subjectIds.length === 0) {
+        return res.status(400).json({ error: 'MISSING_SUBJECT_IDS', message: 'Select at least one course/subject to update.' });
+      }
+      if (subjectIds.length > 300) {
+        return res.status(400).json({ error: 'BATCH_TOO_LARGE', message: 'Maximum 300 courses can be updated at once.' });
+      }
+
+      const hasDept = Object.prototype.hasOwnProperty.call(body, 'department');
+      const hasClass = Object.prototype.hasOwnProperty.call(body, 'class_id');
+      const hasSem = Object.prototype.hasOwnProperty.call(body, 'semester_tag');
+      const hasType = Object.prototype.hasOwnProperty.call(body, 'course_type');
+      const hasUnits = Object.prototype.hasOwnProperty.call(body, 'credit_units');
+
+      if (!hasDept && !hasClass && !hasSem && !hasType && !hasUnits) {
+        return res.status(400).json({
+          error: 'NO_CHANGES',
+          message: 'Specify at least one field to update (department, class_id, semester_tag, course_type, or credit_units).',
+        });
+      }
+
+      const cleanDept = hasDept
+        ? (body.department && String(body.department).trim() ? String(body.department).trim().slice(0, 120) : null)
+        : undefined;
+      const cleanClassId = hasClass
+        ? (body.class_id && String(body.class_id).trim() ? String(body.class_id).trim() : null)
+        : undefined;
+      const cleanSem = hasSem ? (normalizeSemesterTag(body.semester_tag) || null) : undefined;
+      const cleanType = hasType ? sanitizeCourseType(body.course_type) : undefined;
+      const cleanUnits = hasUnits ? sanitizeCreditUnits(body.credit_units, 3) : undefined;
+
+      let updatedCount = 0;
+      const skipped: Array<{ id: string; reason: string }> = [];
+
+      for (const sid of subjectIds) {
+        const existing = await dbGet(
+          `SELECT * FROM subjects WHERE id = $1 AND school_id = $2 AND (is_deleted = 0 OR is_deleted IS NULL) LIMIT 1`,
+          `SELECT * FROM subjects WHERE id = ? AND school_id = ? AND (is_deleted = 0 OR is_deleted IS NULL) LIMIT 1`,
+          [sid, schoolId]
+        );
+        if (!existing) continue;
+
+        const nextDept = hasDept ? cleanDept! : existing.department;
+        const nextClass = hasClass ? cleanClassId! : existing.class_id;
+        const nextSem = hasSem ? cleanSem! : existing.semester_tag;
+        const nextType = hasType ? cleanType! : (existing.course_type || 'CORE');
+        const nextUnits = hasUnits ? cleanUnits! : (existing.credit_units ?? 3);
+
+        try {
+          await dualWrite(
+            `UPDATE subjects
+             SET department = $1, class_id = $2, semester_tag = $3, course_type = $4, credit_units = $5, updated_at = CURRENT_TIMESTAMP
+             WHERE id = $6 AND school_id = $7`,
+            `UPDATE subjects
+             SET department = ?, class_id = ?, semester_tag = ?, course_type = ?, credit_units = ?, updated_at = CURRENT_TIMESTAMP
+             WHERE id = ? AND school_id = ?`,
+            [nextDept, nextClass, nextSem, nextType, nextUnits, sid, schoolId]
+          );
+          if (hasUnits) {
+            try {
+              await dualWrite(
+                `UPDATE student_course_registrations SET credit_units_snapshot = $1, updated_at = CURRENT_TIMESTAMP
+                 WHERE school_id = $2 AND subject_id = $3 AND status != 'DROPPED'`,
+                `UPDATE student_course_registrations SET credit_units_snapshot = ?, updated_at = CURRENT_TIMESTAMP
+                 WHERE school_id = ? AND subject_id = ? AND status != 'DROPPED'`,
+                [nextUnits, schoolId, sid]
+              );
+            } catch {}
+          }
+          updatedCount += 1;
+        } catch (err: any) {
+          skipped.push({ id: sid, reason: `"${existing.name}" already exists in the target department/level/semester scope.` });
+        }
+      }
+
+      logAudit({
+        actorId: req.user?.id || null,
+        actorEmail: req.user?.email,
+        schoolId,
+        action: 'BULK_ASSIGN_SUBJECTS',
+        entity: 'SUBJECT',
+        metadata: { updatedCount, skippedCount: skipped.length, department: cleanDept, class_id: cleanClassId, semester_tag: cleanSem },
+      });
+
+      return res.json({
+        success: true,
+        updatedCount,
+        skipped,
+        message: `Updated ${updatedCount} course(s)/subject(s)${skipped.length ? ` (${skipped.length} skipped due to scope conflict)` : ''}.`,
+      });
+    } catch (err: any) {
+      console.error('[Bulk Assign Subjects Error]', err);
+      return res.status(500).json({
+        error: 'BULK_ASSIGN_FAILED',
+        message: safeClientError(err, 'Failed to bulk update courses.'),
+      });
+    }
+  }
+);
+
+// ==============================================================================
 // 3. STUDENT COURSE / SUBJECT REGISTRATIONS (Bulk & Individual, Current or Historical)
 // GET    /api/v1/school/course-registrations
 // POST   /api/v1/school/course-registrations/bulk
@@ -430,14 +656,17 @@ courseAndBacklogRouter.get(
   requireRole(ACADEMIC_READ_ROLES),
   async (req: AuthenticatedRequest, res) => {
     const schoolId = req.targetSchoolId!;
-    const { academic_session_id, term_id, class_id, student_id, subject_id } = req.query as Record<string, string>;
+    const { academic_session_id, term_id, class_id, student_id, subject_id, department, class_arm_id } = req.query as Record<string, string>;
 
     const params: any[] = [schoolId];
     let pgSql = `
       SELECT r.*,
              s.full_name as student_name, s.admission_number,
+             s.class_arm_id as student_class_arm_id,
+             s.class_arm_name as student_department,
              COALESCE(c.name, s.class_name) as class_name,
              sub.name as subject_name, sub.code as subject_code,
+             sub.department as subject_department,
              COALESCE(r.credit_units_snapshot, sub.credit_units, 3) as credit_units,
              sub.course_type,
              sub.semester_tag,
@@ -454,8 +683,11 @@ courseAndBacklogRouter.get(
     let sqSql = `
       SELECT r.*,
              s.full_name as student_name, s.admission_number,
+             s.class_arm_id as student_class_arm_id,
+             s.class_arm_name as student_department,
              COALESCE(c.name, s.class_name) as class_name,
              sub.name as subject_name, sub.code as subject_code,
+             sub.department as subject_department,
              COALESCE(r.credit_units_snapshot, sub.credit_units, 3) as credit_units,
              sub.course_type,
              sub.semester_tag,
@@ -486,6 +718,16 @@ courseAndBacklogRouter.get(
       sqSql += ` AND COALESCE(r.class_id, s.class_id) = ?`;
       params.push(class_id);
     }
+    if (class_arm_id) {
+      pgSql += ` AND s.class_arm_id = $${pIdx++}`;
+      sqSql += ` AND s.class_arm_id = ?`;
+      params.push(class_arm_id);
+    }
+    if (department && department.trim()) {
+      pgSql += ` AND LOWER(TRIM(COALESCE(s.class_arm_name, ''))) = LOWER(TRIM($${pIdx++}))`;
+      sqSql += ` AND LOWER(TRIM(COALESCE(s.class_arm_name, ''))) = LOWER(TRIM(?))`;
+      params.push(department.trim());
+    }
     if (student_id) {
       pgSql += ` AND r.student_id = $${pIdx++}`;
       sqSql += ` AND r.student_id = ?`;
@@ -512,6 +754,7 @@ courseAndBacklogRouter.get(
       student_name: string;
       admission_number: string | null;
       class_name: string | null;
+      department: string | null;
       courses_count: number;
       total_credit_units: number;
       exceeds_max_units: boolean;
@@ -525,6 +768,8 @@ courseAndBacklogRouter.get(
       courses: any[];
     }>();
 
+    const byDept = new Map<string, { department: string; students: Set<string>; registrations_count: number }>();
+
     for (const r of registrations) {
       if (!byStudent.has(r.student_id)) {
         byStudent.set(r.student_id, {
@@ -532,6 +777,7 @@ courseAndBacklogRouter.get(
           student_name: r.student_name,
           admission_number: r.admission_number,
           class_name: r.class_name,
+          department: r.student_department || null,
           courses_count: 0,
           total_credit_units: 0,
           exceeds_max_units: false,
@@ -544,6 +790,14 @@ courseAndBacklogRouter.get(
       entry.courses_count += 1;
       entry.total_credit_units += units;
       entry.courses.push(r);
+
+      const deptKey = String(r.student_department || 'Unassigned').trim() || 'Unassigned';
+      if (!byDept.has(deptKey)) {
+        byDept.set(deptKey, { department: deptKey, students: new Set(), registrations_count: 0 });
+      }
+      const deptAgg = byDept.get(deptKey)!;
+      deptAgg.students.add(r.student_id);
+      deptAgg.registrations_count += 1;
 
       const tId = r.term_id || 'unknown';
       const tName = r.term_name || 'Cycle';
@@ -561,11 +815,20 @@ courseAndBacklogRouter.get(
         : entry.term_breakdown.some((x) => x.exceeds_max_units);
     }
 
+    const departmentSummaries = Array.from(byDept.values())
+      .map((d) => ({
+        department: d.department,
+        registered_students_count: d.students.size,
+        registrations_count: d.registrations_count,
+      }))
+      .sort((a, b) => a.department.localeCompare(b.department));
+
     return res.json({
       success: true,
       count: registrations.length,
       registrations,
       studentSummaries: Array.from(byStudent.values()),
+      departmentSummaries,
       policy: { min_credit_units_per_cycle: minUnits, max_credit_units_per_cycle: maxUnits },
     });
   }
@@ -584,6 +847,8 @@ courseAndBacklogRouter.post(
         academic_session_id,
         term_id,
         class_id,
+        class_arm_id,
+        department,
         student_ids,
         subject_ids,
         registration_type = 'REGULAR',
@@ -617,36 +882,55 @@ courseAndBacklogRouter.post(
         return res.status(404).json({ error: 'CYCLE_NOT_FOUND', message: 'Academic session or term/semester not found.' });
       }
 
-      // Resolve target students: explicit student_ids[] OR all active students in class_id
+      // Resolve target students: explicit student_ids[] OR all active students in (class_id + optional department/class_arm_id)
+      const cleanDeptFilter = department && String(department).trim() ? String(department).trim() : null;
+      const cleanArmIdFilter = class_arm_id && String(class_arm_id).trim() ? String(class_arm_id).trim() : null;
+
       let targetStudents: any[] = [];
       if (Array.isArray(student_ids) && student_ids.length > 0) {
         const cleanIds = Array.from(new Set(student_ids.map((id: any) => String(id).trim()).filter(Boolean)));
         for (const sid of cleanIds) {
           const st = await dbGet(
-            `SELECT id, full_name, class_id FROM students WHERE id = $1 AND school_id = $2 AND (is_deleted = 0 OR is_deleted IS NULL) LIMIT 1`,
-            `SELECT id, full_name, class_id FROM students WHERE id = ? AND school_id = ? AND (is_deleted = 0 OR is_deleted IS NULL) LIMIT 1`,
+            `SELECT id, full_name, class_id, class_arm_id, class_arm_name FROM students WHERE id = $1 AND school_id = $2 AND (is_deleted = 0 OR is_deleted IS NULL) LIMIT 1`,
+            `SELECT id, full_name, class_id, class_arm_id, class_arm_name FROM students WHERE id = ? AND school_id = ? AND (is_deleted = 0 OR is_deleted IS NULL) LIMIT 1`,
             [sid, schoolId]
           );
           if (st) targetStudents.push(st);
         }
-      } else if (class_id) {
-        targetStudents = await dbAll(
-          `SELECT id, full_name, class_id FROM students
-           WHERE school_id = $1 AND class_id = $2
-             AND UPPER(COALESCE(student_status, 'ACTIVE')) = 'ACTIVE'
-             AND (is_deleted = 0 OR is_deleted IS NULL)`,
-          `SELECT id, full_name, class_id FROM students
-           WHERE school_id = ? AND class_id = ?
-             AND UPPER(COALESCE(student_status, 'ACTIVE')) = 'ACTIVE'
-             AND (is_deleted = 0 OR is_deleted IS NULL)`,
-          [schoolId, class_id]
-        );
+      } else if (class_id || cleanArmIdFilter || cleanDeptFilter) {
+        const sParams: any[] = [schoolId];
+        let sPg = `SELECT id, full_name, class_id, class_arm_id, class_arm_name FROM students
+                   WHERE school_id = $1
+                     AND UPPER(COALESCE(student_status, 'ACTIVE')) = 'ACTIVE'
+                     AND (is_deleted = 0 OR is_deleted IS NULL)`;
+        let sSq = `SELECT id, full_name, class_id, class_arm_id, class_arm_name FROM students
+                   WHERE school_id = ?
+                     AND UPPER(COALESCE(student_status, 'ACTIVE')) = 'ACTIVE'
+                     AND (is_deleted = 0 OR is_deleted IS NULL)`;
+        let idx = 2;
+        if (class_id) {
+          sPg += ` AND class_id = $${idx++}`;
+          sSq += ` AND class_id = ?`;
+          sParams.push(class_id);
+        }
+        if (cleanArmIdFilter) {
+          sPg += ` AND class_arm_id = $${idx++}`;
+          sSq += ` AND class_arm_id = ?`;
+          sParams.push(cleanArmIdFilter);
+        } else if (cleanDeptFilter) {
+          sPg += ` AND LOWER(TRIM(COALESCE(class_arm_name, ''))) = LOWER(TRIM($${idx++}))`;
+          sSq += ` AND LOWER(TRIM(COALESCE(class_arm_name, ''))) = LOWER(TRIM(?))`;
+          sParams.push(cleanDeptFilter);
+        }
+        targetStudents = await dbAll(sPg, sSq, sParams);
       }
 
       if (targetStudents.length === 0) {
         return res.status(400).json({
           error: 'NO_TARGET_STUDENTS',
-          message: 'No matching students selected for course registration.',
+          message: cleanDeptFilter
+            ? `No active students found in the selected level & "${cleanDeptFilter}" department. Assign students to this department or pick specific learners.`
+            : 'No matching students selected for course registration.',
         });
       }
 
@@ -1323,8 +1607,227 @@ courseAndBacklogRouter.post(
 );
 
 // ==============================================================================
-// 5. CLASS / LEVEL MASTER BROADSHEET (Students x Subjects/Courses + GPA + Rank)
-// GET /api/v1/school/examinations/:id/broadsheet
+// 4b. ONE-CLICK REUSE REGISTERED COURSES FOR GRADING AT SCALE
+// POST /api/v1/school/examinations/from-registrations
+// Finds or creates an examination for (session, term, class_id, optional department)
+// and returns all registered courses + student counts + grading completion progress.
+// ==============================================================================
+courseAndBacklogRouter.post(
+  '/examinations/from-registrations',
+  requireAuth,
+  requireTenant,
+  requireRole(ADMIN_ONLY_ROLES),
+  async (req: AuthenticatedRequest, res) => {
+    try {
+      const schoolId = req.targetSchoolId!;
+      const actorId = req.user?.id || null;
+      const { academic_session_id, term_id, class_id, department, class_arm_id, title } = req.body || {};
+
+      if (!academic_session_id || !term_id) {
+        return res.status(400).json({
+          error: 'MISSING_CYCLE',
+          message: 'Select both Academic Session and Term / Semester to launch grading.',
+        });
+      }
+
+      const [ses, term, cls, settings] = await Promise.all([
+        dbGet(
+          `SELECT id, name FROM academic_sessions WHERE id = $1 AND school_id = $2 LIMIT 1`,
+          `SELECT id, name FROM academic_sessions WHERE id = ? AND school_id = ? LIMIT 1`,
+          [academic_session_id, schoolId]
+        ),
+        dbGet(
+          `SELECT id, name FROM terms WHERE id = $1 AND school_id = $2 LIMIT 1`,
+          `SELECT id, name FROM terms WHERE id = ? AND school_id = ? LIMIT 1`,
+          [term_id, schoolId]
+        ),
+        class_id
+          ? dbGet(
+              `SELECT id, name FROM classes WHERE id = $1 AND school_id = $2 LIMIT 1`,
+              `SELECT id, name FROM classes WHERE id = ? AND school_id = ? LIMIT 1`,
+              [class_id, schoolId]
+            )
+          : Promise.resolve(null),
+        getSchoolAcademicSettings(schoolId),
+      ]);
+
+      if (!ses || !term) {
+        return res.status(404).json({ error: 'CYCLE_NOT_FOUND', message: 'Academic session or term/semester not found.' });
+      }
+
+      const cleanDept = department && String(department).trim() ? String(department).trim().slice(0, 120) : null;
+      const cleanArmId = class_arm_id && String(class_arm_id).trim() ? String(class_arm_id).trim() : null;
+
+      // Look for an existing active examination matching this exact scope
+      const lookupParams: any[] = [schoolId, academic_session_id, term_id];
+      let exPg = `SELECT ex.*, ses.name as session_name, t.name as term_name, c.name as class_name
+                  FROM examinations ex
+                  LEFT JOIN academic_sessions ses ON ex.academic_session_id = ses.id
+                  LEFT JOIN terms t ON ex.term_id = t.id
+                  LEFT JOIN classes c ON ex.class_id = c.id
+                  WHERE ex.school_id = $1 AND ex.academic_session_id = $2 AND ex.term_id = $3
+                    AND (ex.is_deleted = 0 OR ex.is_deleted IS NULL)`;
+      let exSq = `SELECT ex.*, ses.name as session_name, t.name as term_name, c.name as class_name
+                  FROM examinations ex
+                  LEFT JOIN academic_sessions ses ON ex.academic_session_id = ses.id
+                  LEFT JOIN terms t ON ex.term_id = t.id
+                  LEFT JOIN classes c ON ex.class_id = c.id
+                  WHERE ex.school_id = ? AND ex.academic_session_id = ? AND ex.term_id = ?
+                    AND (ex.is_deleted = 0 OR ex.is_deleted IS NULL)`;
+      let idx = 4;
+      if (class_id) {
+        exPg += ` AND ex.class_id = $${idx++}`;
+        exSq += ` AND ex.class_id = ?`;
+        lookupParams.push(class_id);
+      } else {
+        exPg += ` AND ex.class_id IS NULL`;
+        exSq += ` AND ex.class_id IS NULL`;
+      }
+      if (cleanDept) {
+        exPg += ` AND LOWER(TRIM(COALESCE(ex.department, ''))) = LOWER(TRIM($${idx++}))`;
+        exSq += ` AND LOWER(TRIM(COALESCE(ex.department, ''))) = LOWER(TRIM(?))`;
+        lookupParams.push(cleanDept);
+      } else {
+        exPg += ` AND (ex.department IS NULL OR TRIM(ex.department) = '')`;
+        exSq += ` AND (ex.department IS NULL OR TRIM(ex.department) = '')`;
+      }
+      exPg += ` ORDER BY ex.created_at DESC LIMIT 1`;
+      exSq += ` ORDER BY ex.created_at DESC LIMIT 1`;
+
+      let exam = await dbGet(exPg, exSq, lookupParams);
+      let created = false;
+
+      if (!exam) {
+        const examId = newId('exm');
+        const caMax = Number(settings.ca_max_score ?? 40);
+        const examMax = Number(settings.exam_max_score ?? 60);
+        const totalMax = caMax + examMax;
+        const autoTitle =
+          (title && String(title).trim()) ||
+          [cls?.name || 'All Levels', cleanDept ? `(${cleanDept})` : null, term.name, 'Examination']
+            .filter(Boolean)
+            .join(' ');
+
+        await dualWrite(
+          `INSERT INTO examinations (
+             id, school_id, academic_session_id, term_id, class_id, class_arm_id, department, title, exam_type,
+             ca_max_score, exam_max_score, total_max_score, status, created_by, is_deleted, created_at, updated_at
+           ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'TERMLY',$9,$10,$11,'DRAFT',$12,0,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)`,
+          `INSERT INTO examinations (
+             id, school_id, academic_session_id, term_id, class_id, class_arm_id, department, title, exam_type,
+             ca_max_score, exam_max_score, total_max_score, status, created_by, is_deleted, created_at, updated_at
+           ) VALUES (?,?,?,?,?,?,?,?,'TERMLY',?,?,?,'DRAFT',?,0,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)`,
+          [examId, schoolId, academic_session_id, term_id, class_id || null, cleanArmId, cleanDept, autoTitle, caMax, examMax, totalMax, actorId]
+        );
+        exam = await dbGet(
+          `SELECT ex.*, ses.name as session_name, t.name as term_name, c.name as class_name
+           FROM examinations ex
+           LEFT JOIN academic_sessions ses ON ex.academic_session_id = ses.id
+           LEFT JOIN terms t ON ex.term_id = t.id
+           LEFT JOIN classes c ON ex.class_id = c.id
+           WHERE ex.id = $1`,
+          `SELECT ex.*, ses.name as session_name, t.name as term_name, c.name as class_name
+           FROM examinations ex
+           LEFT JOIN academic_sessions ses ON ex.academic_session_id = ses.id
+           LEFT JOIN terms t ON ex.term_id = t.id
+           LEFT JOIN classes c ON ex.class_id = c.id
+           WHERE ex.id = ?`,
+          [examId]
+        );
+        created = true;
+        logAudit({
+          actorId,
+          actorEmail: req.user?.email,
+          schoolId,
+          action: 'CREATE_EXAM_FROM_REGISTRATIONS',
+          entity: 'EXAMINATION',
+          entityId: examId,
+          metadata: { title: autoTitle, class_id: class_id || null, department: cleanDept, term: term.name },
+        });
+      }
+
+      // Query all registered courses in this scope with student count & graded count
+      const regParams: any[] = [exam.id, schoolId, academic_session_id, term_id];
+      let rPg = `
+        SELECT sub.id as subject_id, sub.code, sub.name, sub.department, sub.semester_tag, sub.course_type,
+               MAX(COALESCE(r.credit_units_snapshot, sub.credit_units, 3)) as credit_units,
+               COUNT(DISTINCT r.student_id) as registered_count,
+               COUNT(DISTINCT ss.student_id) as scored_count
+        FROM student_course_registrations r
+        JOIN students s ON r.student_id = s.id AND (s.is_deleted = 0 OR s.is_deleted IS NULL)
+        JOIN subjects sub ON r.subject_id = sub.id AND (sub.is_deleted = 0 OR sub.is_deleted IS NULL)
+        LEFT JOIN student_scores ss
+          ON ss.school_id = r.school_id
+         AND ss.examination_id = $1
+         AND ss.student_id = r.student_id
+         AND ss.subject_id = r.subject_id
+        WHERE r.school_id = $2 AND r.academic_session_id = $3 AND r.term_id = $4 AND r.status != 'DROPPED'
+      `;
+      let rSq = `
+        SELECT sub.id as subject_id, sub.code, sub.name, sub.department, sub.semester_tag, sub.course_type,
+               MAX(COALESCE(r.credit_units_snapshot, sub.credit_units, 3)) as credit_units,
+               COUNT(DISTINCT r.student_id) as registered_count,
+               COUNT(DISTINCT ss.student_id) as scored_count
+        FROM student_course_registrations r
+        JOIN students s ON r.student_id = s.id AND (s.is_deleted = 0 OR s.is_deleted IS NULL)
+        JOIN subjects sub ON r.subject_id = sub.id AND (sub.is_deleted = 0 OR sub.is_deleted IS NULL)
+        LEFT JOIN student_scores ss
+          ON ss.school_id = r.school_id
+         AND ss.examination_id = ?
+         AND ss.student_id = r.student_id
+         AND ss.subject_id = r.subject_id
+        WHERE r.school_id = ? AND r.academic_session_id = ? AND r.term_id = ? AND r.status != 'DROPPED'
+      `;
+      let rIdx = 5;
+      if (class_id) {
+        const c1 = rIdx++;
+        const c2 = rIdx++;
+        rPg += ` AND (COALESCE(r.class_id, s.class_id) = $${c1} OR sub.class_id = $${c2})`;
+        rSq += ` AND (COALESCE(r.class_id, s.class_id) = ? OR sub.class_id = ?)`;
+        regParams.push(class_id, class_id);
+      }
+      if (cleanDept) {
+        rPg += ` AND LOWER(TRIM(COALESCE(s.class_arm_name, ''))) = LOWER(TRIM($${rIdx++}))`;
+        rSq += ` AND LOWER(TRIM(COALESCE(s.class_arm_name, ''))) = LOWER(TRIM(?))`;
+        regParams.push(cleanDept);
+      }
+      rPg += ` GROUP BY sub.id, sub.code, sub.name, sub.department, sub.semester_tag, sub.course_type ORDER BY sub.code ASC, sub.name ASC`;
+      rSq += ` GROUP BY sub.id, sub.code, sub.name, sub.department, sub.semester_tag, sub.course_type ORDER BY sub.code ASC, sub.name ASC`;
+
+      const registeredSubjects = (await dbAll(rPg, rSq, regParams)).map((row: any) => ({
+        subject_id: row.subject_id,
+        code: row.code,
+        name: row.name,
+        department: row.department || null,
+        semester_tag: row.semester_tag || null,
+        course_type: row.course_type || 'CORE',
+        credit_units: Number(row.credit_units ?? 3),
+        registered_count: Number(row.registered_count || 0),
+        scored_count: Number(row.scored_count || 0),
+      }));
+
+      return res.status(created ? 201 : 200).json({
+        success: true,
+        created,
+        examination: exam,
+        registered_subjects: registeredSubjects,
+        message: created
+          ? `Created "${exam.title}" linked to ${registeredSubjects.length} registered course(s).`
+          : `Opened "${exam.title}" with ${registeredSubjects.length} registered course(s).`,
+      });
+    } catch (err: any) {
+      console.error('[Create Exam From Registrations Error]', err);
+      return res.status(500).json({
+        error: 'EXAM_FROM_REGISTRATIONS_FAILED',
+        message: safeClientError(err, 'Failed to launch grading examination from registered courses.'),
+      });
+    }
+  }
+);
+
+// ==============================================================================
+// 5. CLASS / LEVEL / DEPARTMENT MASTER BROADSHEET (Students x Subjects + GPA + Rank)
+// GET /api/v1/school/examinations/:id/broadsheet?department=...
 // ==============================================================================
 courseAndBacklogRouter.get(
   '/examinations/:id/broadsheet',
@@ -1335,6 +1838,7 @@ courseAndBacklogRouter.get(
     try {
       const schoolId = req.targetSchoolId!;
       const examId = req.params.id;
+      const departmentFilter = String((req.query as Record<string, string>)?.department || '').trim();
 
       const exam = await dbGet(
         `SELECT ex.*, ses.name as session_name, t.name as term_name, c.name as class_name
@@ -1372,9 +1876,10 @@ courseAndBacklogRouter.get(
       const instProfile = resolveInstitutionProfile(school, tenantSettings);
       const isGpaMode = instProfile.gradingMode === 'GPA_5' || instProfile.gradingMode === 'GPA_4';
 
-      const scores = await dbAll(
+      const allScores = await dbAll(
         `SELECT ss.*, s.full_name as student_name, s.admission_number,
-                sub.name as subject_name, sub.code as subject_code,
+                s.class_arm_name as student_department,
+                sub.name as subject_name, sub.code as subject_code, sub.department as subject_department,
                 COALESCE(scr.credit_units_snapshot, sub.credit_units, 3) as credit_units
          FROM student_scores ss
          JOIN students s ON ss.student_id = s.id
@@ -1389,7 +1894,8 @@ courseAndBacklogRouter.get(
          WHERE ss.school_id = $1 AND ss.examination_id = $2 AND (s.is_deleted = 0 OR s.is_deleted IS NULL)
          ORDER BY s.full_name ASC, sub.code ASC`,
         `SELECT ss.*, s.full_name as student_name, s.admission_number,
-                sub.name as subject_name, sub.code as subject_code,
+                s.class_arm_name as student_department,
+                sub.name as subject_name, sub.code as subject_code, sub.department as subject_department,
                 COALESCE(scr.credit_units_snapshot, sub.credit_units, 3) as credit_units
          FROM student_scores ss
          JOIN students s ON ss.student_id = s.id
@@ -1406,11 +1912,26 @@ courseAndBacklogRouter.get(
         [schoolId, examId]
       );
 
-      const subjectColsMap = new Map<string, { id: string; code: string; name: string; credit_units: number }>();
+      const availableDepartments = Array.from(
+        new Set(
+          allScores
+            .map((sc: any) => String(sc.student_department || '').trim())
+            .filter(Boolean)
+        )
+      ).sort((a, b) => a.localeCompare(b));
+
+      const scores = departmentFilter
+        ? allScores.filter(
+            (sc: any) => String(sc.student_department || '').trim().toLowerCase() === departmentFilter.toLowerCase()
+          )
+        : allScores;
+
+      const subjectColsMap = new Map<string, { id: string; code: string; name: string; credit_units: number; department: string | null }>();
       const studentMap = new Map<string, {
         student_id: string;
         admission_number: string | null;
         student_name: string;
+        department: string | null;
         scores: Record<string, { total: number; grade: string; percentage: number }>;
         total_score: number;
         subjects_count: number;
@@ -1429,6 +1950,7 @@ courseAndBacklogRouter.get(
             code: sc.subject_code || sc.subject_name.slice(0, 5).toUpperCase(),
             name: sc.subject_name,
             credit_units: units,
+            department: sc.subject_department || null,
           });
         }
         if (!studentMap.has(sc.student_id)) {
@@ -1436,6 +1958,7 @@ courseAndBacklogRouter.get(
             student_id: sc.student_id,
             admission_number: sc.admission_number || null,
             student_name: sc.student_name,
+            department: sc.student_department || null,
             scores: {},
             total_score: 0,
             subjects_count: 0,
@@ -1464,6 +1987,7 @@ courseAndBacklogRouter.get(
           student_id: st.student_id,
           admission_number: st.admission_number,
           student_name: st.student_name,
+          department: st.department,
           scores: st.scores,
           subjects_count: st.subjects_count,
           total_score: Math.round(st.total_score * 100) / 100,
@@ -1492,11 +2016,14 @@ courseAndBacklogRouter.get(
           session_name: exam.session_name,
           term_name: exam.term_name,
           class_name: exam.class_name,
+          department: exam.department || null,
           status: exam.status,
           total_max_score: maxScore,
         },
         gradingMode: instProfile.gradingMode,
         isGpaMode,
+        available_departments: availableDepartments,
+        active_department: departmentFilter || null,
         subjects: subjectColumns,
         rows,
       });

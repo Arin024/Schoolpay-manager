@@ -33,9 +33,11 @@ import {
   AcademicSettings,
   SubjectItem,
   CourseRegistrationItem,
+  DepartmentSummaryItem,
   HistoricalBacklogInputRow,
   ExamBroadsheetData,
   ExaminationItem,
+  RegisteredCourseProgressItem,
   StudentScoreItem,
   ScoreCorrectionLogItem,
   ReportCardItem,
@@ -2162,6 +2164,8 @@ export const api = {
     academic_session_id?: string;
     term_id?: string;
     class_id?: string;
+    class_arm_id?: string;
+    department?: string;
     ca_max_score?: number;
     exam_max_score?: number;
   }): Promise<{ success: boolean; examination: ExaminationItem }> {
@@ -2192,16 +2196,34 @@ export const api = {
   },
 
   // Exam Scores & Audited Corrections
-  async getExaminationScores(examId: string, params?: { subject_id?: string; class_id?: string }): Promise<{
+  async getExaminationScores(
+    examId: string,
+    params?: { subject_id?: string; class_id?: string; department?: string; registered_only?: boolean }
+  ): Promise<{
     success: boolean;
     examination: ExaminationItem;
-    roster: Array<{ id: string; admission_number: string; full_name: string; class_id?: string | null; class_name?: string | null }>;
+    roster: Array<{
+      id: string;
+      admission_number: string;
+      full_name: string;
+      class_id?: string | null;
+      class_name?: string | null;
+      class_arm_id?: string | null;
+      class_arm_name?: string | null;
+      is_registered?: boolean;
+      registration_type?: string | null;
+    }>;
     scores: StudentScoreItem[];
     corrections: ScoreCorrectionLogItem[];
+    registered_subjects?: RegisteredCourseProgressItem[];
+    registered_count_for_subject?: number;
+    filtered_by_registration?: boolean;
   }> {
     const query = new URLSearchParams();
     if (params?.subject_id) query.set('subject_id', params.subject_id);
     if (params?.class_id) query.set('class_id', params.class_id);
+    if (params?.department) query.set('department', params.department);
+    if (params?.registered_only) query.set('registered_only', 'true');
     return safeFetch(`${API_BASE}/school/examinations/${examId}/scores?${query.toString()}`, {
       headers: getAuthHeaders(),
     });
@@ -3448,6 +3470,7 @@ export const api = {
     }>;
     update_existing?: boolean;
     default_semester_tag?: string | null;
+    default_department?: string | null;
   }): Promise<{
     success: boolean;
     message: string;
@@ -3458,6 +3481,53 @@ export const api = {
     errors: Array<{ row: number; message: string }>;
   }> {
     return safeFetch(`${API_BASE}/school/subjects/bulk`, {
+      method: 'POST',
+      headers: getAuthHeaders(),
+      body: JSON.stringify(payload),
+    });
+  },
+
+  async getSchoolDepartments(): Promise<{ success: boolean; departments: DepartmentSummaryItem[] }> {
+    return safeFetch(`${API_BASE}/school/departments`, {
+      headers: getAuthHeaders(),
+    });
+  },
+
+  async bulkAssignSubjects(payload: {
+    subject_ids: string[];
+    department?: string | null;
+    class_id?: string | null;
+    semester_tag?: string | null;
+    course_type?: string;
+    credit_units?: number;
+  }): Promise<{
+    success: boolean;
+    updatedCount: number;
+    skipped: Array<{ id: string; reason: string }>;
+    message: string;
+  }> {
+    return safeFetch(`${API_BASE}/school/subjects/bulk-assign`, {
+      method: 'PATCH',
+      headers: getAuthHeaders(),
+      body: JSON.stringify(payload),
+    });
+  },
+
+  async createOrOpenExamFromRegistrations(payload: {
+    academic_session_id: string;
+    term_id: string;
+    class_id?: string | null;
+    department?: string | null;
+    class_arm_id?: string | null;
+    title?: string;
+  }): Promise<{
+    success: boolean;
+    created: boolean;
+    examination: ExaminationItem;
+    registered_subjects: RegisteredCourseProgressItem[];
+    message: string;
+  }> {
+    return safeFetch(`${API_BASE}/school/examinations/from-registrations`, {
       method: 'POST',
       headers: getAuthHeaders(),
       body: JSON.stringify(payload),
@@ -3479,6 +3549,8 @@ export const api = {
     academic_session_id?: string;
     term_id?: string;
     class_id?: string;
+    class_arm_id?: string;
+    department?: string;
     student_id?: string;
     subject_id?: string;
   }): Promise<{
@@ -3490,6 +3562,7 @@ export const api = {
       student_name: string;
       admission_number: string | null;
       class_name: string | null;
+      department?: string | null;
       courses_count: number;
       total_credit_units: number;
       exceeds_max_units: boolean;
@@ -3502,12 +3575,19 @@ export const api = {
       }>;
       courses: CourseRegistrationItem[];
     }>;
+    departmentSummaries?: Array<{
+      department: string;
+      registered_students_count: number;
+      registrations_count: number;
+    }>;
     policy: { min_credit_units_per_cycle: number; max_credit_units_per_cycle: number };
   }> {
     const qs = new URLSearchParams();
     if (params?.academic_session_id) qs.set('academic_session_id', params.academic_session_id);
     if (params?.term_id) qs.set('term_id', params.term_id);
     if (params?.class_id) qs.set('class_id', params.class_id);
+    if (params?.class_arm_id) qs.set('class_arm_id', params.class_arm_id);
+    if (params?.department) qs.set('department', params.department);
     if (params?.student_id) qs.set('student_id', params.student_id);
     if (params?.subject_id) qs.set('subject_id', params.subject_id);
     return safeFetch(`${API_BASE}/school/course-registrations?${qs.toString()}`, {
@@ -3519,6 +3599,8 @@ export const api = {
     academic_session_id: string;
     term_id: string;
     class_id?: string | null;
+    class_arm_id?: string | null;
+    department?: string | null;
     student_ids?: string[];
     subject_ids: Array<string | { subject_id: string; credit_units?: number; registration_type?: string }>;
     registration_type?: 'REGULAR' | 'CARRYOVER' | 'ELECTIVE' | 'HISTORICAL';
@@ -3610,10 +3692,17 @@ export const api = {
 
   async getExamBroadsheet(
     examinationId: string,
-    classId?: string
+    opts?: string | { classId?: string; department?: string }
   ): Promise<{ success: boolean } & ExamBroadsheetData> {
-    const qs = classId ? `?class_id=${encodeURIComponent(classId)}` : '';
-    return safeFetch(`${API_BASE}/school/examinations/${encodeURIComponent(examinationId)}/broadsheet${qs}`, {
+    const qs = new URLSearchParams();
+    if (typeof opts === 'string' && opts) {
+      qs.set('class_id', opts);
+    } else if (opts && typeof opts === 'object') {
+      if (opts.classId) qs.set('class_id', opts.classId);
+      if (opts.department) qs.set('department', opts.department);
+    }
+    const queryStr = qs.toString() ? `?${qs.toString()}` : '';
+    return safeFetch(`${API_BASE}/school/examinations/${encodeURIComponent(examinationId)}/broadsheet${queryStr}`, {
       headers: getAuthHeaders(),
     });
   },

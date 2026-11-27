@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
   BarChart3,
   BookOpen,
@@ -20,6 +20,12 @@ import {
   Layers,
   FileSpreadsheet,
   Upload,
+  CheckSquare,
+  Square,
+  Download,
+  ClipboardPaste,
+  ArrowRight,
+  Tags,
 } from 'lucide-react';
 import { api } from '../../services/api.js';
 import { useAuth } from '../../context/AuthContext.js';
@@ -27,8 +33,10 @@ import {
   AcademicSessionItem,
   AcademicSettings,
   ClassItem,
+  DepartmentSummaryItem,
   ExaminationItem,
   PerformanceOverviewData,
+  RegisteredCourseProgressItem,
   ReportCardItem,
   ScoreCorrectionLogItem,
   SessionReportCardItem,
@@ -50,6 +58,7 @@ import {
   normalizeSemesterTag,
   termMatchesSemesterTag,
 } from '../../utils/semesterTag.js';
+import { parseScoreSheetPaste } from '../../utils/scoreSheetPasteParser.js';
 
 interface SchoolPerformanceViewProps {
   readOnly?: boolean;
@@ -69,6 +78,7 @@ export const SchoolPerformanceView: React.FC<SchoolPerformanceViewProps> = ({ re
   const [sessions, setSessions] = useState<AcademicSessionItem[]>([]);
   const [classes, setClasses] = useState<ClassItem[]>([]);
   const [subjects, setSubjects] = useState<SubjectItem[]>([]);
+  const [departments, setDepartments] = useState<DepartmentSummaryItem[]>([]);
   const [settings, setSettings] = useState<AcademicSettings | null>(null);
 
   // Analytics state
@@ -92,13 +102,20 @@ export const SchoolPerformanceView: React.FC<SchoolPerformanceViewProps> = ({ re
   const [bulkCoursesPrefill, setBulkCoursesPrefill] = useState<{
     classId?: string;
     semesterTag?: CanonicalSemesterTag;
+    department?: string;
   }>({});
   const [historicalBacklogOpen, setHistoricalBacklogOpen] = useState(false);
   const [broadsheetExamId, setBroadsheetExamId] = useState<string | null>(null);
   const [inlineUnitSavingId, setInlineUnitSavingId] = useState<string | null>(null);
   const [inlineSemSavingId, setInlineSemSavingId] = useState<string | null>(null);
   const [subjectFilterClassId, setSubjectFilterClassId] = useState('');
+  const [subjectFilterDepartment, setSubjectFilterDepartment] = useState('');
   const [subjectFilterSemester, setSubjectFilterSemester] = useState<'ALL' | '' | '1ST' | '2ND' | '3RD'>('ALL');
+  const [selectedCatalogSubjectIds, setSelectedCatalogSubjectIds] = useState<string[]>([]);
+  const [bulkAssignDept, setBulkAssignDept] = useState('');
+  const [bulkAssignClassId, setBulkAssignClassId] = useState('__KEEP__');
+  const [bulkAssignSemTag, setBulkAssignSemTag] = useState('__KEEP__');
+  const [bulkAssignSaving, setBulkAssignSaving] = useState(false);
   const [editingSubject, setEditingSubject] = useState<SubjectItem | null>(null);
   const [subjectForm, setSubjectForm] = useState({
     name: '',
@@ -123,15 +140,30 @@ export const SchoolPerformanceView: React.FC<SchoolPerformanceViewProps> = ({ re
     academic_session_id: '',
     term_id: '',
     class_id: '',
+    department: '',
     ca_max_score: 40,
     exam_max_score: 60,
   });
   const [examSaving, setExamSaving] = useState(false);
+  const [openingFromReg, setOpeningFromReg] = useState(false);
 
   const [selectedExam, setSelectedExam] = useState<ExaminationItem | null>(null);
   const [scoreSubjectId, setScoreSubjectId] = useState('');
+  const [scoreRegisteredOnly, setScoreRegisteredOnly] = useState(true);
+  const [scoreQueueDeptFilter, setScoreQueueDeptFilter] = useState('');
+  const [registeredSubjectsQueue, setRegisteredSubjectsQueue] = useState<RegisteredCourseProgressItem[]>([]);
   const [scoreRoster, setScoreRoster] = useState<
-    Array<{ id: string; admission_number: string; full_name: string; class_id?: string | null; class_name?: string | null }>
+    Array<{
+      id: string;
+      admission_number: string;
+      full_name: string;
+      class_id?: string | null;
+      class_name?: string | null;
+      class_arm_id?: string | null;
+      class_arm_name?: string | null;
+      is_registered?: boolean;
+      registration_type?: string | null;
+    }>
   >([]);
   const [examScores, setExamScores] = useState<StudentScoreItem[]>([]);
   const [examCorrections, setExamCorrections] = useState<ScoreCorrectionLogItem[]>([]);
@@ -140,6 +172,8 @@ export const SchoolPerformanceView: React.FC<SchoolPerformanceViewProps> = ({ re
   >({});
   const [scoresLoading, setScoresLoading] = useState(false);
   const [scoresSaving, setScoresSaving] = useState(false);
+  const [pasteDrawerOpen, setPasteDrawerOpen] = useState(false);
+  const [pasteRawText, setPasteRawText] = useState('');
 
   // Audited correction modal
   const [correctingScore, setCorrectingScore] = useState<StudentScoreItem | null>(null);
@@ -203,7 +237,7 @@ export const SchoolPerformanceView: React.FC<SchoolPerformanceViewProps> = ({ re
 
   const loadBootstrap = async () => {
     try {
-      const [sessRes, clsRes, subRes, setRes, exRes, stuRes] = await Promise.all([
+      const [sessRes, clsRes, subRes, setRes, exRes, stuRes, deptRes] = await Promise.all([
         api.getSchoolAcademicSessions().catch(() => ({ sessions: [] })),
         api.getSchoolClasses().catch(() => ({ classes: [] })),
         api.getSubjects().catch(() => ({ subjects: [] })),
@@ -212,11 +246,13 @@ export const SchoolPerformanceView: React.FC<SchoolPerformanceViewProps> = ({ re
         readOnly
           ? api.getTeacherDashboard().then((d) => ({ students: d.students || [] })).catch(() => ({ students: [] }))
           : api.getSchoolStudents({ limit: 500 }).catch(() => ({ students: [] })),
+        api.getSchoolDepartments().catch(() => ({ departments: [] })),
       ]);
       const loadedSessions = sessRes.sessions || [];
       setSessions(loadedSessions);
       setClasses(clsRes.classes || []);
       setSubjects(subRes.subjects || []);
+      setDepartments(deptRes.departments || []);
       if (setRes.settings) setSettings(setRes.settings);
       setExams(exRes.examinations || []);
       const loadedStudents = stuRes.students || [];
@@ -251,6 +287,23 @@ export const SchoolPerformanceView: React.FC<SchoolPerformanceViewProps> = ({ re
     }
   };
 
+  // Canonical deduplicated department names across class arms, subjects, students, and /departments API
+  const availableDepartmentNames = useMemo(() => {
+    const map = new Map<string, string>();
+    const add = (val?: string | null) => {
+      const cleaned = (val || '').trim();
+      if (!cleaned) return;
+      const lower = cleaned.toLowerCase();
+      if (lower === 'general' || lower === 'general / unassigned') return;
+      if (!map.has(lower)) map.set(lower, cleaned);
+    };
+    departments.forEach((d) => add(d.name));
+    classes.forEach((c) => (c.arms || []).forEach((a) => add(a.name)));
+    rosterStudents.forEach((s) => add(s.class_arm_name));
+    subjects.forEach((s) => add(s.department));
+    return Array.from(map.values()).sort((a, b) => a.localeCompare(b));
+  }, [departments, classes, rosterStudents, subjects]);
+
   const loadOverview = async (activeFilters = filters) => {
     setOverviewLoading(true);
     setOverviewError(null);
@@ -276,13 +329,59 @@ export const SchoolPerformanceView: React.FC<SchoolPerformanceViewProps> = ({ re
     }
   };
 
-  const loadExamScoreSheet = async (exam: ExaminationItem, subjectId: string) => {
+  const loadExamScoreSheet = async (
+    exam: ExaminationItem,
+    subjectId: string,
+    opts?: { registeredOnly?: boolean; department?: string; autoPickRegistered?: boolean }
+  ) => {
     setScoresLoading(true);
     try {
-      const res = await api.getExaminationScores(exam.id, {
-        subject_id: subjectId || undefined,
+      const wantRegOnly = opts?.registeredOnly !== undefined ? opts.registeredOnly : scoreRegisteredOnly;
+      const effectiveDept = opts?.department !== undefined ? opts.department : exam.department || '';
+
+      let targetSubjectId = subjectId;
+      let res = await api.getExaminationScores(exam.id, {
+        subject_id: targetSubjectId || undefined,
         class_id: exam.class_id || undefined,
+        department: effectiveDept || undefined,
+        registered_only: wantRegOnly,
       });
+
+      const queue = res.registered_subjects || [];
+      setRegisteredSubjectsQueue(queue);
+
+      // On initial exam open (when autoPickRegistered is true and registrations exist), jump straight to the first ungraded registered course
+      if (opts?.autoPickRegistered && queue.length > 0) {
+        const firstUngraded =
+          queue.find((q) => q.scored_count < q.registered_count) || queue[0];
+        if (firstUngraded && firstUngraded.subject_id !== targetSubjectId) {
+          targetSubjectId = firstUngraded.subject_id;
+          setScoreSubjectId(targetSubjectId);
+          res = await api.getExaminationScores(exam.id, {
+            subject_id: targetSubjectId,
+            class_id: exam.class_id || undefined,
+            department: effectiveDept || undefined,
+            registered_only: wantRegOnly,
+          });
+        }
+      }
+
+      // If registered_only was requested for a course with 0 registrations yet, gracefully show all cohort students
+      let resolvedRegOnly = wantRegOnly;
+      if (wantRegOnly && (res.roster || []).length === 0 && targetSubjectId) {
+        const hasRegsForCourse = queue.some((q) => q.subject_id === targetSubjectId && q.registered_count > 0);
+        if (!hasRegsForCourse) {
+          resolvedRegOnly = false;
+          res = await api.getExaminationScores(exam.id, {
+            subject_id: targetSubjectId,
+            class_id: exam.class_id || undefined,
+            department: effectiveDept || undefined,
+            registered_only: false,
+          });
+        }
+      }
+
+      setScoreRegisteredOnly(resolvedRegOnly);
       setSelectedExam(res.examination);
       setScoreRoster(res.roster || []);
       setExamScores(res.scores || []);
@@ -290,7 +389,7 @@ export const SchoolPerformanceView: React.FC<SchoolPerformanceViewProps> = ({ re
 
       const nextDrafts: Record<string, { ca_score: string; exam_score: string; subject_remark: string }> = {};
       for (const st of res.roster || []) {
-        const existing = (res.scores || []).find((sc) => sc.student_id === st.id && (!subjectId || sc.subject_id === subjectId));
+        const existing = (res.scores || []).find((sc) => sc.student_id === st.id && (!targetSubjectId || sc.subject_id === targetSubjectId));
         nextDrafts[st.id] = {
           ca_score: existing?.ca_score !== null && existing?.ca_score !== undefined ? String(existing.ca_score) : '',
           exam_score: existing?.exam_score !== null && existing?.exam_score !== undefined ? String(existing.exam_score) : '',
@@ -430,9 +529,59 @@ export const SchoolPerformanceView: React.FC<SchoolPerformanceViewProps> = ({ re
       await api.deleteSubject(sub.id);
       const res = await api.getSubjects();
       setSubjects(res.subjects || []);
+      setSelectedCatalogSubjectIds((prev) => prev.filter((id) => id !== sub.id));
       showMsg('ok', `Removed subject ${sub.name}.`);
     } catch (err: any) {
       showMsg('err', err?.message || 'Failed to delete subject');
+    }
+  };
+
+  const handleBulkAssignSubjects = async () => {
+    if (selectedCatalogSubjectIds.length === 0) return;
+    const payload: {
+      subject_ids: string[];
+      department?: string | null;
+      class_id?: string | null;
+      semester_tag?: string | null;
+    } = { subject_ids: selectedCatalogSubjectIds };
+
+    let hasChange = false;
+    if (bulkAssignDept.trim() !== '') {
+      payload.department = bulkAssignDept.trim() === '__CLEAR__' ? '' : bulkAssignDept.trim();
+      hasChange = true;
+    }
+    if (bulkAssignClassId !== '__KEEP__') {
+      payload.class_id = bulkAssignClassId === '' ? null : bulkAssignClassId;
+      hasChange = true;
+    }
+    if (bulkAssignSemTag !== '__KEEP__') {
+      payload.semester_tag = bulkAssignSemTag === '' ? null : bulkAssignSemTag;
+      hasChange = true;
+    }
+
+    if (!hasChange) {
+      showMsg('err', 'Choose a Department, Level, or Semester to apply to the selected courses.');
+      return;
+    }
+
+    setBulkAssignSaving(true);
+    try {
+      const res = await api.bulkAssignSubjects(payload);
+      const [subRes, deptRes] = await Promise.all([
+        api.getSubjects(),
+        api.getSchoolDepartments().catch(() => ({ departments: [] })),
+      ]);
+      setSubjects(subRes.subjects || []);
+      setDepartments(deptRes.departments || []);
+      setSelectedCatalogSubjectIds([]);
+      setBulkAssignDept('');
+      setBulkAssignClassId('__KEEP__');
+      setBulkAssignSemTag('__KEEP__');
+      showMsg('ok', res.message || 'Updated selected courses.');
+    } catch (err: any) {
+      showMsg('err', err?.message || 'Failed to batch update courses');
+    } finally {
+      setBulkAssignSaving(false);
     }
   };
 
@@ -440,14 +589,19 @@ export const SchoolPerformanceView: React.FC<SchoolPerformanceViewProps> = ({ re
     e.preventDefault();
     setExamSaving(true);
     try {
-      const res = await api.createExamination(examForm);
+      const res = await api.createExamination({
+        ...examForm,
+        class_id: examForm.class_id || undefined,
+        department: examForm.department.trim() || undefined,
+      });
       setExamModalOpen(false);
       setExamForm((prev) => ({ ...prev, title: '' }));
       await loadExams();
       if (res.examination) {
         setSelectedExam(res.examination);
         const subj = scoreSubjectId || subjects[0]?.id || '';
-        if (subj) loadExamScoreSheet(res.examination, subj);
+        setScoreSubjectId(subj);
+        await loadExamScoreSheet(res.examination, subj, { registeredOnly: true, autoPickRegistered: true });
       }
       showMsg('ok', 'Examination created in DRAFT state.');
     } catch (err: any) {
@@ -457,12 +611,48 @@ export const SchoolPerformanceView: React.FC<SchoolPerformanceViewProps> = ({ re
     }
   };
 
-  const handleSaveScores = async () => {
+  const handleLaunchGradingFromRegistrations = async (params: {
+    academic_session_id: string;
+    term_id: string;
+    class_id?: string | null;
+    department?: string | null;
+  }) => {
+    setOpeningFromReg(true);
+    try {
+      const res = await api.createOrOpenExamFromRegistrations(params);
+      await loadExams();
+      setSubTab('exams');
+      setScoreQueueDeptFilter(params.department || '');
+      if (res.examination) {
+        setSelectedExam(res.examination);
+        const queue = res.registered_subjects || [];
+        setRegisteredSubjectsQueue(queue);
+        const firstSub =
+          queue.find((q) => q.scored_count < q.registered_count)?.subject_id ||
+          queue[0]?.subject_id ||
+          subjects[0]?.id ||
+          '';
+        setScoreSubjectId(firstSub);
+        await loadExamScoreSheet(res.examination, firstSub, {
+          registeredOnly: queue.length > 0,
+          department: params.department || '',
+        });
+      }
+      showMsg('ok', res.message || 'Opened Examination Grading Queue from registered courses.');
+    } catch (err: any) {
+      showMsg('err', err?.message || 'Failed to open examination from registrations');
+    } finally {
+      setOpeningFromReg(false);
+    }
+  };
+
+  const handleSaveScores = async (advanceToNextCourse = false, overrideDrafts?: typeof scoreDrafts) => {
     if (!selectedExam || !scoreSubjectId) return;
+    const activeDrafts = overrideDrafts || scoreDrafts;
     setScoresSaving(true);
     try {
       const entries = scoreRoster.map((st) => {
-        const draft = scoreDrafts[st.id] || { ca_score: '', exam_score: '', subject_remark: '' };
+        const draft = activeDrafts[st.id] || { ca_score: '', exam_score: '', subject_remark: '' };
         return {
           student_id: st.id,
           subject_id: scoreSubjectId,
@@ -474,12 +664,102 @@ export const SchoolPerformanceView: React.FC<SchoolPerformanceViewProps> = ({ re
       await api.saveExaminationScores(selectedExam.id, entries);
       await loadExamScoreSheet(selectedExam, scoreSubjectId);
       await loadOverview();
+      if (advanceToNextCourse && registeredSubjectsQueue.length > 1) {
+        const filteredQueue = registeredSubjectsQueue.filter((q) => {
+          if (!scoreQueueDeptFilter) return true;
+          const qDept = (q.department || '').trim().toLowerCase();
+          if (scoreQueueDeptFilter === '__GENERAL__') return !qDept || qDept === 'general';
+          return qDept === scoreQueueDeptFilter.toLowerCase();
+        });
+        const idx = filteredQueue.findIndex((q) => q.subject_id === scoreSubjectId);
+        const nextCourse =
+          filteredQueue.slice(idx + 1).find((q) => q.scored_count < q.registered_count) ||
+          filteredQueue[idx + 1] ||
+          filteredQueue.find((q) => q.subject_id !== scoreSubjectId && q.scored_count < q.registered_count);
+        if (nextCourse) {
+          setScoreSubjectId(nextCourse.subject_id);
+          await loadExamScoreSheet(selectedExam, nextCourse.subject_id, { registeredOnly: scoreRegisteredOnly });
+          showMsg('ok', `Saved scores and loaded next course: ${nextCourse.code || nextCourse.name}.`);
+          return;
+        }
+      }
       showMsg('ok', 'Scores saved and graded automatically.');
     } catch (err: any) {
       showMsg('err', err?.message || 'Failed to save scores');
     } finally {
       setScoresSaving(false);
     }
+  };
+
+  const parsedPastePreview = useMemo(() => {
+    if (!pasteDrawerOpen || !pasteRawText.trim() || !selectedExam) return null;
+    return parseScoreSheetPaste(
+      pasteRawText,
+      scoreRoster,
+      Number(selectedExam.ca_max_score ?? 40),
+      Number(selectedExam.exam_max_score ?? 60)
+    );
+  }, [pasteDrawerOpen, pasteRawText, selectedExam, scoreRoster]);
+
+  const handleApplyPastedScores = async (saveImmediately = false) => {
+    if (!parsedPastePreview || !selectedExam) return;
+    const validRows = parsedPastePreview.rows.filter((r) => r.matchedStudentId && !r.error);
+    if (validRows.length === 0) {
+      showMsg('err', 'No valid matched student score rows to import.');
+      return;
+    }
+    const mergedDrafts = { ...scoreDrafts };
+    for (const r of validRows) {
+      if (!r.matchedStudentId) continue;
+      const existing = mergedDrafts[r.matchedStudentId] || { ca_score: '', exam_score: '', subject_remark: '' };
+      mergedDrafts[r.matchedStudentId] = {
+        ca_score: r.ca_score !== '' ? r.ca_score : existing.ca_score,
+        exam_score: r.exam_score !== '' ? r.exam_score : existing.exam_score,
+        subject_remark: r.subject_remark || existing.subject_remark,
+      };
+    }
+    setScoreDrafts(mergedDrafts);
+    setPasteDrawerOpen(false);
+    setPasteRawText('');
+    if (saveImmediately) {
+      await handleSaveScores(false, mergedDrafts);
+    } else {
+      showMsg('ok', `Populated ${validRows.length} student score(s) into the sheet. Review and click Save Scores.`);
+    }
+  };
+
+  const handleDownloadRosterCsv = () => {
+    if (!selectedExam || scoreRoster.length === 0) return;
+    const activeSub = subjects.find((s) => s.id === scoreSubjectId);
+    const esc = (v: unknown) => `"${String(v ?? '').replace(/"/g, '""')}"`;
+    const headers = [
+      'Admission No',
+      'Student Name',
+      isTertiary ? 'Department' : 'Arm',
+      `CA Score (Max ${selectedExam.ca_max_score})`,
+      `Exam Score (Max ${selectedExam.exam_max_score})`,
+      'Remark',
+    ];
+    const rows = scoreRoster.map((st) => {
+      const d = scoreDrafts[st.id] || { ca_score: '', exam_score: '', subject_remark: '' };
+      return [
+        esc(st.admission_number || ''),
+        esc(st.full_name),
+        esc(st.class_arm_name || ''),
+        esc(d.ca_score),
+        esc(d.exam_score),
+        esc(d.subject_remark),
+      ].join(',');
+    });
+    const csv = [headers.map(esc).join(','), ...rows].join('\n');
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    const slug = `${activeSub?.code || 'scores'}-${selectedExam.title}`.replace(/[^a-z0-9]+/gi, '_').toLowerCase();
+    a.download = `${slug}_roster.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
   };
 
   const handleTransitionExamStatus = async (exam: ExaminationItem, status: 'DRAFT' | 'REVIEW' | 'APPROVED' | 'PUBLISHED') => {
@@ -1280,68 +1560,96 @@ export const SchoolPerformanceView: React.FC<SchoolPerformanceViewProps> = ({ re
                   <History className="w-3.5 h-3.5 text-slate-600" />
                   <span>Upload Previous Years</span>
                 </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setBulkCoursesPrefill({
-                      classId: subjectFilterClassId || '',
-                      semesterTag:
-                        subjectFilterSemester !== 'ALL'
-                          ? subjectFilterSemester
-                          : isTertiary
-                          ? '1ST'
-                          : '',
-                    });
-                    setBulkCoursesOpen(true);
-                  }}
-                  className="px-3.5 py-2 bg-slate-900 hover:bg-slate-800 text-white rounded-xl text-xs font-bold inline-flex items-center gap-1.5 cursor-pointer"
-                >
-                  <Upload className="w-3.5 h-3.5" />
-                  <span>Bulk Add {instLabels.subjectPlural}</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setEditingSubject(null);
-                    setSubjectForm({
-                      name: '',
-                      code: '',
-                      department: '',
-                      class_id: subjectFilterClassId || '',
-                      credit_units: '3',
-                      course_type: 'CORE',
-                      semester_tag:
-                        subjectFilterSemester !== 'ALL'
-                          ? subjectFilterSemester
-                          : isTertiary
-                          ? '1ST'
-                          : '',
-                      status: 'ACTIVE',
-                    });
-                    setSubjectModalOpen(true);
-                  }}
-                  className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold inline-flex items-center gap-1.5 cursor-pointer"
-                >
-                  <Plus className="w-4 h-4" />
-                  <span>Add {instLabels.subject}</span>
-                </button>
-              </div>
-            )}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setBulkCoursesPrefill({
+                        classId: subjectFilterClassId || '',
+                        department:
+                          subjectFilterDepartment && subjectFilterDepartment !== '__GENERAL__'
+                            ? subjectFilterDepartment
+                            : '',
+                        semesterTag:
+                          subjectFilterSemester !== 'ALL'
+                            ? subjectFilterSemester
+                            : isTertiary
+                            ? '1ST'
+                            : '',
+                      });
+                      setBulkCoursesOpen(true);
+                    }}
+                    className="px-3.5 py-2 bg-slate-900 hover:bg-slate-800 text-white rounded-xl text-xs font-bold inline-flex items-center gap-1.5 cursor-pointer"
+                  >
+                    <Upload className="w-3.5 h-3.5" />
+                    <span>Bulk Add {instLabels.subjectPlural}</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setEditingSubject(null);
+                      setSubjectForm({
+                        name: '',
+                        code: '',
+                        department:
+                          subjectFilterDepartment && subjectFilterDepartment !== '__GENERAL__'
+                            ? subjectFilterDepartment
+                            : '',
+                        class_id: subjectFilterClassId || '',
+                        credit_units: '3',
+                        course_type: 'CORE',
+                        semester_tag:
+                          subjectFilterSemester !== 'ALL'
+                            ? subjectFilterSemester
+                            : isTertiary
+                            ? '1ST'
+                            : '',
+                        status: 'ACTIVE',
+                      });
+                      setSubjectModalOpen(true);
+                    }}
+                    className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold inline-flex items-center gap-1.5 cursor-pointer"
+                  >
+                    <Plus className="w-4 h-4" />
+                    <span>Add {instLabels.subject}</span>
+                  </button>
+                </div>
+              )}
           </div>
 
-          {/* Level & Semester Catalog Filters */}
+          {/* Level, Department & Semester Catalog Filters */}
           {subjects.length > 0 && (
             <div className="flex flex-wrap items-center gap-2 bg-slate-50 border border-slate-200 rounded-xl p-2.5 text-xs">
               <select
                 value={subjectFilterClassId}
-                onChange={(e) => setSubjectFilterClassId(e.target.value)}
+                onChange={(e) => {
+                  setSubjectFilterClassId(e.target.value);
+                  setSelectedCatalogSubjectIds([]);
+                }}
                 aria-label={`Filter by ${instLabels.classLabel}`}
                 className="px-2.5 py-1.5 bg-white border border-slate-200 rounded-lg text-slate-700 font-medium"
               >
-                <option value="">All {instLabels.classPlural}</option>
+                <option value="">All {isTertiary ? 'Levels' : instLabels.classPlural}</option>
                 {classes.map((c) => (
                   <option key={c.id} value={c.id}>
                     {c.name}
+                  </option>
+                ))}
+              </select>
+
+              <select
+                value={subjectFilterDepartment}
+                onChange={(e) => {
+                  setSubjectFilterDepartment(e.target.value);
+                  setSelectedCatalogSubjectIds([]);
+                }}
+                aria-label="Filter by Department"
+                className="px-2.5 py-1.5 bg-white border border-slate-200 rounded-lg text-slate-700 font-medium"
+              >
+                <option value="">All Departments</option>
+                <option value="__GENERAL__">General / Shared (Untagged)</option>
+                {availableDepartmentNames.map((dept) => (
+                  <option key={dept} value={dept}>
+                    {dept}
                   </option>
                 ))}
               </select>
@@ -1359,7 +1667,10 @@ export const SchoolPerformanceView: React.FC<SchoolPerformanceViewProps> = ({ re
                   <button
                     key={item.key || 'FULL_SES'}
                     type="button"
-                    onClick={() => setSubjectFilterSemester(item.key)}
+                    onClick={() => {
+                      setSubjectFilterSemester(item.key);
+                      setSelectedCatalogSubjectIds([]);
+                    }}
                     className={`px-2.5 py-1 rounded-lg border font-semibold transition cursor-pointer ${
                       subjectFilterSemester === item.key
                         ? 'bg-emerald-600 text-white border-emerald-600'
@@ -1373,9 +1684,79 @@ export const SchoolPerformanceView: React.FC<SchoolPerformanceViewProps> = ({ re
             </div>
           )}
 
+          {/* 1-Click Bulk Assign Department / Level / Semester Bar */}
+          {!readOnly && selectedCatalogSubjectIds.length > 0 && (
+            <div className="bg-slate-900 text-white rounded-xl p-3 flex flex-wrap items-center gap-2.5 text-xs">
+              <span className="font-bold inline-flex items-center gap-1.5 text-emerald-400 shrink-0">
+                <Tags className="w-3.5 h-3.5" />
+                {selectedCatalogSubjectIds.length} selected
+              </span>
+              <div className="flex flex-wrap items-center gap-2 flex-1">
+                <input
+                  type="text"
+                  list="school-departments-datalist"
+                  value={bulkAssignDept}
+                  onChange={(e) => setBulkAssignDept(e.target.value)}
+                  placeholder="Assign Department (e.g. Family Healthcare)"
+                  className="px-2.5 py-1.5 bg-white text-slate-900 border border-slate-300 rounded-lg text-xs min-w-[200px]"
+                />
+                <select
+                  value={bulkAssignClassId}
+                  onChange={(e) => setBulkAssignClassId(e.target.value)}
+                  aria-label="Bulk assign level"
+                  className="px-2.5 py-1.5 bg-white text-slate-900 border border-slate-300 rounded-lg text-xs"
+                >
+                  <option value="__KEEP__">Keep {instLabels.classLabel}</option>
+                  <option value="">All {instLabels.classPlural}</option>
+                  {classes.map((c) => (
+                    <option key={c.id} value={c.id}>
+                      {c.name}
+                    </option>
+                  ))}
+                </select>
+                <select
+                  value={bulkAssignSemTag}
+                  onChange={(e) => setBulkAssignSemTag(e.target.value)}
+                  aria-label="Bulk assign semester"
+                  className="px-2.5 py-1.5 bg-white text-slate-900 border border-slate-300 rounded-lg text-xs"
+                >
+                  <option value="__KEEP__">Keep {instLabels.cycle}</option>
+                  {getSemesterTagOptions(instLabels.cycle, isTertiary, instProfile.cycleLabels).map((opt) => (
+                    <option key={opt.value || 'ALL_SEM'} value={opt.value}>
+                      {opt.label}
+                    </option>
+                  ))}
+                </select>
+                <button
+                  type="button"
+                  disabled={bulkAssignSaving}
+                  onClick={handleBulkAssignSubjects}
+                  className="px-3.5 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg font-bold cursor-pointer disabled:opacity-50"
+                >
+                  {bulkAssignSaving ? 'Applying...' : 'Apply to Selected'}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setSelectedCatalogSubjectIds([])}
+                  className="px-2.5 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-lg cursor-pointer"
+                >
+                  Clear
+                </button>
+              </div>
+            </div>
+          )}
+
           {(() => {
             const visibleSubjects = subjects.filter((sub) => {
               if (subjectFilterClassId && sub.class_id !== subjectFilterClassId) return false;
+              if (subjectFilterDepartment === '__GENERAL__') {
+                const d = (sub.department || '').trim().toLowerCase();
+                if (d && d !== 'general') return false;
+              } else if (subjectFilterDepartment) {
+                if ((sub.department || '').trim().toLowerCase() !== subjectFilterDepartment.trim().toLowerCase()) {
+                  return false;
+                }
+              }
               if (subjectFilterSemester !== 'ALL') {
                 const subTag = normalizeSemesterTag(sub.semester_tag);
                 if (subTag !== subjectFilterSemester) return false;
@@ -1383,6 +1764,8 @@ export const SchoolPerformanceView: React.FC<SchoolPerformanceViewProps> = ({ re
               return true;
             });
             const semOpts = getSemesterTagOptions(instLabels.cycle, isTertiary, instProfile.cycleLabels);
+            const allVisibleSelected =
+              visibleSubjects.length > 0 && visibleSubjects.every((s) => selectedCatalogSubjectIds.includes(s.id));
 
             if (subjects.length === 0) {
               return (
@@ -1394,7 +1777,7 @@ export const SchoolPerformanceView: React.FC<SchoolPerformanceViewProps> = ({ re
                     <button
                       type="button"
                       onClick={() => {
-                        setBulkCoursesPrefill({ classId: '', semesterTag: isTertiary ? '1ST' : '' });
+                        setBulkCoursesPrefill({ classId: '', department: '', semesterTag: isTertiary ? '1ST' : '' });
                         setBulkCoursesOpen(true);
                       }}
                       className="px-4 py-2 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-200 rounded-xl text-xs font-semibold inline-flex items-center gap-1.5 cursor-pointer"
@@ -1410,7 +1793,7 @@ export const SchoolPerformanceView: React.FC<SchoolPerformanceViewProps> = ({ re
             if (visibleSubjects.length === 0) {
               return (
                 <div className="py-8 text-center text-xs text-slate-500">
-                  No {instLabels.subjectPlural.toLowerCase()} match the selected {instLabels.classLabel.toLowerCase()} and {instLabels.cycle.toLowerCase()} filter.
+                  No {instLabels.subjectPlural.toLowerCase()} match the selected {instLabels.classLabel.toLowerCase()}, department, and {instLabels.cycle.toLowerCase()} filter.
                 </div>
               );
             }
@@ -1420,6 +1803,34 @@ export const SchoolPerformanceView: React.FC<SchoolPerformanceViewProps> = ({ re
                 <table className="w-full text-left text-xs">
                   <thead>
                     <tr className="border-b border-slate-200 text-slate-500 bg-slate-50/70">
+                      {!readOnly && (
+                        <th className="py-2.5 px-2.5 w-8">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              if (allVisibleSelected) {
+                                setSelectedCatalogSubjectIds((prev) =>
+                                  prev.filter((id) => !visibleSubjects.some((s) => s.id === id))
+                                );
+                              } else {
+                                const merged = new Set([
+                                  ...selectedCatalogSubjectIds,
+                                  ...visibleSubjects.map((s) => s.id),
+                                ]);
+                                setSelectedCatalogSubjectIds(Array.from(merged));
+                              }
+                            }}
+                            aria-label="Select all visible courses"
+                            className="text-slate-500 hover:text-emerald-700 cursor-pointer"
+                          >
+                            {allVisibleSelected ? (
+                              <CheckSquare className="w-4 h-4 text-emerald-600" />
+                            ) : (
+                              <Square className="w-4 h-4" />
+                            )}
+                          </button>
+                        </th>
+                      )}
                       <th className="py-2.5 px-3">Code</th>
                       <th className="py-2.5 px-3">{instLabels.subject} Title</th>
                       <th className="py-2.5 px-3">Credit Units</th>
@@ -1436,8 +1847,34 @@ export const SchoolPerformanceView: React.FC<SchoolPerformanceViewProps> = ({ re
                       const isSavingUnits = inlineUnitSavingId === sub.id;
                       const currentSemTag = normalizeSemesterTag(sub.semester_tag);
                       const isSavingSem = inlineSemSavingId === sub.id;
+                      const isSelected = selectedCatalogSubjectIds.includes(sub.id);
                       return (
-                        <tr key={sub.id} className="hover:bg-slate-50/60">
+                        <tr
+                          key={sub.id}
+                          className={`hover:bg-slate-50/60 ${isSelected ? 'bg-emerald-50/40' : ''}`}
+                        >
+                          {!readOnly && (
+                            <td className="py-2.5 px-2.5">
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  setSelectedCatalogSubjectIds((prev) =>
+                                    prev.includes(sub.id)
+                                      ? prev.filter((id) => id !== sub.id)
+                                      : [...prev, sub.id]
+                                  )
+                                }
+                                aria-label={`Select ${sub.name}`}
+                                className="text-slate-400 hover:text-emerald-700 cursor-pointer"
+                              >
+                                {isSelected ? (
+                                  <CheckSquare className="w-4 h-4 text-emerald-600" />
+                                ) : (
+                                  <Square className="w-4 h-4" />
+                                )}
+                              </button>
+                            </td>
+                          )}
                           <td className="py-2.5 px-3 font-mono text-slate-700 font-semibold whitespace-nowrap">{sub.code}</td>
                           <td className="py-2.5 px-3 font-semibold text-slate-900">
                             <span>{sub.name}</span>
@@ -1508,7 +1945,15 @@ export const SchoolPerformanceView: React.FC<SchoolPerformanceViewProps> = ({ re
                             )}
                           </td>
                           <td className="py-2.5 px-3 text-slate-600">{sub.class_name || `All ${instLabels.classPlural}`}</td>
-                          <td className="py-2.5 px-3 text-slate-600">{sub.department || 'General'}</td>
+                          <td className="py-2.5 px-3">
+                            {sub.department ? (
+                              <span className="inline-flex items-center px-2 py-0.5 rounded bg-slate-100 border border-slate-200 text-[11px] font-semibold text-slate-800">
+                                {sub.department}
+                              </span>
+                            ) : (
+                              <span className="text-slate-400">General</span>
+                            )}
+                          </td>
                           <td className="py-2.5 px-3">
                             <span
                               className={`text-[11px] font-semibold ${
@@ -1537,7 +1982,7 @@ export const SchoolPerformanceView: React.FC<SchoolPerformanceViewProps> = ({ re
                                     });
                                     setSubjectModalOpen(true);
                                   }}
-                                  className="p-1.5 text-slate-500 hover:text-blue-700 rounded-lg hover:bg-blue-50"
+                                  className="p-1.5 text-slate-500 hover:text-blue-700 rounded-lg hover:bg-blue-50 cursor-pointer"
                                   title={`Edit ${instLabels.subject}`}
                                 >
                                   <Edit2 className="w-3.5 h-3.5" />
@@ -1545,7 +1990,7 @@ export const SchoolPerformanceView: React.FC<SchoolPerformanceViewProps> = ({ re
                                 <button
                                   type="button"
                                   onClick={() => handleDeleteSubject(sub)}
-                                  className="p-1.5 text-slate-500 hover:text-rose-700 rounded-lg hover:bg-rose-50"
+                                  className="p-1.5 text-slate-500 hover:text-rose-700 rounded-lg hover:bg-rose-50 cursor-pointer"
                                   title={`Delete ${instLabels.subject}`}
                                 >
                                   <Trash2 className="w-3.5 h-3.5" />
@@ -1573,6 +2018,7 @@ export const SchoolPerformanceView: React.FC<SchoolPerformanceViewProps> = ({ re
           classes={classes}
           subjects={subjects}
           students={rosterStudents}
+          departments={departments}
           isAdmin={!readOnly}
           isTertiary={isTertiary}
           subjectLabel={instLabels.subject}
@@ -1583,9 +2029,10 @@ export const SchoolPerformanceView: React.FC<SchoolPerformanceViewProps> = ({ re
           learnerLabel={isTertiary ? 'Student' : 'Learner'}
           learnerPlural={isTertiary ? 'Students' : 'Learners'}
           onOpenHistoricalBacklog={() => setHistoricalBacklogOpen(true)}
-          onOpenBulkCourses={(prefillClassId, prefillSemTag) => {
+          onOpenBulkCourses={(prefillClassId, prefillSemTag, prefillDept) => {
             setBulkCoursesPrefill({
               classId: prefillClassId || '',
+              department: prefillDept || '',
               semesterTag: prefillSemTag !== undefined ? prefillSemTag : isTertiary ? '1ST' : '',
             });
             setBulkCoursesOpen(true);
@@ -1594,6 +2041,7 @@ export const SchoolPerformanceView: React.FC<SchoolPerformanceViewProps> = ({ re
             setReportMode('SESSION');
             setSubTab('reports');
           }}
+          onLaunchGradingFromRegistrations={handleLaunchGradingFromRegistrations}
           onToast={(type, text) => showMsg(type === 'success' ? 'ok' : 'err', text)}
         />
       )}
@@ -1611,7 +2059,7 @@ export const SchoolPerformanceView: React.FC<SchoolPerformanceViewProps> = ({ re
                   Draft → Review → Approved → Published. Published scores lock against direct edits and require audited corrections.
                 </p>
               </div>
-              <div className="flex items-center gap-2">
+              <div className="flex flex-wrap items-center gap-2">
                 <select
                   value={examFilterStatus}
                   onChange={(e) => setExamFilterStatus(e.target.value)}
@@ -1624,14 +2072,32 @@ export const SchoolPerformanceView: React.FC<SchoolPerformanceViewProps> = ({ re
                   <option value="PUBLISHED">Published</option>
                 </select>
                 {!readOnly && (
-                  <button
-                    type="button"
-                    onClick={() => setExamModalOpen(true)}
-                    className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold inline-flex items-center gap-1.5 cursor-pointer whitespace-nowrap"
-                  >
-                    <Plus className="w-4 h-4" />
-                    <span>New Examination</span>
-                  </button>
+                  <>
+                    <button
+                      type="button"
+                      disabled={openingFromReg || !examForm.academic_session_id || !examForm.term_id}
+                      onClick={() =>
+                        handleLaunchGradingFromRegistrations({
+                          academic_session_id: examForm.academic_session_id,
+                          term_id: examForm.term_id,
+                          class_id: examForm.class_id || null,
+                          department: examForm.department || null,
+                        })
+                      }
+                      className="px-3.5 py-2 bg-slate-900 hover:bg-slate-800 text-white rounded-xl text-xs font-bold inline-flex items-center gap-1.5 cursor-pointer whitespace-nowrap disabled:opacity-50"
+                    >
+                      <Layers className="w-3.5 h-3.5 text-emerald-400" />
+                      <span>{openingFromReg ? 'Opening...' : 'Open Exam from Registrations'}</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setExamModalOpen(true)}
+                      className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold inline-flex items-center gap-1.5 cursor-pointer whitespace-nowrap"
+                    >
+                      <Plus className="w-4 h-4" />
+                      <span>New Examination</span>
+                    </button>
+                  </>
                 )}
               </div>
             </div>
@@ -1646,8 +2112,8 @@ export const SchoolPerformanceView: React.FC<SchoolPerformanceViewProps> = ({ re
                   <thead>
                     <tr className="border-b border-slate-200 text-slate-500 bg-slate-50/70">
                       <th className="py-2.5 px-3">Examination</th>
-                      <th className="py-2.5 px-3">Session / Term</th>
-                      <th className="py-2.5 px-3">Class</th>
+                      <th className="py-2.5 px-3">Session / {instLabels.cycle}</th>
+                      <th className="py-2.5 px-3">{instLabels.classLabel} / Department</th>
                       <th className="py-2.5 px-3 text-right">Max (CA/Exam)</th>
                       <th className="py-2.5 px-3">Status</th>
                       <th className="py-2.5 px-3 text-right">Actions</th>
@@ -1668,7 +2134,14 @@ export const SchoolPerformanceView: React.FC<SchoolPerformanceViewProps> = ({ re
                         <td className="py-2.5 px-3 text-slate-600">
                           {ex.session_name || '—'} · {ex.term_name || '—'}
                         </td>
-                        <td className="py-2.5 px-3 text-slate-600">{ex.class_name || 'All Classes'}</td>
+                        <td className="py-2.5 px-3 text-slate-600">
+                          <span>{ex.class_name || `All ${instLabels.classPlural}`}</span>
+                          {ex.department && (
+                            <span className="ml-1.5 inline-flex px-1.5 py-0.5 rounded bg-slate-100 border border-slate-200 text-[10px] font-semibold text-slate-700">
+                              {ex.department}
+                            </span>
+                          )}
+                        </td>
                         <td className="py-2.5 px-3 text-right tabular-nums text-slate-700">
                           {ex.ca_max_score} / {ex.exam_max_score}
                         </td>
@@ -1682,7 +2155,11 @@ export const SchoolPerformanceView: React.FC<SchoolPerformanceViewProps> = ({ re
                               onClick={() => {
                                 const subj = scoreSubjectId || subjects[0]?.id || '';
                                 setScoreSubjectId(subj);
-                                loadExamScoreSheet(ex, subj);
+                                setScoreQueueDeptFilter(ex.department || '');
+                                loadExamScoreSheet(ex, subj, {
+                                  registeredOnly: true,
+                                  autoPickRegistered: true,
+                                });
                               }}
                               className="px-2.5 py-1 rounded-lg bg-slate-900 hover:bg-slate-800 text-white text-[11px] font-semibold cursor-pointer"
                             >
@@ -1739,11 +2216,16 @@ export const SchoolPerformanceView: React.FC<SchoolPerformanceViewProps> = ({ re
             <div className="bg-white rounded-2xl border border-slate-200 p-6 space-y-4">
               <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-slate-200">
                 <div>
-                  <div className="flex items-center gap-2">
+                  <div className="flex flex-wrap items-center gap-2">
                     <h4 className="text-sm font-bold text-slate-900">
                       Score Sheet · {selectedExam.title}
                     </h4>
                     <WorkflowStatusBadge status={selectedExam.status} />
+                    {selectedExam.department && (
+                      <span className="px-2 py-0.5 rounded bg-slate-100 border border-slate-200 text-[11px] font-semibold text-slate-700">
+                        {selectedExam.department}
+                      </span>
+                    )}
                   </div>
                   <p className="text-xs text-slate-500 mt-0.5 tabular-nums">
                     CA Max: {selectedExam.ca_max_score} · Exam Max: {selectedExam.exam_max_score} · Total Max: {selectedExam.total_max_score}
@@ -1757,10 +2239,13 @@ export const SchoolPerformanceView: React.FC<SchoolPerformanceViewProps> = ({ re
                       setScoreSubjectId(e.target.value);
                       loadExamScoreSheet(selectedExam, e.target.value);
                     }}
-                    className="px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl text-xs font-medium"
+                    className="px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl text-xs font-medium max-w-xs"
                   >
                     {[...subjects]
                       .sort((a, b) => {
+                        const aReg = registeredSubjectsQueue.some((q) => q.subject_id === a.id);
+                        const bReg = registeredSubjectsQueue.some((q) => q.subject_id === b.id);
+                        if (aReg !== bReg) return aReg ? -1 : 1;
                         const aMatch =
                           (!selectedExam.class_id || !a.class_id || a.class_id === selectedExam.class_id) &&
                           termMatchesSemesterTag(selectedExam.term_name, a.semester_tag);
@@ -1774,41 +2259,349 @@ export const SchoolPerformanceView: React.FC<SchoolPerformanceViewProps> = ({ re
                         const semTagLabel = sub.semester_tag
                           ? ` · ${formatSemesterTagLabel(sub.semester_tag, instLabels.cycle, instProfile.cycleLabels)}`
                           : '';
+                        const deptTag = sub.department ? ` [${sub.department}]` : '';
                         return (
                           <option key={sub.id} value={sub.id}>
                             {sub.code ? `${sub.code} — ` : ''}
                             {sub.name}
+                            {deptTag}
                             {semTagLabel}
                           </option>
                         );
                       })}
                   </select>
 
-                  {!readOnly && selectedExam.status !== 'PUBLISHED' && (
+                  {scoreRoster.length > 0 && (
                     <button
                       type="button"
-                      disabled={scoresSaving || !scoreSubjectId}
-                      onClick={handleSaveScores}
-                      className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold inline-flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
+                      onClick={handleDownloadRosterCsv}
+                      className="px-3 py-2 bg-white hover:bg-slate-50 text-slate-700 border border-slate-300 rounded-xl text-xs font-semibold inline-flex items-center gap-1.5 cursor-pointer"
+                      title="Download pre-filled Excel/CSV template for the current roster"
                     >
-                      <Save className="w-3.5 h-3.5" />
-                      <span>{scoresSaving ? 'Saving...' : 'Save Scores'}</span>
+                      <Download className="w-3.5 h-3.5 text-slate-500" />
+                      <span>Roster CSV</span>
                     </button>
+                  )}
+
+                  {!readOnly && selectedExam.status !== 'PUBLISHED' && (
+                    <>
+                      <button
+                        type="button"
+                        onClick={() => setPasteDrawerOpen((prev) => !prev)}
+                        className={`px-3 py-2 border rounded-xl text-xs font-semibold inline-flex items-center gap-1.5 cursor-pointer ${
+                          pasteDrawerOpen
+                            ? 'bg-slate-900 text-white border-slate-900'
+                            : 'bg-white hover:bg-slate-50 text-slate-700 border-slate-300'
+                        }`}
+                      >
+                        <ClipboardPaste className="w-3.5 h-3.5" />
+                        <span>Paste Excel Scores</span>
+                      </button>
+
+                      <button
+                        type="button"
+                        disabled={scoresSaving || !scoreSubjectId}
+                        onClick={() => handleSaveScores(false)}
+                        className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold inline-flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
+                      >
+                        <Save className="w-3.5 h-3.5" />
+                        <span>{scoresSaving ? 'Saving...' : 'Save Scores'}</span>
+                      </button>
+
+                      {registeredSubjectsQueue.length > 1 && (
+                        <button
+                          type="button"
+                          disabled={scoresSaving || !scoreSubjectId}
+                          onClick={() => handleSaveScores(true)}
+                          className="px-3.5 py-2 bg-slate-900 hover:bg-slate-800 text-white rounded-xl text-xs font-bold inline-flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
+                        >
+                          <span>Save &amp; Next Course</span>
+                          <ArrowRight className="w-3.5 h-3.5 text-emerald-400" />
+                        </button>
+                      )}
+                    </>
                   )}
                 </div>
               </div>
 
+              {/* Registered Courses Grading Queue (Reuse Registered Courses at Scale) */}
+              {registeredSubjectsQueue.length > 0 && (() => {
+                const queueDepts = Array.from(
+                  new Set(
+                    registeredSubjectsQueue
+                      .map((q) => (q.department || '').trim())
+                      .filter((d) => d && d.toLowerCase() !== 'general')
+                  )
+                ).sort((a, b) => a.localeCompare(b));
+
+                const visibleQueue = registeredSubjectsQueue.filter((q) => {
+                  if (!scoreQueueDeptFilter) return true;
+                  const qDept = (q.department || '').trim().toLowerCase();
+                  if (scoreQueueDeptFilter === '__GENERAL__') return !qDept || qDept === 'general';
+                  return qDept === scoreQueueDeptFilter.toLowerCase();
+                });
+
+                const completedCourses = visibleQueue.filter(
+                  (q) => q.registered_count > 0 && q.scored_count >= q.registered_count
+                ).length;
+
+                return (
+                  <div className="bg-slate-50 border border-slate-200 rounded-xl p-3.5 space-y-2.5">
+                    <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="font-bold text-slate-900 inline-flex items-center gap-1.5">
+                          <Layers className="w-3.5 h-3.5 text-emerald-600" />
+                          Registered {instLabels.subjectPlural} Grading Queue
+                        </span>
+                        <span className="text-[11px] text-slate-500 tabular-nums">
+                          {completedCourses}/{visibleQueue.length} graded
+                        </span>
+                      </div>
+
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        {queueDepts.length > 0 && (
+                          <>
+                            <button
+                              type="button"
+                              onClick={() => setScoreQueueDeptFilter('')}
+                              className={`px-2 py-0.5 rounded-md text-[11px] font-semibold border cursor-pointer ${
+                                !scoreQueueDeptFilter
+                                  ? 'bg-slate-900 text-white border-slate-900'
+                                  : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-100'
+                              }`}
+                            >
+                              All Depts
+                            </button>
+                            {queueDepts.map((d) => (
+                              <button
+                                key={d}
+                                type="button"
+                                onClick={() => setScoreQueueDeptFilter(d)}
+                                className={`px-2 py-0.5 rounded-md text-[11px] font-semibold border cursor-pointer ${
+                                  scoreQueueDeptFilter.toLowerCase() === d.toLowerCase()
+                                    ? 'bg-emerald-600 text-white border-emerald-600'
+                                    : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-100'
+                                }`}
+                              >
+                                {d}
+                              </button>
+                            ))}
+                            <button
+                              type="button"
+                              onClick={() => setScoreQueueDeptFilter('__GENERAL__')}
+                              className={`px-2 py-0.5 rounded-md text-[11px] font-semibold border cursor-pointer ${
+                                scoreQueueDeptFilter === '__GENERAL__'
+                                  ? 'bg-slate-700 text-white border-slate-700'
+                                  : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-100'
+                              }`}
+                            >
+                              General
+                            </button>
+                          </>
+                        )}
+                      </div>
+                    </div>
+
+                    <div className="flex flex-wrap gap-1.5 max-h-32 overflow-y-auto pr-1">
+                      {visibleQueue.map((item) => {
+                        const isActive = item.subject_id === scoreSubjectId;
+                        const isDone = item.registered_count > 0 && item.scored_count >= item.registered_count;
+                        const isPartial = item.scored_count > 0 && item.scored_count < item.registered_count;
+                        return (
+                          <button
+                            key={item.subject_id}
+                            type="button"
+                            onClick={() => {
+                              setScoreSubjectId(item.subject_id);
+                              loadExamScoreSheet(selectedExam, item.subject_id, {
+                                registeredOnly: scoreRegisteredOnly,
+                              });
+                            }}
+                            className={`px-2.5 py-1.5 rounded-lg border text-left text-[11px] transition cursor-pointer inline-flex items-center gap-1.5 ${
+                              isActive
+                                ? 'bg-slate-900 text-white border-slate-900'
+                                : isDone
+                                ? 'bg-emerald-50 text-emerald-900 border-emerald-200 hover:bg-emerald-100'
+                                : isPartial
+                                ? 'bg-amber-50 text-amber-900 border-amber-200 hover:bg-amber-100'
+                                : 'bg-white text-slate-700 border-slate-200 hover:bg-slate-100'
+                            }`}
+                          >
+                            <span className="font-mono font-bold">{item.code || item.name}</span>
+                            <span className="opacity-70">{item.credit_units}u</span>
+                            {item.department && (
+                              <span
+                                className={`text-[10px] px-1 py-0.5 rounded ${
+                                  isActive ? 'bg-slate-800 text-slate-200' : 'bg-slate-100 text-slate-600'
+                                }`}
+                              >
+                                {item.department}
+                              </span>
+                            )}
+                            <span
+                              className={`tabular-nums font-bold ${
+                                isActive
+                                  ? 'text-emerald-400'
+                                  : isDone
+                                  ? 'text-emerald-700'
+                                  : isPartial
+                                  ? 'text-amber-700'
+                                  : 'text-slate-500'
+                              }`}
+                            >
+                              {item.scored_count}/{item.registered_count}
+                            </span>
+                          </button>
+                        );
+                      })}
+                    </div>
+
+                    {/* Roster Scope Switcher */}
+                    <div className="pt-2 border-t border-slate-200/80 flex flex-wrap items-center justify-between gap-2 text-[11px]">
+                      <div className="inline-flex items-center gap-1.5">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setScoreRegisteredOnly(true);
+                            loadExamScoreSheet(selectedExam, scoreSubjectId, { registeredOnly: true });
+                          }}
+                          className={`px-2.5 py-1 rounded-md font-semibold border cursor-pointer ${
+                            scoreRegisteredOnly
+                              ? 'bg-emerald-600 text-white border-emerald-600'
+                              : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-100'
+                          }`}
+                        >
+                          Registered Students Only (incl. Carryovers)
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setScoreRegisteredOnly(false);
+                            loadExamScoreSheet(selectedExam, scoreSubjectId, { registeredOnly: false });
+                          }}
+                          className={`px-2.5 py-1 rounded-md font-semibold border cursor-pointer ${
+                            !scoreRegisteredOnly
+                              ? 'bg-slate-900 text-white border-slate-900'
+                              : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-100'
+                          }`}
+                        >
+                          All Cohort Students
+                        </button>
+                      </div>
+                      <span className="text-slate-500 tabular-nums">
+                        Showing <strong className="text-slate-800">{scoreRoster.length}</strong> student(s) for active course
+                      </span>
+                    </div>
+                  </div>
+                );
+              })()}
+
+              {/* Bulk Excel / CSV Score Paste Drawer */}
+              {pasteDrawerOpen && !readOnly && selectedExam.status !== 'PUBLISHED' && (
+                <div className="bg-slate-50 border border-emerald-200 rounded-xl p-4 space-y-3 text-xs">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div>
+                      <p className="font-bold text-slate-900">
+                        Paste Scores Directly from Excel, Google Sheets, or CSV
+                      </p>
+                      <p className="text-[11px] text-slate-500 mt-0.5">
+                        Format: <code className="bg-white px-1 py-0.5 rounded border border-slate-200">Admission No (or Full Name), CA Score, Exam Score, Remark</code> — headers and S/N columns are skipped automatically.
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setPasteDrawerOpen(false)}
+                      className="text-slate-400 hover:text-slate-700 cursor-pointer"
+                    >
+                      <X className="w-4 h-4" />
+                    </button>
+                  </div>
+
+                  <textarea
+                    rows={5}
+                    value={pasteRawText}
+                    onChange={(e) => setPasteRawText(e.target.value)}
+                    placeholder={`CHT/FHC/001\t28\t54\tExcellent\nCHT/FHC/002\t22\t48\tGood`}
+                    className="w-full px-3 py-2 bg-white border border-slate-300 rounded-xl font-mono text-xs focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                  />
+
+                  {parsedPastePreview && (
+                    <div className="space-y-2">
+                      <div className="flex flex-wrap items-center gap-3 text-[11px] font-semibold">
+                        <span className="text-emerald-700">
+                          ✓ {parsedPastePreview.matchedCount} matched &amp; valid
+                        </span>
+                        {parsedPastePreview.unmatchedCount > 0 && (
+                          <span className="text-amber-700">
+                            ⚠ {parsedPastePreview.unmatchedCount} unmatched student(s)
+                          </span>
+                        )}
+                        {parsedPastePreview.errorCount > 0 && (
+                          <span className="text-rose-700">
+                            ✕ {parsedPastePreview.errorCount} score range error(s)
+                          </span>
+                        )}
+                      </div>
+
+                      {parsedPastePreview.rows.some((r) => r.error) && (
+                        <div className="max-h-24 overflow-y-auto bg-rose-50 border border-rose-200 rounded-lg p-2 space-y-1 text-[11px] text-rose-800">
+                          {parsedPastePreview.rows
+                            .filter((r) => r.error)
+                            .slice(0, 8)
+                            .map((r) => (
+                              <p key={r.rowNumber}>
+                                Line {r.rowNumber} ({r.rawIdentifier}): {r.error}
+                              </p>
+                            ))}
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  <div className="flex flex-wrap items-center justify-end gap-2">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setPasteRawText('');
+                        setPasteDrawerOpen(false);
+                      }}
+                      className="px-3 py-1.5 border border-slate-300 bg-white text-slate-700 rounded-lg font-semibold cursor-pointer"
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      type="button"
+                      disabled={!parsedPastePreview || parsedPastePreview.matchedCount === 0}
+                      onClick={() => handleApplyPastedScores(false)}
+                      className="px-3.5 py-1.5 bg-slate-900 hover:bg-slate-800 text-white rounded-lg font-bold cursor-pointer disabled:opacity-50"
+                    >
+                      Apply to Sheet ({parsedPastePreview?.matchedCount || 0})
+                    </button>
+                    <button
+                      type="button"
+                      disabled={scoresSaving || !parsedPastePreview || parsedPastePreview.matchedCount === 0}
+                      onClick={() => handleApplyPastedScores(true)}
+                      className="px-3.5 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg font-bold cursor-pointer disabled:opacity-50"
+                    >
+                      Apply &amp; Save Immediately
+                    </button>
+                  </div>
+                </div>
+              )}
+
               {scoresLoading ? (
                 <p className="py-8 text-center text-xs text-slate-400">Loading class roster and scores...</p>
               ) : scoreRoster.length === 0 ? (
-                <p className="py-8 text-center text-xs text-slate-400">No active students found for this examination scope.</p>
+                <p className="py-8 text-center text-xs text-slate-400">
+                  No students match this course roster yet. Switch to &ldquo;All Cohort Students&rdquo; or register students for this course first.
+                </p>
               ) : (
                 <div className="overflow-x-auto">
                   <table className="w-full text-left text-xs">
                     <thead>
                       <tr className="border-b border-slate-200 text-slate-500 bg-slate-50/70">
                         <th className="py-2.5 px-3">Student</th>
-                        <th className="py-2.5 px-3">Class</th>
+                        <th className="py-2.5 px-3">{instLabels.classLabel} / Dept</th>
                         <th className="py-2.5 px-3 text-right">CA (/{selectedExam.ca_max_score})</th>
                         <th className="py-2.5 px-3 text-right">Exam (/{selectedExam.exam_max_score})</th>
                         <th className="py-2.5 px-3 text-right">Total</th>
@@ -1826,14 +2619,36 @@ export const SchoolPerformanceView: React.FC<SchoolPerformanceViewProps> = ({ re
                         );
                         const draft = scoreDrafts[st.id] || { ca_score: '', exam_score: '', subject_remark: '' };
                         const locked = readOnly || selectedExam.status === 'PUBLISHED';
+                        const hasDraftInput = draft.ca_score !== '' || draft.exam_score !== '';
+                        const liveTotal = hasDraftInput
+                          ? (draft.ca_score === '' ? 0 : Number(draft.ca_score)) +
+                            (draft.exam_score === '' ? 0 : Number(draft.exam_score))
+                          : existing?.total_score ?? null;
+                        const isCarryover =
+                          st.registration_type === 'CARRYOVER' ||
+                          (Boolean(selectedExam.class_id) && Boolean(st.class_id) && st.class_id !== selectedExam.class_id);
 
                         return (
                           <tr key={st.id} className="hover:bg-slate-50/60">
                             <td className="py-2.5 px-3 font-medium text-slate-900">
-                              {st.full_name}
+                              <div className="flex flex-wrap items-center gap-1.5">
+                                <span>{st.full_name}</span>
+                                {isCarryover && (
+                                  <span className="px-1.5 py-0.5 rounded bg-amber-50 border border-amber-200 text-[10px] font-bold text-amber-800">
+                                    CARRYOVER
+                                  </span>
+                                )}
+                              </div>
                               <span className="block text-[10px] font-mono text-slate-400">{st.admission_number}</span>
                             </td>
-                            <td className="py-2.5 px-3 text-slate-600">{st.class_name || '—'}</td>
+                            <td className="py-2.5 px-3 text-slate-600">
+                              <span>{st.class_name || '—'}</span>
+                              {st.class_arm_name && (
+                                <span className="block text-[10px] font-semibold text-slate-500">
+                                  {st.class_arm_name}
+                                </span>
+                              )}
+                            </td>
                             <td className="py-2.5 px-3 text-right">
                               {locked ? (
                                 <span className="tabular-nums font-medium">{existing?.ca_score ?? '—'}</span>
@@ -1875,7 +2690,7 @@ export const SchoolPerformanceView: React.FC<SchoolPerformanceViewProps> = ({ re
                               )}
                             </td>
                             <td className="py-2.5 px-3 text-right font-bold tabular-nums text-slate-900">
-                              {existing?.total_score ?? '—'}
+                              {liveTotal !== null && Number.isFinite(liveTotal) ? liveTotal : '—'}
                             </td>
                             <td className="py-2.5 px-3 text-center font-bold text-emerald-700">
                               {existing?.grade || '—'}
@@ -2671,13 +3486,14 @@ export const SchoolPerformanceView: React.FC<SchoolPerformanceViewProps> = ({ re
               <div className="grid grid-cols-2 gap-3">
                 <div>
                   <label className="block font-semibold text-slate-700 mb-1">
-                    {isTertiary ? 'Department / Faculty' : 'Department'}
+                    {isTertiary ? 'Department / Programme' : 'Department'}
                   </label>
                   <input
                     type="text"
+                    list="school-departments-datalist"
                     value={subjectForm.department}
                     onChange={(e) => setSubjectForm({ ...subjectForm, department: e.target.value })}
-                    placeholder={isTertiary ? 'e.g. Computer Science, GST' : 'Sciences, Arts...'}
+                    placeholder={isTertiary ? 'e.g. Family Healthcare, CHEW (blank = General)' : 'Sciences, Arts...'}
                     className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl"
                   />
                 </div>
@@ -2813,15 +3629,15 @@ export const SchoolPerformanceView: React.FC<SchoolPerformanceViewProps> = ({ re
                   </select>
                 </div>
               </div>
-              <div className="grid grid-cols-3 gap-3">
+              <div className="grid grid-cols-2 gap-3">
                 <div>
-                  <label className="block font-semibold text-slate-700 mb-1">Class Scope</label>
+                  <label className="block font-semibold text-slate-700 mb-1">{instLabels.classLabel} Scope</label>
                   <select
                     value={examForm.class_id}
                     onChange={(e) => setExamForm({ ...examForm, class_id: e.target.value })}
                     className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl"
                   >
-                    <option value="">All Classes</option>
+                    <option value="">All {instLabels.classPlural}</option>
                     {classes.map((c) => (
                       <option key={c.id} value={c.id}>
                         {c.name}
@@ -2829,6 +3645,21 @@ export const SchoolPerformanceView: React.FC<SchoolPerformanceViewProps> = ({ re
                     ))}
                   </select>
                 </div>
+                <div>
+                  <label className="block font-semibold text-slate-700 mb-1">
+                    {isTertiary ? 'Department / Programme (Optional)' : 'Department / Arm (Optional)'}
+                  </label>
+                  <input
+                    type="text"
+                    list="school-departments-datalist"
+                    value={examForm.department}
+                    onChange={(e) => setExamForm({ ...examForm, department: e.target.value })}
+                    placeholder="All Departments (or e.g. Family Healthcare)"
+                    className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl"
+                  />
+                </div>
+              </div>
+              <div className="grid grid-cols-2 gap-3">
                 <div>
                   <label className="block font-semibold text-slate-700 mb-1">CA Max</label>
                   <input
@@ -3109,6 +3940,7 @@ export const SchoolPerformanceView: React.FC<SchoolPerformanceViewProps> = ({ re
       {bulkCoursesOpen && (
         <BulkCoursesModal
           classes={classes}
+          availableDepartments={availableDepartmentNames}
           isTertiary={isTertiary}
           subjectLabel={instLabels.subject}
           subjectPlural={instLabels.subjectPlural}
@@ -3116,6 +3948,7 @@ export const SchoolPerformanceView: React.FC<SchoolPerformanceViewProps> = ({ re
           cycleLabel={instLabels.cycle}
           cycleLabels={instProfile.cycleLabels}
           initialClassId={bulkCoursesPrefill.classId || ''}
+          initialDepartment={bulkCoursesPrefill.department || ''}
           initialSemesterTag={bulkCoursesPrefill.semesterTag}
           onClose={() => setBulkCoursesOpen(false)}
           onSaved={async (msg) => {
@@ -3150,6 +3983,12 @@ export const SchoolPerformanceView: React.FC<SchoolPerformanceViewProps> = ({ re
           onClose={() => setBroadsheetExamId(null)}
         />
       )}
+
+      <datalist id="school-departments-datalist">
+        {availableDepartmentNames.map((d) => (
+          <option key={d} value={d} />
+        ))}
+      </datalist>
     </div>
   );
 };

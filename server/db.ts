@@ -419,6 +419,14 @@ export async function initDatabase() {
             await client.query(mig012Sql);
             console.log('[Neon PostgreSQL] Verified/applied migration 012_subjects_semester_and_constraint_fix.sql');
           }
+
+          // Execute idempotent 013_department_course_scope_and_exam_arm.sql migration on Neon PostgreSQL
+          const mig013Path = path.resolve(process.cwd(), 'migrations/013_department_course_scope_and_exam_arm.sql');
+          if (fs.existsSync(mig013Path)) {
+            const mig013Sql = fs.readFileSync(mig013Path, 'utf8');
+            await client.query(mig013Sql);
+            console.log('[Neon PostgreSQL] Verified/applied migration 013_department_course_scope_and_exam_arm.sql');
+          }
         } finally {
           client.release();
         }
@@ -1106,15 +1114,31 @@ function migrateStep4Columns() {
         }
       }
       db.exec(`
+        DROP INDEX IF EXISTS idx_subjects_active_scope_unique;
         CREATE UNIQUE INDEX IF NOT EXISTS idx_subjects_active_scope_unique
-          ON subjects (school_id, LOWER(name), COALESCE(class_id, ''), COALESCE(semester_tag, ''))
+          ON subjects (school_id, LOWER(name), COALESCE(class_id, ''), COALESCE(semester_tag, ''), LOWER(COALESCE(department, '')))
           WHERE (is_deleted = 0 OR is_deleted IS NULL);
         CREATE INDEX IF NOT EXISTS idx_subjects_school_class_sem
           ON subjects (school_id, class_id, semester_tag)
           WHERE (is_deleted = 0 OR is_deleted IS NULL);
+        CREATE INDEX IF NOT EXISTS idx_subjects_school_dept_class_sem
+          ON subjects (school_id, LOWER(COALESCE(department, '')), class_id, semester_tag)
+          WHERE (is_deleted = 0 OR is_deleted IS NULL);
       `);
     } catch (e) {
-      console.warn('[DB Migration 012 SQLite Index Notice]', (e as any)?.message);
+      console.warn('[DB Migration 012/013 SQLite Index Notice]', (e as any)?.message);
+    }
+  }
+
+  // 2b-i2. Ensure SQLite examinations table has optional department & class_arm_id columns
+  const examsTblExists = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='examinations'").get();
+  if (examsTblExists) {
+    const examCols = db.prepare('PRAGMA table_info(examinations)').all().map((c: any) => c.name);
+    if (!examCols.includes('department')) {
+      try { db.exec('ALTER TABLE examinations ADD COLUMN department TEXT;'); } catch (e) {}
+    }
+    if (!examCols.includes('class_arm_id')) {
+      try { db.exec('ALTER TABLE examinations ADD COLUMN class_arm_id TEXT;'); } catch (e) {}
     }
   }
 

@@ -2290,6 +2290,31 @@ apiRouter.post(
     const id = 'stu_' + crypto.randomUUID().slice(0, 10);
     const fullName = `${fn} ${mn ? mn + ' ' : ''}${ln}`.trim();
 
+    let resolvedClassName: string | null = class_name ? String(class_name).trim() : null;
+    let resolvedArmName: string | null = class_arm_name ? String(class_arm_name).trim() : null;
+    if (class_id && !resolvedClassName) {
+      try {
+        if (pool) {
+          const cRes = await queryPg('SELECT name FROM classes WHERE id = $1 AND school_id = $2 LIMIT 1', [class_id, schoolId]);
+          if (cRes.rows[0]?.name) resolvedClassName = String(cRes.rows[0].name);
+        } else {
+          const cRow = cacheDb.prepare('SELECT name FROM classes WHERE id = ? AND school_id = ? LIMIT 1').get(class_id, schoolId) as any;
+          if (cRow?.name) resolvedClassName = String(cRow.name);
+        }
+      } catch {}
+    }
+    if (class_arm_id && !resolvedArmName) {
+      try {
+        if (pool) {
+          const aRes = await queryPg('SELECT name FROM class_arms WHERE id = $1 AND school_id = $2 LIMIT 1', [class_arm_id, schoolId]);
+          if (aRes.rows[0]?.name) resolvedArmName = String(aRes.rows[0].name);
+        } else {
+          const aRow = cacheDb.prepare('SELECT name FROM class_arms WHERE id = ? AND school_id = ? LIMIT 1').get(class_arm_id, schoolId) as any;
+          if (aRow?.name) resolvedArmName = String(aRow.name);
+        }
+      } catch {}
+    }
+
     // 1. Authoritative Neon PostgreSQL Persistence First
     if (pool) {
       try {
@@ -2307,8 +2332,8 @@ apiRouter.post(
             id, schoolId, cleanAdm, fn, mn || null, ln, fullName, cleanGender,
             date_of_birth || null, phone || null, email ? email.toLowerCase().trim() : null,
             address || null, state || null, nationality || 'Nigerian', admission_date,
-            student_status, class_id || null, class_arm_id || null, class_name || null,
-            class_arm_name || null, academic_session_id || null, profile_photo_url || null,
+            student_status, class_id || null, class_arm_id || null, resolvedClassName,
+            resolvedArmName, academic_session_id || null, profile_photo_url || null,
             emergency_contact || null, medical_notes || null
           ]
         );
@@ -2334,8 +2359,8 @@ apiRouter.post(
         id, schoolId, cleanAdm, fn, mn || null, ln, fullName, cleanGender,
         date_of_birth || null, phone || null, email ? email.toLowerCase().trim() : null,
         address || null, state || null, nationality || 'Nigerian', admission_date,
-        student_status, class_id || null, class_arm_id || null, class_name || null,
-        class_arm_name || null, academic_session_id || null, profile_photo_url || null,
+        student_status, class_id || null, class_arm_id || null, resolvedClassName,
+        resolvedArmName, academic_session_id || null, profile_photo_url || null,
         emergency_contact || null, medical_notes || null
       );
     } catch {}
