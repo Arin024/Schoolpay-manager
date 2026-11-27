@@ -55,6 +55,7 @@ export const SchoolAcademicSessionsView: React.FC<SchoolAcademicSessionsViewProp
   const [newSessionStart, setNewSessionStart] = useState(`${currentStartYear}-09-01`);
   const [newSessionEnd, setNewSessionEnd] = useState(`${currentEndYear}-07-31`);
   const [newSessionStatus, setNewSessionStatus] = useState<SessionStatus>('ACTIVE');
+  const [autoCreateTerms, setAutoCreateTerms] = useState(true);
 
   const [newTermName, setNewTermName] = useState(defaultCycleName);
   const [customTermName, setCustomTermName] = useState('');
@@ -97,6 +98,7 @@ export const SchoolAcademicSessionsView: React.FC<SchoolAcademicSessionsViewProp
         start_date: newSessionStart,
         end_date: newSessionEnd,
         status: newSessionStatus,
+        auto_create_terms: autoCreateTerms,
       });
       setIsAddSessionModalOpen(false);
       setNewSessionName('');
@@ -459,9 +461,22 @@ export const SchoolAcademicSessionsView: React.FC<SchoolAcademicSessionsViewProp
                 >
                   <option value="ACTIVE">ACTIVE</option>
                   <option value="UPCOMING">UPCOMING</option>
-                  <option value="COMPLETED">COMPLETED</option>
+                  <option value="COMPLETED">COMPLETED (Past / Historical)</option>
                 </select>
               </div>
+
+              <label className="flex items-center gap-2 p-2.5 rounded-xl bg-emerald-50 border border-emerald-200 text-emerald-950 font-medium cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={autoCreateTerms}
+                  onChange={(e) => setAutoCreateTerms(e.target.checked)}
+                  className="rounded border-emerald-400 text-emerald-600 focus:ring-emerald-500"
+                />
+                <span>
+                  Automatically setup standard {labels.cyclePlural.toLowerCase()} (
+                  {profile.cycleLabels?.join(', ') || (profile.cycleType === 'SEMESTER' ? '1st Semester, 2nd Semester' : '1st Term, 2nd Term, 3rd Term')})
+                </span>
+              </label>
 
               <div className="pt-3 border-t border-slate-200 flex items-center justify-end gap-2">
                 <button

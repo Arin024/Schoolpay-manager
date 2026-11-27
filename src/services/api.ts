@@ -987,11 +987,30 @@ export const api = {
     });
   },
 
-  async createAcademicSession(data: { name: string; start_date?: string; end_date?: string; status?: string }): Promise<{ session: AcademicSessionItem; message: string }> {
+  async createAcademicSession(data: {
+    name: string;
+    start_date?: string;
+    end_date?: string;
+    status?: string;
+    auto_create_terms?: boolean;
+    term_names?: string[];
+    reuse_existing?: boolean;
+  }): Promise<{ session: AcademicSessionItem; created?: boolean; message: string }> {
     return safeFetch(`${API_BASE}/school/academic-sessions`, {
       method: 'POST',
       headers: getAuthHeaders(),
       body: JSON.stringify(data),
+    });
+  },
+
+  async ensureAcademicSessionTerms(
+    sessionId: string,
+    term_names?: string[]
+  ): Promise<{ success: boolean; session_id: string; createdCount: number; terms: TermItem[]; message: string }> {
+    return safeFetch(`${API_BASE}/school/academic-sessions/${encodeURIComponent(sessionId)}/ensure-terms`, {
+      method: 'POST',
+      headers: getAuthHeaders(),
+      body: JSON.stringify(term_names ? { term_names } : {}),
     });
   },
 
@@ -3595,14 +3614,27 @@ export const api = {
     });
   },
 
+  async getCourseRegistrationMatrix(): Promise<{
+    success: boolean;
+    matrix: import('../types').CourseRegistrationMatrixItem[];
+  }> {
+    return safeFetch(`${API_BASE}/school/course-registrations/matrix`, {
+      headers: getAuthHeaders(),
+    });
+  },
+
   async bulkRegisterStudentCourses(payload: {
     academic_session_id: string;
-    term_id: string;
+    term_id?: string;
+    term_ids?: string[];
+    auto_match_semester_tag?: boolean;
     class_id?: string | null;
     class_arm_id?: string | null;
     department?: string | null;
     student_ids?: string[];
-    subject_ids: Array<string | { subject_id: string; credit_units?: number; registration_type?: string }>;
+    subject_ids: Array<
+      string | { subject_id: string; credit_units?: number; registration_type?: string; term_id?: string }
+    >;
     registration_type?: 'REGULAR' | 'CARRYOVER' | 'ELECTIVE' | 'HISTORICAL';
   }): Promise<{
     success: boolean;
@@ -3610,6 +3642,7 @@ export const api = {
     registeredCount: number;
     studentsAffected: number;
     coursesPerStudent: number;
+    termsAffected?: Array<{ id: string; name: string }>;
   }> {
     return safeFetch(`${API_BASE}/school/course-registrations/bulk`, {
       method: 'POST',

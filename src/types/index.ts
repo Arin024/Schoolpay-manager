@@ -801,6 +801,18 @@ export interface DepartmentSummaryItem {
   class_arms: Array<{ id: string; class_id: string; class_name: string }>;
 }
 
+export interface CourseRegistrationMatrixItem {
+  academic_session_id: string;
+  session_name: string;
+  session_status: string;
+  department: string;
+  class_names: string[];
+  students_count: number;
+  courses_count: number;
+  registrations_count: number;
+  terms: Array<{ term_id: string; term_name: string; registrations_count: number }>;
+}
+
 export interface RegisteredCourseProgressItem {
   subject_id: string;
   code: string | null;

@@ -5265,42 +5265,177 @@ apiRouter.post(
   requireRole(['SCHOOL_OWNER', 'SCHOOL_ADMIN']),
   async (req: AuthenticatedRequest, res) => {
     const schoolId = req.targetSchoolId!;
-    const { name, start_date, end_date, status = 'UPCOMING' } = req.body;
+    const {
+      name,
+      start_date,
+      end_date,
+      status = 'UPCOMING',
+      auto_create_terms = false,
+      term_names,
+      reuse_existing = false,
+    } = req.body || {};
     const pool = getPgPool();
 
     if (!name || typeof name !== 'string' || !name.trim()) {
-      return res.status(400).json({ error: 'MISSING_FIELDS', message: 'Session name is required (e.g. 2025/2026).' });
+      return res.status(400).json({ error: 'MISSING_FIELDS', message: 'Session name is required (e.g. 2024/2025).' });
     }
 
-    if (status === 'ACTIVE') {
-      if (pool) await queryPg("UPDATE academic_sessions SET status = 'COMPLETED' WHERE school_id = $1 AND status = 'ACTIVE'", [schoolId]);
-      cacheDb.prepare("UPDATE academic_sessions SET status = 'COMPLETED' WHERE school_id = ? AND status = 'ACTIVE'").run(schoolId);
-    }
+    const safeName = name.trim().slice(0, 64);
+    const validStatus = ['ACTIVE', 'UPCOMING', 'COMPLETED', 'ARCHIVED'].includes(String(status).toUpperCase())
+      ? String(status).toUpperCase()
+      : 'UPCOMING';
 
-    const id = 'ses_' + crypto.randomUUID().slice(0, 8);
-    const safeName = name.trim();
-
+    // Check for existing session with the same name in this tenant
+    let existingSession: any = null;
     if (pool) {
-      await queryPg(`
-        INSERT INTO academic_sessions (id, school_id, name, start_date, end_date, status, created_at, updated_at)
-        VALUES ($1, $2, $3, $4, $5, $6, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-      `, [id, schoolId, safeName, start_date || null, end_date || null, status]);
+      const exPg = await queryPg(
+        'SELECT * FROM academic_sessions WHERE school_id = $1 AND LOWER(TRIM(name)) = LOWER(TRIM($2)) LIMIT 1',
+        [schoolId, safeName]
+      );
+      existingSession = exPg.rows[0] || null;
+    } else {
+      existingSession = cacheDb
+        .prepare('SELECT * FROM academic_sessions WHERE school_id = ? AND LOWER(TRIM(name)) = LOWER(TRIM(?)) LIMIT 1')
+        .get(schoolId, safeName);
     }
 
-    cacheDb.prepare(`
-      INSERT INTO academic_sessions (id, school_id, name, start_date, end_date, status, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-      ON CONFLICT(id) DO UPDATE SET
-        name = excluded.name,
-        start_date = excluded.start_date,
-        end_date = excluded.end_date,
-        status = excluded.status,
-        updated_at = CURRENT_TIMESTAMP
-    `).run(id, schoolId, safeName, start_date || null, end_date || null, status);
+    let sessionId: string;
+    let created = false;
 
-    const pgSession = pool ? await queryPg('SELECT * FROM academic_sessions WHERE id = $1', [id]) : null;
-    const session = pgSession?.rows[0] || cacheDb.prepare('SELECT * FROM academic_sessions WHERE id = ?').get(id);
-    return res.status(201).json({ success: true, message: 'Academic session created successfully', session });
+    if (existingSession) {
+      if (!reuse_existing) {
+        return res.status(409).json({
+          error: 'SESSION_EXISTS',
+          message: `Academic session "${safeName}" already exists in your school.`,
+          session: existingSession,
+        });
+      }
+      sessionId = existingSession.id;
+      if (validStatus === 'ACTIVE' && existingSession.status !== 'ACTIVE') {
+        if (pool) {
+          await queryPg("UPDATE academic_sessions SET status = 'COMPLETED' WHERE school_id = $1 AND status = 'ACTIVE'", [schoolId]);
+          await queryPg("UPDATE academic_sessions SET status = 'ACTIVE', updated_at = CURRENT_TIMESTAMP WHERE id = $1", [sessionId]);
+        }
+        cacheDb.prepare("UPDATE academic_sessions SET status = 'COMPLETED' WHERE school_id = ? AND status = 'ACTIVE'").run(schoolId);
+        cacheDb.prepare("UPDATE academic_sessions SET status = 'ACTIVE', updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(sessionId);
+      }
+    } else {
+      if (validStatus === 'ACTIVE') {
+        if (pool) await queryPg("UPDATE academic_sessions SET status = 'COMPLETED' WHERE school_id = $1 AND status = 'ACTIVE'", [schoolId]);
+        cacheDb.prepare("UPDATE academic_sessions SET status = 'COMPLETED' WHERE school_id = ? AND status = 'ACTIVE'").run(schoolId);
+      }
+
+      sessionId = 'ses_' + crypto.randomUUID().slice(0, 8);
+      if (pool) {
+        await queryPg(
+          `INSERT INTO academic_sessions (id, school_id, name, start_date, end_date, status, created_at, updated_at)
+           VALUES ($1, $2, $3, $4, $5, $6, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+          [sessionId, schoolId, safeName, start_date || null, end_date || null, validStatus]
+        );
+      }
+
+      cacheDb.prepare(`
+        INSERT INTO academic_sessions (id, school_id, name, start_date, end_date, status, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+        ON CONFLICT(id) DO UPDATE SET
+          name = excluded.name,
+          start_date = excluded.start_date,
+          end_date = excluded.end_date,
+          status = excluded.status,
+          updated_at = CURRENT_TIMESTAMP
+      `).run(sessionId, schoolId, safeName, start_date || null, end_date || null, validStatus);
+      created = true;
+    }
+
+    // Optionally auto-provision standard institutional terms/semesters (e.g. 1st Semester & 2nd Semester)
+    const shouldCreateTerms = Boolean(auto_create_terms) || (Array.isArray(term_names) && term_names.length > 0);
+    if (shouldCreateTerms) {
+      let desiredLabels: string[] = [];
+      if (Array.isArray(term_names) && term_names.length > 0) {
+        desiredLabels = term_names.map((t: any) => String(t || '').trim()).filter(Boolean).slice(0, 6);
+      } else {
+        const schoolRow = pool
+          ? (await queryPg('SELECT id, name, type FROM schools WHERE id = $1 LIMIT 1', [schoolId])).rows[0]
+          : cacheDb.prepare('SELECT id, name, type FROM schools WHERE id = ? LIMIT 1').get(schoolId);
+        const settingsRow = pool
+          ? (await queryPg(
+              'SELECT institution_category, academic_cycle_type, cycle_labels_json, grading_mode, terminology_json FROM school_settings WHERE school_id = $1 LIMIT 1',
+              [schoolId]
+            )).rows[0]
+          : cacheDb
+              .prepare(
+                'SELECT institution_category, academic_cycle_type, cycle_labels_json, grading_mode, terminology_json FROM school_settings WHERE school_id = ? LIMIT 1'
+              )
+              .get(schoolId);
+        const profile = resolveInstitutionProfile(schoolRow, settingsRow);
+        desiredLabels =
+          Array.isArray(profile.cycleLabels) && profile.cycleLabels.length > 0
+            ? profile.cycleLabels
+            : profile.cycleType === 'SEMESTER'
+            ? ['1st Semester', '2nd Semester']
+            : ['1st Term', '2nd Term', '3rd Term'];
+      }
+
+      const existingTermsRows: any[] = pool
+        ? (await queryPg('SELECT * FROM terms WHERE school_id = $1 AND academic_session_id = $2 ORDER BY created_at ASC', [schoolId, sessionId])).rows
+        : (cacheDb.prepare('SELECT * FROM terms WHERE school_id = ? AND academic_session_id = ? ORDER BY created_at ASC').all(schoolId, sessionId) as any[]);
+
+      const normTermKey = (v: string) =>
+        v
+          .toLowerCase()
+          .replace(/\bfirst\b/g, '1st')
+          .replace(/\bsecond\b/g, '2nd')
+          .replace(/\bthird\b/g, '3rd')
+          .replace(/\s+/g, ' ')
+          .trim();
+      const existingTermKeys = new Set(existingTermsRows.map((t) => normTermKey(String(t.name || ''))));
+
+      for (let i = 0; i < desiredLabels.length; i++) {
+        const label = desiredLabels[i];
+        if (existingTermKeys.has(normTermKey(label))) continue;
+        const termId = 'trm_' + crypto.randomUUID().slice(0, 8);
+        const termStatus =
+          validStatus === 'ACTIVE' && i === 0 && existingTermsRows.length === 0
+            ? 'ACTIVE'
+            : validStatus === 'COMPLETED' || validStatus === 'ARCHIVED'
+            ? 'COMPLETED'
+            : 'UPCOMING';
+
+        if (termStatus === 'ACTIVE') {
+          if (pool) await queryPg("UPDATE terms SET status = 'COMPLETED' WHERE school_id = $1 AND status = 'ACTIVE'", [schoolId]);
+          cacheDb.prepare("UPDATE terms SET status = 'COMPLETED' WHERE school_id = ? AND status = 'ACTIVE'").run(schoolId);
+        }
+
+        if (pool) {
+          await queryPg(
+            `INSERT INTO terms (id, school_id, academic_session_id, name, start_date, end_date, status, created_at, updated_at)
+             VALUES ($1, $2, $3, $4, NULL, NULL, $5, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+            [termId, schoolId, sessionId, label, termStatus]
+          );
+        }
+        cacheDb.prepare(`
+          INSERT INTO terms (id, school_id, academic_session_id, name, start_date, end_date, status, created_at, updated_at)
+          VALUES (?, ?, ?, ?, NULL, NULL, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+          ON CONFLICT(id) DO UPDATE SET name = excluded.name, status = excluded.status, updated_at = CURRENT_TIMESTAMP
+        `).run(termId, schoolId, sessionId, label, termStatus);
+        existingTermKeys.add(normTermKey(label));
+      }
+    }
+
+    const pgSession = pool ? await queryPg('SELECT * FROM academic_sessions WHERE id = $1', [sessionId]) : null;
+    const session = pgSession?.rows[0] || cacheDb.prepare('SELECT * FROM academic_sessions WHERE id = ?').get(sessionId);
+    const terms = pool
+      ? (await queryPg('SELECT * FROM terms WHERE school_id = $1 AND academic_session_id = $2 ORDER BY name ASC, created_at ASC', [schoolId, sessionId])).rows
+      : (cacheDb.prepare('SELECT * FROM terms WHERE school_id = ? AND academic_session_id = ? ORDER BY name ASC, created_at ASC').all(schoolId, sessionId) as any[]);
+
+    return res.status(created ? 201 : 200).json({
+      success: true,
+      created,
+      message: created
+        ? `Academic session "${safeName}" configured with ${terms.length} cycle(s).`
+        : `Academic session "${safeName}" is ready (${terms.length} cycle(s)).`,
+      session: { ...session, terms },
+    });
   }
 );
 

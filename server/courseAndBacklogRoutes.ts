@@ -649,6 +649,218 @@ courseAndBacklogRouter.patch(
 // POST   /api/v1/school/course-registrations/bulk
 // DELETE /api/v1/school/course-registrations/:id
 // ==============================================================================
+// Ensure standard semesters/terms exist for any academic session (e.g. 2024/2025 -> 1st & 2nd Semester)
+courseAndBacklogRouter.post(
+  '/academic-sessions/:id/ensure-terms',
+  requireAuth,
+  requireTenant,
+  requireRole(ADMIN_ONLY_ROLES),
+  async (req: AuthenticatedRequest, res) => {
+    try {
+      const schoolId = req.targetSchoolId!;
+      const sessionId = req.params.id;
+      const { term_names } = req.body || {};
+
+      const session = await dbGet(
+        `SELECT * FROM academic_sessions WHERE id = $1 AND school_id = $2 LIMIT 1`,
+        `SELECT * FROM academic_sessions WHERE id = ? AND school_id = ? LIMIT 1`,
+        [sessionId, schoolId]
+      );
+      if (!session) {
+        return res.status(404).json({ error: 'SESSION_NOT_FOUND', message: 'Academic session not found.' });
+      }
+
+      let desiredLabels: string[] = [];
+      if (Array.isArray(term_names) && term_names.length > 0) {
+        desiredLabels = term_names.map((t: any) => String(t || '').trim()).filter(Boolean).slice(0, 6);
+      } else {
+        const [school, tenantSettings] = await Promise.all([
+          dbGet(`SELECT id, name, type FROM schools WHERE id = $1 LIMIT 1`, `SELECT id, name, type FROM schools WHERE id = ? LIMIT 1`, [schoolId]),
+          dbGet(
+            `SELECT institution_category, academic_cycle_type, cycle_labels_json, grading_mode, terminology_json FROM school_settings WHERE school_id = $1 LIMIT 1`,
+            `SELECT institution_category, academic_cycle_type, cycle_labels_json, grading_mode, terminology_json FROM school_settings WHERE school_id = ? LIMIT 1`,
+            [schoolId]
+          ),
+        ]);
+        const profile = resolveInstitutionProfile(school, tenantSettings);
+        desiredLabels =
+          Array.isArray(profile.cycleLabels) && profile.cycleLabels.length > 0
+            ? profile.cycleLabels
+            : profile.cycleType === 'SEMESTER'
+            ? ['1st Semester', '2nd Semester']
+            : ['1st Term', '2nd Term', '3rd Term'];
+      }
+
+      const existingTerms = await dbAll(
+        `SELECT * FROM terms WHERE school_id = $1 AND academic_session_id = $2 ORDER BY name ASC, created_at ASC`,
+        `SELECT * FROM terms WHERE school_id = ? AND academic_session_id = ? ORDER BY name ASC, created_at ASC`,
+        [schoolId, sessionId]
+      );
+
+      const normTermKey = (v: string) =>
+        v
+          .toLowerCase()
+          .replace(/\bfirst\b/g, '1st')
+          .replace(/\bsecond\b/g, '2nd')
+          .replace(/\bthird\b/g, '3rd')
+          .replace(/\s+/g, ' ')
+          .trim();
+      const existingKeys = new Set(existingTerms.map((t: any) => normTermKey(String(t.name || ''))));
+
+      let createdCount = 0;
+      for (const label of desiredLabels) {
+        if (existingKeys.has(normTermKey(label))) continue;
+        const termId = newId('trm');
+        const termStatus =
+          String(session.status || '').toUpperCase() === 'COMPLETED' || String(session.status || '').toUpperCase() === 'ARCHIVED'
+            ? 'COMPLETED'
+            : 'UPCOMING';
+        await dualWrite(
+          `INSERT INTO terms (id, school_id, academic_session_id, name, start_date, end_date, status, created_at, updated_at)
+           VALUES ($1, $2, $3, $4, NULL, NULL, $5, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+          `INSERT INTO terms (id, school_id, academic_session_id, name, start_date, end_date, status, created_at, updated_at)
+           VALUES (?, ?, ?, ?, NULL, NULL, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+          [termId, schoolId, sessionId, label, termStatus]
+        );
+        existingKeys.add(normTermKey(label));
+        createdCount += 1;
+      }
+
+      const terms = await dbAll(
+        `SELECT * FROM terms WHERE school_id = $1 AND academic_session_id = $2 ORDER BY name ASC, created_at ASC`,
+        `SELECT * FROM terms WHERE school_id = ? AND academic_session_id = ? ORDER BY name ASC, created_at ASC`,
+        [schoolId, sessionId]
+      );
+
+      return res.json({
+        success: true,
+        session_id: sessionId,
+        createdCount,
+        terms,
+        message:
+          createdCount > 0
+            ? `Added ${createdCount} missing cycle(s) (${desiredLabels.join(' & ')}) to ${session.name}.`
+            : `${session.name} already has all ${terms.length} cycle(s) configured.`,
+      });
+    } catch (err: any) {
+      console.error('[Ensure Session Terms Error]', err);
+      return res.status(500).json({ error: 'ENSURE_TERMS_FAILED', message: safeClientError(err) });
+    }
+  }
+);
+
+// Session x Department Course Registration Matrix (Overview of every configured session + department + semesters)
+courseAndBacklogRouter.get(
+  '/course-registrations/matrix',
+  requireAuth,
+  requireTenant,
+  requireRole(ACADEMIC_READ_ROLES),
+  async (req: AuthenticatedRequest, res) => {
+    try {
+      const schoolId = req.targetSchoolId!;
+      const rows = await dbAll(
+        `SELECT r.academic_session_id, ses.name as session_name, ses.status as session_status,
+                r.term_id, t.name as term_name,
+                COALESCE(r.class_id, s.class_id) as class_id,
+                COALESCE(c.name, s.class_name) as class_name,
+                COALESCE(NULLIF(TRIM(s.class_arm_name), ''), ca.name, 'General / Unassigned') as department,
+                r.student_id, r.subject_id
+         FROM student_course_registrations r
+         JOIN students s ON r.student_id = s.id AND (s.is_deleted = 0 OR s.is_deleted IS NULL)
+         LEFT JOIN class_arms ca ON s.class_arm_id = ca.id
+         LEFT JOIN classes c ON COALESCE(r.class_id, s.class_id) = c.id
+         LEFT JOIN academic_sessions ses ON r.academic_session_id = ses.id
+         LEFT JOIN terms t ON r.term_id = t.id
+         WHERE r.school_id = $1 AND r.status != 'DROPPED'`,
+        `SELECT r.academic_session_id, ses.name as session_name, ses.status as session_status,
+                r.term_id, t.name as term_name,
+                COALESCE(r.class_id, s.class_id) as class_id,
+                COALESCE(c.name, s.class_name) as class_name,
+                COALESCE(NULLIF(TRIM(s.class_arm_name), ''), ca.name, 'General / Unassigned') as department,
+                r.student_id, r.subject_id
+         FROM student_course_registrations r
+         JOIN students s ON r.student_id = s.id AND (s.is_deleted = 0 OR s.is_deleted IS NULL)
+         LEFT JOIN class_arms ca ON s.class_arm_id = ca.id
+         LEFT JOIN classes c ON COALESCE(r.class_id, s.class_id) = c.id
+         LEFT JOIN academic_sessions ses ON r.academic_session_id = ses.id
+         LEFT JOIN terms t ON r.term_id = t.id
+         WHERE r.school_id = ? AND r.status != 'DROPPED'`,
+        [schoolId]
+      );
+
+      const map = new Map<
+        string,
+        {
+          academic_session_id: string;
+          session_name: string;
+          session_status: string;
+          department: string;
+          class_ids: Set<string>;
+          class_names: Set<string>;
+          students: Set<string>;
+          subjects: Set<string>;
+          terms: Map<string, { term_id: string; term_name: string; registrations_count: number }>;
+          registrations_count: number;
+        }
+      >();
+
+      for (const r of rows) {
+        if (!r.academic_session_id) continue;
+        const dept = String(r.department || 'General / Unassigned').trim() || 'General / Unassigned';
+        const key = `${r.academic_session_id}::${dept.toLowerCase()}`;
+        if (!map.has(key)) {
+          map.set(key, {
+            academic_session_id: r.academic_session_id,
+            session_name: r.session_name || 'Session',
+            session_status: r.session_status || 'COMPLETED',
+            department: dept,
+            class_ids: new Set(),
+            class_names: new Set(),
+            students: new Set(),
+            subjects: new Set(),
+            terms: new Map(),
+            registrations_count: 0,
+          });
+        }
+        const entry = map.get(key)!;
+        if (r.class_id) entry.class_ids.add(r.class_id);
+        if (r.class_name) entry.class_names.add(r.class_name);
+        if (r.student_id) entry.students.add(r.student_id);
+        if (r.subject_id) entry.subjects.add(r.subject_id);
+        entry.registrations_count += 1;
+        if (r.term_id) {
+          const existingTerm = entry.terms.get(r.term_id) || {
+            term_id: r.term_id,
+            term_name: r.term_name || 'Cycle',
+            registrations_count: 0,
+          };
+          existingTerm.registrations_count += 1;
+          entry.terms.set(r.term_id, existingTerm);
+        }
+      }
+
+      const matrix = Array.from(map.values())
+        .map((m) => ({
+          academic_session_id: m.academic_session_id,
+          session_name: m.session_name,
+          session_status: m.session_status,
+          department: m.department,
+          class_names: Array.from(m.class_names).sort((a, b) => a.localeCompare(b)),
+          students_count: m.students.size,
+          courses_count: m.subjects.size,
+          registrations_count: m.registrations_count,
+          terms: Array.from(m.terms.values()).sort((a, b) => a.term_name.localeCompare(b.term_name)),
+        }))
+        .sort((a, b) => b.session_name.localeCompare(a.session_name) || a.department.localeCompare(b.department));
+
+      return res.json({ success: true, matrix });
+    } catch (err: any) {
+      console.error('[Course Registrations Matrix Error]', err);
+      return res.status(500).json({ error: 'MATRIX_FAILED', message: safeClientError(err) });
+    }
+  }
+);
+
 courseAndBacklogRouter.get(
   '/course-registrations',
   requireAuth,
@@ -663,7 +875,7 @@ courseAndBacklogRouter.get(
       SELECT r.*,
              s.full_name as student_name, s.admission_number,
              s.class_arm_id as student_class_arm_id,
-             s.class_arm_name as student_department,
+             COALESCE(NULLIF(TRIM(s.class_arm_name), ''), ca.name) as student_department,
              COALESCE(c.name, s.class_name) as class_name,
              sub.name as subject_name, sub.code as subject_code,
              sub.department as subject_department,
@@ -674,6 +886,7 @@ courseAndBacklogRouter.get(
              t.name as term_name
       FROM student_course_registrations r
       JOIN students s ON r.student_id = s.id
+      LEFT JOIN class_arms ca ON s.class_arm_id = ca.id
       JOIN subjects sub ON r.subject_id = sub.id
       LEFT JOIN classes c ON COALESCE(r.class_id, s.class_id) = c.id
       LEFT JOIN academic_sessions ses ON r.academic_session_id = ses.id
@@ -684,7 +897,7 @@ courseAndBacklogRouter.get(
       SELECT r.*,
              s.full_name as student_name, s.admission_number,
              s.class_arm_id as student_class_arm_id,
-             s.class_arm_name as student_department,
+             COALESCE(NULLIF(TRIM(s.class_arm_name), ''), ca.name) as student_department,
              COALESCE(c.name, s.class_name) as class_name,
              sub.name as subject_name, sub.code as subject_code,
              sub.department as subject_department,
@@ -695,6 +908,7 @@ courseAndBacklogRouter.get(
              t.name as term_name
       FROM student_course_registrations r
       JOIN students s ON r.student_id = s.id
+      LEFT JOIN class_arms ca ON s.class_arm_id = ca.id
       JOIN subjects sub ON r.subject_id = sub.id
       LEFT JOIN classes c ON COALESCE(r.class_id, s.class_id) = c.id
       LEFT JOIN academic_sessions ses ON r.academic_session_id = ses.id
@@ -724,8 +938,8 @@ courseAndBacklogRouter.get(
       params.push(class_arm_id);
     }
     if (department && department.trim()) {
-      pgSql += ` AND LOWER(TRIM(COALESCE(s.class_arm_name, ''))) = LOWER(TRIM($${pIdx++}))`;
-      sqSql += ` AND LOWER(TRIM(COALESCE(s.class_arm_name, ''))) = LOWER(TRIM(?))`;
+      pgSql += ` AND LOWER(TRIM(COALESCE(NULLIF(TRIM(s.class_arm_name), ''), ca.name, ''))) = LOWER(TRIM($${pIdx++}))`;
+      sqSql += ` AND LOWER(TRIM(COALESCE(NULLIF(TRIM(s.class_arm_name), ''), ca.name, ''))) = LOWER(TRIM(?))`;
       params.push(department.trim());
     }
     if (student_id) {
@@ -846,6 +1060,8 @@ courseAndBacklogRouter.post(
       const {
         academic_session_id,
         term_id,
+        term_ids,
+        auto_match_semester_tag = true,
         class_id,
         class_arm_id,
         department,
@@ -854,10 +1070,21 @@ courseAndBacklogRouter.post(
         registration_type = 'REGULAR',
       } = req.body || {};
 
-      if (!academic_session_id || !term_id) {
+      const requestedTermIds: string[] = Array.from(
+        new Set(
+          [
+            ...(Array.isArray(term_ids) ? term_ids : []),
+            ...(term_id ? [term_id] : []),
+          ]
+            .map((id: any) => String(id || '').trim())
+            .filter(Boolean)
+        )
+      );
+
+      if (!academic_session_id || requestedTermIds.length === 0) {
         return res.status(400).json({
           error: 'MISSING_CYCLE',
-          message: 'Select both Academic Session and Term / Semester for course registration.',
+          message: 'Select both Academic Session and at least one Term / Semester for course registration.',
         });
       }
       if (!Array.isArray(subject_ids) || subject_ids.length === 0) {
@@ -867,20 +1094,38 @@ courseAndBacklogRouter.post(
         });
       }
 
-      // Verify session & term belong to tenant
+      // Verify session & all requested terms belong to tenant & session
       const ses = await dbGet(
         `SELECT id, name FROM academic_sessions WHERE id = $1 AND school_id = $2 LIMIT 1`,
         `SELECT id, name FROM academic_sessions WHERE id = ? AND school_id = ? LIMIT 1`,
         [academic_session_id, schoolId]
       );
-      const term = await dbGet(
-        `SELECT id, name FROM terms WHERE id = $1 AND school_id = $2 LIMIT 1`,
-        `SELECT id, name FROM terms WHERE id = ? AND school_id = ? LIMIT 1`,
-        [term_id, schoolId]
-      );
-      if (!ses || !term) {
-        return res.status(404).json({ error: 'CYCLE_NOT_FOUND', message: 'Academic session or term/semester not found.' });
+      if (!ses) {
+        return res.status(404).json({ error: 'CYCLE_NOT_FOUND', message: 'Academic session not found.' });
       }
+
+      const targetTerms: Array<{ id: string; name: string; canonicalTag: string }> = [];
+      for (const tid of requestedTermIds) {
+        const t = await dbGet(
+          `SELECT id, name, academic_session_id FROM terms WHERE id = $1 AND school_id = $2 LIMIT 1`,
+          `SELECT id, name, academic_session_id FROM terms WHERE id = ? AND school_id = ? LIMIT 1`,
+          [tid, schoolId]
+        );
+        if (t && (!t.academic_session_id || t.academic_session_id === academic_session_id)) {
+          targetTerms.push({
+            id: t.id,
+            name: t.name,
+            canonicalTag: normalizeSemesterTag(t.name),
+          });
+        }
+      }
+      if (targetTerms.length === 0) {
+        return res.status(404).json({
+          error: 'CYCLE_NOT_FOUND',
+          message: 'Selected term/semester was not found for this academic session.',
+        });
+      }
+      const targetTermIdSet = new Set(targetTerms.map((t) => t.id));
 
       // Resolve target students: explicit student_ids[] OR all active students in (class_id + optional department/class_arm_id)
       const cleanDeptFilter = department && String(department).trim() ? String(department).trim() : null;
@@ -891,35 +1136,49 @@ courseAndBacklogRouter.post(
         const cleanIds = Array.from(new Set(student_ids.map((id: any) => String(id).trim()).filter(Boolean)));
         for (const sid of cleanIds) {
           const st = await dbGet(
-            `SELECT id, full_name, class_id, class_arm_id, class_arm_name FROM students WHERE id = $1 AND school_id = $2 AND (is_deleted = 0 OR is_deleted IS NULL) LIMIT 1`,
-            `SELECT id, full_name, class_id, class_arm_id, class_arm_name FROM students WHERE id = ? AND school_id = ? AND (is_deleted = 0 OR is_deleted IS NULL) LIMIT 1`,
+            `SELECT s.id, s.full_name, s.class_id, s.class_arm_id,
+                    COALESCE(NULLIF(TRIM(s.class_arm_name), ''), ca.name) as class_arm_name
+             FROM students s
+             LEFT JOIN class_arms ca ON s.class_arm_id = ca.id
+             WHERE s.id = $1 AND s.school_id = $2 AND (s.is_deleted = 0 OR s.is_deleted IS NULL) LIMIT 1`,
+            `SELECT s.id, s.full_name, s.class_id, s.class_arm_id,
+                    COALESCE(NULLIF(TRIM(s.class_arm_name), ''), ca.name) as class_arm_name
+             FROM students s
+             LEFT JOIN class_arms ca ON s.class_arm_id = ca.id
+             WHERE s.id = ? AND s.school_id = ? AND (s.is_deleted = 0 OR s.is_deleted IS NULL) LIMIT 1`,
             [sid, schoolId]
           );
           if (st) targetStudents.push(st);
         }
       } else if (class_id || cleanArmIdFilter || cleanDeptFilter) {
         const sParams: any[] = [schoolId];
-        let sPg = `SELECT id, full_name, class_id, class_arm_id, class_arm_name FROM students
-                   WHERE school_id = $1
-                     AND UPPER(COALESCE(student_status, 'ACTIVE')) = 'ACTIVE'
-                     AND (is_deleted = 0 OR is_deleted IS NULL)`;
-        let sSq = `SELECT id, full_name, class_id, class_arm_id, class_arm_name FROM students
-                   WHERE school_id = ?
-                     AND UPPER(COALESCE(student_status, 'ACTIVE')) = 'ACTIVE'
-                     AND (is_deleted = 0 OR is_deleted IS NULL)`;
+        let sPg = `SELECT s.id, s.full_name, s.class_id, s.class_arm_id,
+                          COALESCE(NULLIF(TRIM(s.class_arm_name), ''), ca.name) as class_arm_name
+                   FROM students s
+                   LEFT JOIN class_arms ca ON s.class_arm_id = ca.id
+                   WHERE s.school_id = $1
+                     AND UPPER(COALESCE(s.student_status, 'ACTIVE')) = 'ACTIVE'
+                     AND (s.is_deleted = 0 OR s.is_deleted IS NULL)`;
+        let sSq = `SELECT s.id, s.full_name, s.class_id, s.class_arm_id,
+                          COALESCE(NULLIF(TRIM(s.class_arm_name), ''), ca.name) as class_arm_name
+                   FROM students s
+                   LEFT JOIN class_arms ca ON s.class_arm_id = ca.id
+                   WHERE s.school_id = ?
+                     AND UPPER(COALESCE(s.student_status, 'ACTIVE')) = 'ACTIVE'
+                     AND (s.is_deleted = 0 OR s.is_deleted IS NULL)`;
         let idx = 2;
         if (class_id) {
-          sPg += ` AND class_id = $${idx++}`;
-          sSq += ` AND class_id = ?`;
+          sPg += ` AND s.class_id = $${idx++}`;
+          sSq += ` AND s.class_id = ?`;
           sParams.push(class_id);
         }
         if (cleanArmIdFilter) {
-          sPg += ` AND class_arm_id = $${idx++}`;
-          sSq += ` AND class_arm_id = ?`;
+          sPg += ` AND s.class_arm_id = $${idx++}`;
+          sSq += ` AND s.class_arm_id = ?`;
           sParams.push(cleanArmIdFilter);
         } else if (cleanDeptFilter) {
-          sPg += ` AND LOWER(TRIM(COALESCE(class_arm_name, ''))) = LOWER(TRIM($${idx++}))`;
-          sSq += ` AND LOWER(TRIM(COALESCE(class_arm_name, ''))) = LOWER(TRIM(?))`;
+          sPg += ` AND LOWER(TRIM(COALESCE(NULLIF(TRIM(s.class_arm_name), ''), ca.name, ''))) = LOWER(TRIM($${idx++}))`;
+          sSq += ` AND LOWER(TRIM(COALESCE(NULLIF(TRIM(s.class_arm_name), ''), ca.name, ''))) = LOWER(TRIM(?))`;
           sParams.push(cleanDeptFilter);
         }
         targetStudents = await dbAll(sPg, sSq, sParams);
@@ -934,8 +1193,13 @@ courseAndBacklogRouter.post(
         });
       }
 
-      // Validate subjects belong to tenant
-      const validSubjects: Array<{ id: string; credit_units: number; registration_type: string }> = [];
+      // Validate subjects belong to tenant and resolve target term(s) per subject
+      const validSubjects: Array<{
+        id: string;
+        credit_units: number;
+        registration_type: string;
+        targetTermIds: string[];
+      }> = [];
       const cleanRegType = ['REGULAR', 'CARRYOVER', 'ELECTIVE', 'HISTORICAL'].includes(String(registration_type).toUpperCase())
         ? String(registration_type).toUpperCase()
         : 'REGULAR';
@@ -944,8 +1208,8 @@ courseAndBacklogRouter.post(
         const subId = typeof item === 'string' ? item : item?.subject_id || item?.id;
         if (!subId) continue;
         const sub = await dbGet(
-          `SELECT id, credit_units FROM subjects WHERE id = $1 AND school_id = $2 AND (is_deleted = 0 OR is_deleted IS NULL) LIMIT 1`,
-          `SELECT id, credit_units FROM subjects WHERE id = ? AND school_id = ? AND (is_deleted = 0 OR is_deleted IS NULL) LIMIT 1`,
+          `SELECT id, credit_units, semester_tag FROM subjects WHERE id = $1 AND school_id = $2 AND (is_deleted = 0 OR is_deleted IS NULL) LIMIT 1`,
+          `SELECT id, credit_units, semester_tag FROM subjects WHERE id = ? AND school_id = ? AND (is_deleted = 0 OR is_deleted IS NULL) LIMIT 1`,
           [subId, schoolId]
         );
         if (!sub) continue;
@@ -955,7 +1219,33 @@ courseAndBacklogRouter.post(
         const itemType = typeof item === 'object' && item?.registration_type
           ? String(item.registration_type).toUpperCase()
           : cleanRegType;
-        validSubjects.push({ id: sub.id, credit_units: customUnits, registration_type: itemType });
+
+        // Route each course to either explicit item.term_id, matching semester_tag term, or all targetTerms
+        let resolvedTermIds: string[] = [];
+        const explicitItemTermId = typeof item === 'object' && item?.term_id ? String(item.term_id).trim() : '';
+        if (explicitItemTermId && targetTermIdSet.has(explicitItemTermId)) {
+          resolvedTermIds = [explicitItemTermId];
+        } else if (targetTerms.length === 1) {
+          resolvedTermIds = [targetTerms[0].id];
+        } else if (auto_match_semester_tag !== false) {
+          const subSemTag = normalizeSemesterTag(sub.semester_tag);
+          if (subSemTag) {
+            const matched = targetTerms.filter((t) => t.canonicalTag === subSemTag).map((t) => t.id);
+            resolvedTermIds = matched.length > 0 ? matched : targetTerms.map((t) => t.id);
+          } else {
+            // Applies across all semesters -> register into every selected target term
+            resolvedTermIds = targetTerms.map((t) => t.id);
+          }
+        } else {
+          resolvedTermIds = targetTerms.map((t) => t.id);
+        }
+
+        validSubjects.push({
+          id: sub.id,
+          credit_units: customUnits,
+          registration_type: itemType,
+          targetTermIds: resolvedTermIds,
+        });
       }
 
       if (validSubjects.length === 0) {
@@ -963,47 +1253,54 @@ courseAndBacklogRouter.post(
       }
 
       let registeredCount = 0;
+      const touchedTermIds = new Set<string>();
       for (const stu of targetStudents) {
         const regClassId = class_id || stu.class_id || null;
         for (const sub of validSubjects) {
-          const id = newId('creg');
-          await dualWrite(
-            `INSERT INTO student_course_registrations (
-               id, school_id, student_id, academic_session_id, term_id, class_id, subject_id,
-               credit_units_snapshot, registration_type, status, registered_by, created_at, updated_at
-             ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'REGISTERED',$10,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)
-             ON CONFLICT (school_id, student_id, academic_session_id, term_id, subject_id) DO UPDATE SET
-               class_id = COALESCE(EXCLUDED.class_id, student_course_registrations.class_id),
-               credit_units_snapshot = EXCLUDED.credit_units_snapshot,
-               registration_type = EXCLUDED.registration_type,
-               status = 'REGISTERED',
-               updated_at = CURRENT_TIMESTAMP`,
-            `INSERT INTO student_course_registrations (
-               id, school_id, student_id, academic_session_id, term_id, class_id, subject_id,
-               credit_units_snapshot, registration_type, status, registered_by, created_at, updated_at
-             ) VALUES (?,?,?,?,?,?,?,?,?,'REGISTERED',?,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)
-             ON CONFLICT(school_id, student_id, academic_session_id, term_id, subject_id) DO UPDATE SET
-               class_id = COALESCE(excluded.class_id, student_course_registrations.class_id),
-               credit_units_snapshot = excluded.credit_units_snapshot,
-               registration_type = excluded.registration_type,
-               status = 'REGISTERED',
-               updated_at = CURRENT_TIMESTAMP`,
-            [
-              id,
-              schoolId,
-              stu.id,
-              academic_session_id,
-              term_id,
-              regClassId,
-              sub.id,
-              sub.credit_units,
-              sub.registration_type,
-              actorId,
-            ]
-          );
-          registeredCount += 1;
+          for (const resolvedTermId of sub.targetTermIds) {
+            touchedTermIds.add(resolvedTermId);
+            const id = newId('creg');
+            await dualWrite(
+              `INSERT INTO student_course_registrations (
+                 id, school_id, student_id, academic_session_id, term_id, class_id, subject_id,
+                 credit_units_snapshot, registration_type, status, registered_by, created_at, updated_at
+               ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'REGISTERED',$10,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)
+               ON CONFLICT (school_id, student_id, academic_session_id, term_id, subject_id) DO UPDATE SET
+                 class_id = COALESCE(EXCLUDED.class_id, student_course_registrations.class_id),
+                 credit_units_snapshot = EXCLUDED.credit_units_snapshot,
+                 registration_type = EXCLUDED.registration_type,
+                 status = 'REGISTERED',
+                 updated_at = CURRENT_TIMESTAMP`,
+              `INSERT INTO student_course_registrations (
+                 id, school_id, student_id, academic_session_id, term_id, class_id, subject_id,
+                 credit_units_snapshot, registration_type, status, registered_by, created_at, updated_at
+               ) VALUES (?,?,?,?,?,?,?,?,?,'REGISTERED',?,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)
+               ON CONFLICT(school_id, student_id, academic_session_id, term_id, subject_id) DO UPDATE SET
+                 class_id = COALESCE(excluded.class_id, student_course_registrations.class_id),
+                 credit_units_snapshot = excluded.credit_units_snapshot,
+                 registration_type = excluded.registration_type,
+                 status = 'REGISTERED',
+                 updated_at = CURRENT_TIMESTAMP`,
+              [
+                id,
+                schoolId,
+                stu.id,
+                academic_session_id,
+                resolvedTermId,
+                regClassId,
+                sub.id,
+                sub.credit_units,
+                sub.registration_type,
+                actorId,
+              ]
+            );
+            registeredCount += 1;
+          }
         }
       }
+
+      const affectedTerms = targetTerms.filter((t) => touchedTermIds.has(t.id));
+      const termsSummary = affectedTerms.map((t) => t.name).join(' & ');
 
       logAudit({
         actorId,
@@ -1013,7 +1310,8 @@ courseAndBacklogRouter.post(
         entity: 'COURSE_REGISTRATION',
         metadata: {
           session: ses.name,
-          term: term.name,
+          terms: affectedTerms.map((t) => t.name),
+          department: cleanDeptFilter,
           studentsCount: targetStudents.length,
           coursesCount: validSubjects.length,
           registeredCount,
@@ -1023,10 +1321,11 @@ courseAndBacklogRouter.post(
 
       return res.status(201).json({
         success: true,
-        message: `Registered ${validSubjects.length} course(s)/subject(s) for ${targetStudents.length} learner(s) in ${ses.name} (${term.name}).`,
+        message: `Registered ${validSubjects.length} course(s)/subject(s) for ${targetStudents.length} learner(s) in ${ses.name} (${termsSummary})${cleanDeptFilter ? ` · ${cleanDeptFilter}` : ''}.`,
         registeredCount,
         studentsAffected: targetStudents.length,
         coursesPerStudent: validSubjects.length,
+        termsAffected: affectedTerms.map((t) => ({ id: t.id, name: t.name })),
       });
     } catch (err: any) {
       console.error('[Bulk Course Registration Error]', err);

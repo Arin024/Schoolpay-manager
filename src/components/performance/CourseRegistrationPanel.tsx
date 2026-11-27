@@ -15,12 +15,17 @@ import {
   Building2,
   ClipboardCheck,
   ArrowRight,
+  Plus,
+  CalendarPlus,
+  Sparkles,
+  X,
 } from 'lucide-react';
 import { api } from '../../services/api';
 import {
   AcademicSessionItem,
   ClassItem,
   CourseRegistrationItem,
+  CourseRegistrationMatrixItem,
   DepartmentSummaryItem,
   Student,
   SubjectItem,
@@ -51,8 +56,10 @@ interface CourseRegistrationPanelProps {
   onOpenBulkCourses: (
     prefillClassId?: string,
     prefillSemesterTag?: CanonicalSemesterTag,
-    prefillDepartment?: string
+    prefillDepartment?: string,
+    prefillSessionId?: string
   ) => void;
+  onSessionsChanged?: () => Promise<void> | void;
   onOpenSessionReports?: () => void;
   onLaunchGradingFromRegistrations?: (params: {
     academic_session_id: string;
@@ -85,14 +92,17 @@ export const CourseRegistrationPanel: React.FC<CourseRegistrationPanelProps> = (
   learnerPlural,
   onOpenHistoricalBacklog,
   onOpenBulkCourses,
+  onSessionsChanged,
   onOpenSessionReports,
   onLaunchGradingFromRegistrations,
   onToast,
 }) => {
   const activeSession = sessions.find((s) => s.status === 'ACTIVE') || sessions[0];
   const [sessionId, setSessionId] = useState(activeSession?.id || '');
-  // termId === '__ALL__' shows Full-Session Combined aggregation across all semesters/terms
+  // termId === '__ALL__' shows read-only Full-Session Combined ledger;
+  // termId === '__BATCH_ALL__' enables registering across multiple semesters (e.g. 1st & 2nd Semester) in one batch!
   const [termId, setTermId] = useState(activeSession?.terms?.[0]?.id || '');
+  const [batchTermIds, setBatchTermIds] = useState<string[]>([]);
   const [classId, setClassId] = useState('');
   const [department, setDepartment] = useState('');
   const [includeGeneralCourses, setIncludeGeneralCourses] = useState(true);
@@ -102,6 +112,17 @@ export const CourseRegistrationPanel: React.FC<CourseRegistrationPanelProps> = (
   const [unitOverrides, setUnitOverrides] = useState<Record<string, string>>({});
   const [registrationType, setRegistrationType] = useState<'REGULAR' | 'CARRYOVER' | 'ELECTIVE' | 'HISTORICAL'>('REGULAR');
   const [showOtherSemesters, setShowOtherSemesters] = useState(false);
+
+  // Inline Academic Session quick-configurator state
+  const [showAddSessionBar, setShowAddSessionBar] = useState(false);
+  const [newSessionName, setNewSessionName] = useState('');
+  const [newSessionStatus, setNewSessionStatus] = useState<'COMPLETED' | 'ACTIVE' | 'UPCOMING'>('COMPLETED');
+  const [newSessionAutoTerms, setNewSessionAutoTerms] = useState(true);
+  const [creatingSession, setCreatingSession] = useState(false);
+  const [ensuringTerms, setEnsuringTerms] = useState(false);
+
+  // Configured Session x Department Matrix
+  const [matrix, setMatrix] = useState<CourseRegistrationMatrixItem[]>([]);
 
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -136,14 +157,40 @@ export const CourseRegistrationPanel: React.FC<CourseRegistrationPanelProps> = (
   const selectedSession = useMemo(() => sessions.find((s) => s.id === sessionId), [sessions, sessionId]);
   const sessionTerms = selectedSession?.terms || [];
   const isFullSessionView = termId === '__ALL__';
+  const isBatchMultiSemesterMode = termId === '__BATCH_ALL__';
+  const showCombinedLedger = isFullSessionView || isBatchMultiSemesterMode;
   const selectedTerm = useMemo(
-    () => (isFullSessionView ? null : sessionTerms.find((t) => t.id === termId) || null),
-    [sessionTerms, termId, isFullSessionView]
+    () => (showCombinedLedger ? null : sessionTerms.find((t) => t.id === termId) || null),
+    [sessionTerms, termId, showCombinedLedger]
   );
   const activeSemesterCanonical: CanonicalSemesterTag = useMemo(
     () => (selectedTerm ? normalizeSemesterTag(selectedTerm.name) : ''),
     [selectedTerm]
   );
+
+  const expectedCycleCount = useMemo(() => {
+    if (Array.isArray(cycleLabels) && cycleLabels.length > 0) return cycleLabels.length;
+    return isTertiary ? 2 : 3;
+  }, [cycleLabels, isTertiary]);
+
+  const suggestedNewSessions = useMemo(() => {
+    const existingNames = new Set(sessions.map((s) => s.name.trim().toLowerCase()));
+    const currentYear = new Date().getFullYear();
+    const candidates: string[] = [];
+    for (let y = currentYear - 4; y <= currentYear + 1; y++) {
+      candidates.push(`${y}/${y + 1}`);
+    }
+    return candidates.filter((c) => !existingNames.has(c.toLowerCase()));
+  }, [sessions]);
+
+  // Keep batchTermIds synced with the active session's available terms
+  useEffect(() => {
+    const validIds = sessionTerms.map((t) => t.id);
+    setBatchTermIds((prev) => {
+      const kept = prev.filter((id) => validIds.includes(id));
+      return kept.length > 0 ? kept : validIds;
+    });
+  }, [sessionId, sessionTerms.length]);
 
   // Discover canonical list of departments/arms across API summary, class arms, students, and courses
   const availableDepartments = useMemo(() => {
@@ -160,8 +207,9 @@ export const CourseRegistrationPanel: React.FC<CourseRegistrationPanelProps> = (
     students.forEach((s) => add(s.class_arm_name));
     subjects.forEach((s) => add(s.department));
     departmentSummaries.forEach((d) => add(d.department));
+    matrix.forEach((m) => add(m.department));
     return Array.from(map.values()).sort((a, b) => a.localeCompare(b));
-  }, [departments, classes, students, subjects, departmentSummaries]);
+  }, [departments, classes, students, subjects, departmentSummaries, matrix]);
 
   useEffect(() => {
     if (!sessionId && sessions.length > 0) {
@@ -172,10 +220,27 @@ export const CourseRegistrationPanel: React.FC<CourseRegistrationPanelProps> = (
   }, [sessions, sessionId]);
 
   useEffect(() => {
-    if (selectedSession && termId !== '__ALL__' && (!termId || !sessionTerms.some((t) => t.id === termId))) {
+    if (!selectedSession) return;
+    if (termId === '__ALL__') return;
+    if (termId === '__BATCH_ALL__') {
+      if (sessionTerms.length < 2) {
+        setTermId(sessionTerms[0]?.id || '');
+      }
+      return;
+    }
+    if (!termId || !sessionTerms.some((t) => t.id === termId)) {
       setTermId(sessionTerms[0]?.id || '');
     }
   }, [selectedSession, sessionTerms, termId]);
+
+  const loadMatrix = async () => {
+    try {
+      const res = await api.getCourseRegistrationMatrix();
+      setMatrix(res.matrix || []);
+    } catch {
+      // Non-blocking overview strip
+    }
+  };
 
   const loadRegistrations = async () => {
     if (!sessionId) return;
@@ -183,7 +248,7 @@ export const CourseRegistrationPanel: React.FC<CourseRegistrationPanelProps> = (
     try {
       const res = await api.getCourseRegistrations({
         academic_session_id: sessionId || undefined,
-        term_id: isFullSessionView ? undefined : termId || undefined,
+        term_id: showCombinedLedger ? undefined : termId || undefined,
         class_id: classId || undefined,
         department: department || undefined,
       });
@@ -197,6 +262,10 @@ export const CourseRegistrationPanel: React.FC<CourseRegistrationPanelProps> = (
       setLoading(false);
     }
   };
+
+  useEffect(() => {
+    loadMatrix();
+  }, [sessions.length]);
 
   useEffect(() => {
     loadRegistrations();
@@ -218,12 +287,21 @@ export const CourseRegistrationPanel: React.FC<CourseRegistrationPanelProps> = (
     return subjects.filter((s) => s.status !== 'INACTIVE');
   }, [subjects]);
 
-  // Courses strictly matching the selected Level (classId), Department, AND selected Semester/Term
+  // Courses strictly matching the selected Level (classId), Department, AND selected Semester(s)
   const matchingCycleSubjects = useMemo(() => {
     const deptKey = department.trim().toLowerCase();
+    const activeBatchTerms = sessionTerms.filter((t) => batchTermIds.includes(t.id));
     return activeSubjects.filter((s) => {
       const matchesClass = !classId || !s.class_id || s.class_id === classId;
-      const matchesSem = selectedTerm ? termMatchesSemesterTag(selectedTerm.name, s.semester_tag) : true;
+      let matchesSem = true;
+      if (isBatchMultiSemesterMode) {
+        matchesSem =
+          activeBatchTerms.length === 0 ||
+          !s.semester_tag ||
+          activeBatchTerms.some((t) => termMatchesSemesterTag(t.name, s.semester_tag));
+      } else if (selectedTerm) {
+        matchesSem = termMatchesSemesterTag(selectedTerm.name, s.semester_tag);
+      }
       if (!matchesClass || !matchesSem) return false;
       if (!deptKey) return true;
       const subDept = (s.department || '').trim().toLowerCase();
@@ -231,7 +309,7 @@ export const CourseRegistrationPanel: React.FC<CourseRegistrationPanelProps> = (
       if (includeGeneralCourses && isGeneralOrSharedCourse(s)) return true;
       return false;
     });
-  }, [activeSubjects, classId, selectedTerm, department, includeGeneralCourses]);
+  }, [activeSubjects, classId, selectedTerm, isBatchMultiSemesterMode, sessionTerms, batchTermIds, department, includeGeneralCourses]);
 
   const displayedSubjects = useMemo(() => {
     if (showOtherSemesters || registrationType === 'CARRYOVER') {
@@ -242,6 +320,19 @@ export const CourseRegistrationPanel: React.FC<CourseRegistrationPanelProps> = (
 
   const hiddenOtherCount = Math.max(0, activeSubjects.length - matchingCycleSubjects.length);
 
+  // Per-semester target helper for Multi-Semester Batch mode
+  const resolveTargetTermsForSubject = (sub: SubjectItem) => {
+    const chosenTerms = sessionTerms.filter((t) => batchTermIds.includes(t.id));
+    if (!isBatchMultiSemesterMode) return selectedTerm ? [selectedTerm] : [];
+    if (chosenTerms.length <= 1) return chosenTerms;
+    const tag = normalizeSemesterTag(sub.semester_tag);
+    if (tag) {
+      const matched = chosenTerms.filter((t) => normalizeSemesterTag(t.name) === tag);
+      if (matched.length > 0) return matched;
+    }
+    return chosenTerms;
+  };
+
   const selectedUnitsSum = useMemo(() => {
     return selectedSubjectIds.reduce((sum, id) => {
       const sub = activeSubjects.find((s) => s.id === id);
@@ -250,12 +341,45 @@ export const CourseRegistrationPanel: React.FC<CourseRegistrationPanelProps> = (
     }, 0);
   }, [selectedSubjectIds, unitOverrides, activeSubjects]);
 
+  const perBatchTermUnits = useMemo(() => {
+    if (!isBatchMultiSemesterMode) return [] as Array<{ term_id: string; term_name: string; units: number; count: number }>;
+    const chosen = sessionTerms.filter((t) => batchTermIds.includes(t.id));
+    return chosen.map((t) => {
+      let units = 0;
+      let count = 0;
+      for (const id of selectedSubjectIds) {
+        const sub = activeSubjects.find((s) => s.id === id);
+        if (!sub) continue;
+        const targets = resolveTargetTermsForSubject(sub);
+        if (targets.some((x) => x.id === t.id)) {
+          const raw = unitOverrides[id] !== undefined ? Number(unitOverrides[id]) : Number(sub.credit_units ?? 3);
+          units += Number.isFinite(raw) && raw >= 0 ? Math.round(raw) : 0;
+          count += 1;
+        }
+      }
+      return { term_id: t.id, term_name: t.name, units, count };
+    });
+  }, [isBatchMultiSemesterMode, sessionTerms, batchTermIds, selectedSubjectIds, activeSubjects, unitOverrides]);
+
+  const anyBatchTermOverloaded = isBatchMultiSemesterMode
+    ? perBatchTermUnits.some((x) => x.units > policy.max_credit_units_per_cycle)
+    : selectedUnitsSum > policy.max_credit_units_per_cycle;
+
   const toggleSubject = (id: string) => {
     setSelectedSubjectIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
   };
 
   const toggleStudent = (id: string) => {
     setSelectedStudentIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
+  };
+
+  const toggleBatchTerm = (id: string) => {
+    setBatchTermIds((prev) => {
+      if (prev.includes(id)) {
+        return prev.length > 1 ? prev.filter((x) => x !== id) : prev;
+      }
+      return [...prev, id];
+    });
   };
 
   const handleSelectTermTab = (nextTermId: string) => {
@@ -269,9 +393,79 @@ export const CourseRegistrationPanel: React.FC<CourseRegistrationPanelProps> = (
     setSelectedSubjectIds([]);
   };
 
+  const handleCreateQuickSession = async () => {
+    const cleanName = newSessionName.trim();
+    if (!cleanName) {
+      onToast('error', 'Enter an Academic Session name (e.g. 2024/2025).');
+      return;
+    }
+    setCreatingSession(true);
+    try {
+      const res = await api.createAcademicSession({
+        name: cleanName,
+        status: newSessionStatus,
+        auto_create_terms: newSessionAutoTerms,
+        reuse_existing: true,
+      });
+      if (onSessionsChanged) {
+        await onSessionsChanged();
+      }
+      const createdSession = res.session;
+      if (createdSession?.id) {
+        setSessionId(createdSession.id);
+        const createdTerms = createdSession.terms || [];
+        if (createdTerms.length >= 2) {
+          setBatchTermIds(createdTerms.map((t) => t.id));
+          setTermId('__BATCH_ALL__');
+        } else if (createdTerms[0]?.id) {
+          setTermId(createdTerms[0].id);
+        } else {
+          setTermId('');
+        }
+        if (newSessionStatus === 'COMPLETED') {
+          setRegistrationType('HISTORICAL');
+        }
+      }
+      setNewSessionName('');
+      setShowAddSessionBar(false);
+      onToast('success', res.message || `Session "${cleanName}" is ready for course registration.`);
+    } catch (err: any) {
+      onToast('error', err?.message || 'Failed to configure academic session.');
+    } finally {
+      setCreatingSession(false);
+    }
+  };
+
+  const handleEnsureTerms = async () => {
+    if (!sessionId) return;
+    setEnsuringTerms(true);
+    try {
+      const res = await api.ensureAcademicSessionTerms(sessionId);
+      if (onSessionsChanged) {
+        await onSessionsChanged();
+      }
+      if (res.terms && res.terms.length > 0) {
+        setBatchTermIds(res.terms.map((t) => t.id));
+        if (!termId || termId === '') {
+          setTermId(res.terms[0].id);
+        }
+      }
+      onToast('success', res.message);
+    } catch (err: any) {
+      onToast('error', err?.message || `Failed to setup ${cycleLabel.toLowerCase()}s.`);
+    } finally {
+      setEnsuringTerms(false);
+    }
+  };
+
   const handleBulkRegister = async () => {
-    if (!sessionId || !termId || isFullSessionView) {
+    if (!sessionId || isFullSessionView) {
       onToast('error', `Select a specific Academic Session and ${cycleLabel} first.`);
+      return;
+    }
+    const targetTermList = isBatchMultiSemesterMode ? batchTermIds : termId ? [termId] : [];
+    if (targetTermList.length === 0) {
+      onToast('error', `Select at least one ${cycleLabel} (or click Setup ${cycleLabel}s first).`);
       return;
     }
     if (selectedSubjectIds.length === 0) {
@@ -305,7 +499,9 @@ export const CourseRegistrationPanel: React.FC<CourseRegistrationPanelProps> = (
 
       const res = await api.bulkRegisterStudentCourses({
         academic_session_id: sessionId,
-        term_id: termId,
+        term_id: targetTermList.length === 1 ? targetTermList[0] : undefined,
+        term_ids: targetTermList,
+        auto_match_semester_tag: isBatchMultiSemesterMode,
         class_id: classId || null,
         department: department || null,
         student_ids: targetMode === 'STUDENTS' ? selectedStudentIds : undefined,
@@ -314,7 +510,7 @@ export const CourseRegistrationPanel: React.FC<CourseRegistrationPanelProps> = (
       });
 
       onToast('success', res.message);
-      await loadRegistrations();
+      await Promise.all([loadRegistrations(), loadMatrix()]);
     } catch (err: any) {
       onToast('error', err?.message || 'Failed to register courses.');
     } finally {
@@ -326,25 +522,33 @@ export const CourseRegistrationPanel: React.FC<CourseRegistrationPanelProps> = (
     try {
       await api.deleteCourseRegistration(regId);
       onToast('success', `${subjectLabel} dropped from registration.`);
-      await loadRegistrations();
+      await Promise.all([loadRegistrations(), loadMatrix()]);
     } catch (err: any) {
       onToast('error', err?.message || 'Failed to drop registration.');
     }
   };
 
-  const handleLaunchGrading = async () => {
-    if (!onLaunchGradingFromRegistrations || !sessionId || !termId || isFullSessionView) return;
+  const handleLaunchGrading = async (overrideTermId?: string) => {
+    const resolvedTermId = overrideTermId || (!showCombinedLedger ? termId : sessionTerms[0]?.id || '');
+    if (!onLaunchGradingFromRegistrations || !sessionId || !resolvedTermId) return;
     setLaunchingGrading(true);
     try {
       await onLaunchGradingFromRegistrations({
         academic_session_id: sessionId,
-        term_id: termId,
+        term_id: resolvedTermId,
         class_id: classId || null,
         department: department || null,
       });
     } finally {
       setLaunchingGrading(false);
     }
+  };
+
+  const formatSessionStatusBadge = (status?: string) => {
+    const st = String(status || '').toUpperCase();
+    if (st === 'ACTIVE') return '(Active)';
+    if (st === 'UPCOMING') return '(Upcoming)';
+    return '(Historical)';
   };
 
   const printingStudent = printingStudentId
@@ -354,6 +558,10 @@ export const CourseRegistrationPanel: React.FC<CourseRegistrationPanelProps> = (
   const selectedClassName = classId ? classes.find((c) => c.id === classId)?.name || '' : '';
   const deptLabel = isTertiary ? 'Department / Programme' : 'Department / Arm';
   const cohortTitle = [selectedClassName, department].filter(Boolean).join(' · ') || classLabel;
+  const activeBatchTermNames = sessionTerms
+    .filter((t) => batchTermIds.includes(t.id))
+    .map((t) => t.name)
+    .join(' & ');
 
   return (
     <div className="space-y-5">
@@ -372,7 +580,15 @@ export const CourseRegistrationPanel: React.FC<CourseRegistrationPanelProps> = (
             <div className="flex flex-wrap items-center gap-2">
               <button
                 type="button"
-                onClick={() => onOpenBulkCourses(classId || '', activeSemesterCanonical, department || '')}
+                onClick={() => setShowAddSessionBar((v) => !v)}
+                className="px-3 py-1.5 text-xs font-semibold text-emerald-800 bg-emerald-50 border border-emerald-200 rounded-lg hover:bg-emerald-100 flex items-center gap-1.5 cursor-pointer"
+              >
+                <CalendarPlus className="w-3.5 h-3.5" />
+                {showAddSessionBar ? 'Close Session Setup' : '+ Add / Configure Session'}
+              </button>
+              <button
+                type="button"
+                onClick={() => onOpenBulkCourses(classId || '', activeSemesterCanonical, department || '', sessionId || '')}
                 className="px-3 py-1.5 text-xs font-semibold text-slate-700 bg-white border border-slate-200 rounded-lg hover:bg-slate-50 flex items-center gap-1.5 cursor-pointer"
               >
                 <BookOpen className="w-3.5 h-3.5 text-emerald-700" />
@@ -390,36 +606,232 @@ export const CourseRegistrationPanel: React.FC<CourseRegistrationPanelProps> = (
           )}
         </div>
 
+        {/* Inline Quick-Configure Academic Session Drawer (e.g. 2024/2025 with 1st & 2nd Semester) */}
+        {isAdmin && showAddSessionBar && (
+          <div className="p-3.5 rounded-xl bg-emerald-50/70 border border-emerald-200 space-y-3">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div>
+                <p className="text-xs font-bold text-emerald-950 flex items-center gap-1.5">
+                  <CalendarPlus className="w-4 h-4 text-emerald-700" />
+                  Configure Any Academic Session for Course Registration (e.g. 2024/2025, 2023/2024, 2026/2027)
+                </p>
+                <p className="text-[11px] text-emerald-800 mt-0.5">
+                  Create past, current, or upcoming sessions with automatic {isTertiary ? '1st & 2nd Semester' : '1st, 2nd & 3rd Term'} setup — register different sessions for different departments without disturbing your current active session.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowAddSessionBar(false)}
+                className="p-1 rounded-lg text-emerald-700 hover:bg-emerald-100 cursor-pointer"
+                aria-label="Close session configurator"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            {suggestedNewSessions.length > 0 && (
+              <div className="flex flex-wrap items-center gap-1.5">
+                <span className="text-[11px] font-semibold text-emerald-900">Quick-pick:</span>
+                {suggestedNewSessions.map((yr) => (
+                  <button
+                    key={yr}
+                    type="button"
+                    onClick={() => {
+                      setNewSessionName(yr);
+                      const startYr = parseInt(yr.split('/')[0], 10);
+                      const curYr = new Date().getFullYear();
+                      setNewSessionStatus(startYr < curYr ? 'COMPLETED' : startYr === curYr ? 'UPCOMING' : 'UPCOMING');
+                    }}
+                    className={`px-2.5 py-1 text-xs font-semibold rounded-lg border transition-colors cursor-pointer ${
+                      newSessionName === yr
+                        ? 'bg-emerald-700 text-white border-emerald-700'
+                        : 'bg-white text-emerald-900 border-emerald-200 hover:bg-emerald-100'
+                    }`}
+                  >
+                    + {yr}
+                  </button>
+                ))}
+              </div>
+            )}
+
+            <div className="grid grid-cols-1 sm:grid-cols-12 gap-2.5 items-end">
+              <div className="sm:col-span-4">
+                <label className="block text-[11px] font-semibold text-emerald-950 mb-1">
+                  Session Name *
+                </label>
+                <input
+                  type="text"
+                  value={newSessionName}
+                  onChange={(e) => setNewSessionName(e.target.value)}
+                  placeholder="e.g. 2024/2025"
+                  aria-label="New Academic Session Name"
+                  className="w-full px-3 py-2 text-xs bg-white border border-emerald-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-600"
+                />
+              </div>
+              <div className="sm:col-span-3">
+                <label className="block text-[11px] font-semibold text-emerald-950 mb-1">
+                  Session Role
+                </label>
+                <select
+                  value={newSessionStatus}
+                  onChange={(e) => setNewSessionStatus(e.target.value as any)}
+                  aria-label="New Academic Session Status"
+                  className="w-full px-3 py-2 text-xs bg-white border border-emerald-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-600"
+                >
+                  <option value="COMPLETED">Past / Historical (Keeps Active Session)</option>
+                  <option value="UPCOMING">Upcoming Session</option>
+                  <option value="ACTIVE">Set as Current Active Session</option>
+                </select>
+              </div>
+              <div className="sm:col-span-3 flex items-center py-2">
+                <label className="inline-flex items-center gap-1.5 text-xs font-medium text-emerald-950 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={newSessionAutoTerms}
+                    onChange={(e) => setNewSessionAutoTerms(e.target.checked)}
+                    className="rounded border-emerald-400 text-emerald-600"
+                  />
+                  Auto-add {isTertiary ? '1st & 2nd Semester' : '1st–3rd Term'}
+                </label>
+              </div>
+              <div className="sm:col-span-2">
+                <button
+                  type="button"
+                  disabled={creatingSession || !newSessionName.trim()}
+                  onClick={handleCreateQuickSession}
+                  className="w-full px-3 py-2 text-xs font-bold text-white bg-emerald-700 hover:bg-emerald-800 rounded-lg disabled:opacity-50 cursor-pointer"
+                >
+                  {creatingSession ? 'Configuring...' : 'Create & Select'}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Configured Sessions x Departments Overview Matrix (Jump between e.g. 2024/2025 FHC vs 2025/2026 CHEW in 1 click) */}
+        {matrix.length > 0 && (
+          <div className="pt-2 border-t border-slate-100 space-y-1.5">
+            <div className="flex items-center justify-between">
+              <span className="text-[11px] font-semibold text-slate-500 uppercase tracking-wider flex items-center gap-1.5">
+                <Sparkles className="w-3.5 h-3.5 text-emerald-600" />
+                Configured Sessions × Departments ({matrix.length})
+              </span>
+              <span className="text-[11px] text-slate-400">Click any card to jump directly to that session &amp; department</span>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              {matrix.map((item) => {
+                const isCurrent =
+                  sessionId === item.academic_session_id &&
+                  (item.department === 'General / Unassigned'
+                    ? !department
+                    : department.toLowerCase() === item.department.toLowerCase());
+                return (
+                  <button
+                    key={`${item.academic_session_id}-${item.department}`}
+                    type="button"
+                    onClick={() => {
+                      setSessionId(item.academic_session_id);
+                      setDepartment(item.department === 'General / Unassigned' ? '' : item.department);
+                      setSelectedStudentIds([]);
+                      setSelectedSubjectIds([]);
+                      if (item.terms.length >= 2) {
+                        setTermId('__BATCH_ALL__');
+                      } else if (item.terms[0]?.term_id) {
+                        setTermId(item.terms[0].term_id);
+                      }
+                    }}
+                    className={`px-3 py-1.5 rounded-lg border text-left transition-colors cursor-pointer ${
+                      isCurrent
+                        ? 'bg-slate-900 text-white border-slate-900'
+                        : 'bg-slate-50 text-slate-800 border-slate-200 hover:bg-emerald-50 hover:border-emerald-300'
+                    }`}
+                  >
+                    <div className="text-xs font-bold flex items-center gap-1.5">
+                      <span>{item.session_name}</span>
+                      <span className={isCurrent ? 'text-emerald-400' : 'text-slate-400'}>·</span>
+                      <span>{item.department}</span>
+                    </div>
+                    <div className={`text-[10px] mt-0.5 tabular-nums ${isCurrent ? 'text-slate-300' : 'text-slate-500'}`}>
+                      {item.terms.map((t) => t.term_name).join(' & ')} · {item.students_count}{' '}
+                      {item.students_count === 1 ? learnerLabel.toLowerCase() : learnerPlural.toLowerCase()} ·{' '}
+                      {item.registrations_count} regs
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
         {/* Cycle, Class, Department & Type Filters */}
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3">
           <div>
-            <label className="block text-[11px] font-semibold text-slate-600 uppercase tracking-wider mb-1">
-              Academic Session
-            </label>
+            <div className="flex items-center justify-between mb-1">
+              <label className="block text-[11px] font-semibold text-slate-600 uppercase tracking-wider">
+                Academic Session
+              </label>
+              {isAdmin && (
+                <button
+                  type="button"
+                  onClick={() => setShowAddSessionBar(true)}
+                  className="text-[11px] font-semibold text-emerald-700 hover:underline flex items-center gap-0.5 cursor-pointer"
+                >
+                  <Plus className="w-3 h-3" /> New
+                </button>
+              )}
+            </div>
             <select
               value={sessionId}
-              onChange={(e) => setSessionId(e.target.value)}
-              className="w-full px-3 py-2 text-xs bg-white border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500"
+              aria-label="Academic Session"
+              onChange={(e) => {
+                const nextId = e.target.value;
+                setSessionId(nextId);
+                setSelectedSubjectIds([]);
+                const nextSes = sessions.find((s) => s.id === nextId);
+                if (nextSes && nextSes.status !== 'ACTIVE') {
+                  setRegistrationType('HISTORICAL');
+                } else {
+                  setRegistrationType('REGULAR');
+                }
+              }}
+              className="w-full px-3 py-2 text-xs bg-white border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500 font-semibold"
             >
-              {sessions.map((s) => (
-                <option key={s.id} value={s.id}>
-                  {s.name} {s.status === 'ACTIVE' ? '(Active)' : '(Archived)'}
-                </option>
-              ))}
+              {sessions.length === 0 ? (
+                <option value="">No sessions yet — click + New</option>
+              ) : (
+                sessions.map((s) => (
+                  <option key={s.id} value={s.id}>
+                    {s.name} {formatSessionStatusBadge(s.status)}
+                  </option>
+                ))
+              )}
             </select>
           </div>
 
           <div>
-            <label className="block text-[11px] font-semibold text-slate-600 uppercase tracking-wider mb-1">
-              {cycleLabel} / Scope
-            </label>
+            <div className="flex items-center justify-between mb-1">
+              <label className="block text-[11px] font-semibold text-slate-600 uppercase tracking-wider">
+                {cycleLabel} / Scope
+              </label>
+              {isAdmin && selectedSession && sessionTerms.length < expectedCycleCount && (
+                <button
+                  type="button"
+                  disabled={ensuringTerms}
+                  onClick={handleEnsureTerms}
+                  className="text-[11px] font-semibold text-emerald-700 hover:underline cursor-pointer disabled:opacity-50"
+                >
+                  {ensuringTerms ? 'Setting up...' : `+ Auto-Setup ${cycleLabel}s`}
+                </button>
+              )}
+            </div>
             <select
               value={termId}
+              aria-label={`${cycleLabel} Scope`}
               onChange={(e) => handleSelectTermTab(e.target.value)}
               className="w-full px-3 py-2 text-xs bg-white border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500 font-medium"
             >
               {sessionTerms.length === 0 ? (
-                <option value="">No {cycleLabel.toLowerCase()}s configured</option>
+                <option value="">No {cycleLabel.toLowerCase()}s — click + Auto-Setup</option>
               ) : (
                 <>
                   {sessionTerms.map((t) => (
@@ -427,8 +839,13 @@ export const CourseRegistrationPanel: React.FC<CourseRegistrationPanelProps> = (
                       {t.name}
                     </option>
                   ))}
+                  {sessionTerms.length >= 2 && (
+                    <option value="__BATCH_ALL__">
+                      {sessionTerms.map((t) => t.name).join(' & ')} (Register Together)
+                    </option>
+                  )}
                   <option value="__ALL__">
-                    Full Session Combined (All {cycleLabel}s)
+                    Full Session Combined (Ledger View)
                   </option>
                 </>
               )}
@@ -493,6 +910,24 @@ export const CourseRegistrationPanel: React.FC<CourseRegistrationPanelProps> = (
           </div>
         </div>
 
+        {/* Missing Semesters Quick-Fix Banner (when selected session has 0 terms) */}
+        {isAdmin && selectedSession && sessionTerms.length === 0 && (
+          <div className="p-3 rounded-lg bg-amber-50 border border-amber-200 flex flex-wrap items-center justify-between gap-2 text-xs text-amber-900">
+            <span>
+              <strong>{selectedSession.name}</strong> has no {cycleLabel.toLowerCase()}s configured yet. Click to automatically create{' '}
+              <strong>{isTertiary ? '1st Semester & 2nd Semester' : '1st, 2nd & 3rd Term'}</strong>.
+            </span>
+            <button
+              type="button"
+              disabled={ensuringTerms}
+              onClick={handleEnsureTerms}
+              className="px-3 py-1.5 text-xs font-bold text-white bg-amber-700 hover:bg-amber-800 rounded-lg cursor-pointer disabled:opacity-50"
+            >
+              {ensuringTerms ? 'Setting up...' : `Auto-Setup ${isTertiary ? '1st & 2nd Semester' : 'Terms'}`}
+            </button>
+          </div>
+        )}
+
         {/* One-Click Department Switcher Bar */}
         {availableDepartments.length > 0 && (
           <div className="pt-2 border-t border-slate-100 flex flex-wrap items-center gap-1.5">
@@ -539,13 +974,15 @@ export const CourseRegistrationPanel: React.FC<CourseRegistrationPanelProps> = (
           </div>
         )}
 
-        {/* One-Click Level x Semester Switcher Bar */}
+        {/* One-Click Level x Semester Switcher Bar (Single Semester, 1st & 2nd Together, or Combined Ledger) */}
         {sessionTerms.length > 0 && (
           <div className="pt-2 border-t border-slate-100 flex flex-wrap items-center justify-between gap-2">
             <div className="flex flex-wrap items-center gap-1.5">
               <span className="text-[11px] font-semibold text-slate-500 mr-1 flex items-center gap-1">
                 <Layers className="w-3.5 h-3.5 text-emerald-600" />
-                {selectedClassName ? `${selectedClassName} · ` : ''}Split by {cycleLabel}:
+                {selectedSession?.name ? `${selectedSession.name} · ` : ''}
+                {selectedClassName ? `${selectedClassName} · ` : ''}
+                {cycleLabel}s:
               </span>
               {sessionTerms.map((t) => (
                 <button
@@ -561,6 +998,19 @@ export const CourseRegistrationPanel: React.FC<CourseRegistrationPanelProps> = (
                   {t.name}
                 </button>
               ))}
+              {sessionTerms.length >= 2 && (
+                <button
+                  type="button"
+                  onClick={() => handleSelectTermTab('__BATCH_ALL__')}
+                  className={`px-3 py-1 text-xs font-semibold rounded-lg border transition-colors cursor-pointer ${
+                    isBatchMultiSemesterMode
+                      ? 'bg-emerald-700 text-white border-emerald-700'
+                      : 'bg-emerald-50 text-emerald-800 border-emerald-200 hover:bg-emerald-100'
+                  }`}
+                >
+                  {isTertiary ? '1st & 2nd Semester (Register Both)' : `All ${cycleLabel}s (Register Together)`}
+                </button>
+              )}
               <button
                 type="button"
                 onClick={() => handleSelectTermTab('__ALL__')}
@@ -574,7 +1024,7 @@ export const CourseRegistrationPanel: React.FC<CourseRegistrationPanelProps> = (
               </button>
             </div>
 
-            {isFullSessionView && onOpenSessionReports && (
+            {showCombinedLedger && onOpenSessionReports && (
               <button
                 type="button"
                 onClick={onOpenSessionReports}
@@ -589,7 +1039,7 @@ export const CourseRegistrationPanel: React.FC<CourseRegistrationPanelProps> = (
               <button
                 type="button"
                 disabled={launchingGrading}
-                onClick={handleLaunchGrading}
+                onClick={() => handleLaunchGrading()}
                 className="px-3 py-1.5 text-xs font-bold text-white bg-slate-900 hover:bg-emerald-700 rounded-lg transition-colors flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
               >
                 <ClipboardCheck className="w-3.5 h-3.5 text-emerald-400" />
@@ -613,7 +1063,7 @@ export const CourseRegistrationPanel: React.FC<CourseRegistrationPanelProps> = (
               End-of-Session Aggregated View · {selectedSession?.name}
             </p>
             <p className="text-xs text-slate-300 mt-0.5">
-              Showing combined {subjectPlural.toLowerCase()} across all {cycleLabel.toLowerCase()}s for each {learnerLabel.toLowerCase()}. Select a specific {cycleLabel.toLowerCase()} tab above (e.g. 1st or 2nd {cycleLabel}) to register new {subjectPlural.toLowerCase()}.
+              Showing combined {subjectPlural.toLowerCase()} across all {cycleLabel.toLowerCase()}s for each {learnerLabel.toLowerCase()}. Select a specific {cycleLabel.toLowerCase()} tab or <strong>1st &amp; 2nd {cycleLabel} (Register Both)</strong> above to register new {subjectPlural.toLowerCase()}.
             </p>
           </div>
           {onOpenSessionReports && (
@@ -660,20 +1110,73 @@ export const CourseRegistrationPanel: React.FC<CourseRegistrationPanelProps> = (
               </button>
             </div>
 
-            <div className="flex items-center gap-3 text-xs tabular-nums">
+            <div className="flex flex-wrap items-center gap-3 text-xs tabular-nums">
               <span className="text-slate-600">
                 Selected: <strong className="text-slate-900">{selectedSubjectIds.length}</strong> {subjectPlural.toLowerCase()}
               </span>
               <span className="text-slate-300">·</span>
-              <span
-                className={`font-semibold ${
-                  selectedUnitsSum > policy.max_credit_units_per_cycle ? 'text-red-600' : 'text-emerald-700'
-                }`}
-              >
-                {selectedUnitsSum} / {policy.max_credit_units_per_cycle} max units ({selectedTerm?.name || cycleLabel})
-              </span>
+              {isBatchMultiSemesterMode ? (
+                <div className="flex flex-wrap items-center gap-2">
+                  {perBatchTermUnits.map((bt) => (
+                    <span
+                      key={bt.term_id}
+                      className={`px-2 py-0.5 rounded border text-[11px] font-semibold ${
+                        bt.units > policy.max_credit_units_per_cycle
+                          ? 'bg-red-50 border-red-200 text-red-700'
+                          : 'bg-emerald-50 border-emerald-200 text-emerald-800'
+                      }`}
+                    >
+                      {bt.term_name}: {bt.units} / {policy.max_credit_units_per_cycle}u
+                    </span>
+                  ))}
+                </div>
+              ) : (
+                <span
+                  className={`font-semibold ${
+                    selectedUnitsSum > policy.max_credit_units_per_cycle ? 'text-red-600' : 'text-emerald-700'
+                  }`}
+                >
+                  {selectedUnitsSum} / {policy.max_credit_units_per_cycle} max units ({selectedTerm?.name || cycleLabel})
+                </span>
+              )}
             </div>
           </div>
+
+          {/* Multi-Semester Batch Target Strip (when 1st & 2nd Semester Register Both is active) */}
+          {isBatchMultiSemesterMode && sessionTerms.length >= 2 && (
+            <div className="p-3 rounded-lg bg-emerald-50/70 border border-emerald-200 flex flex-wrap items-center justify-between gap-2 text-xs">
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="font-bold text-emerald-950">
+                  Target {cycleLabel}s for {selectedSession?.name}:
+                </span>
+                {sessionTerms.map((t) => {
+                  const checked = batchTermIds.includes(t.id);
+                  return (
+                    <label
+                      key={t.id}
+                      className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg border text-xs font-semibold cursor-pointer ${
+                        checked
+                          ? 'bg-emerald-700 text-white border-emerald-700'
+                          : 'bg-white text-slate-700 border-slate-200'
+                      }`}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={checked}
+                        onChange={() => toggleBatchTerm(t.id)}
+                        className="sr-only"
+                      />
+                      {checked ? <CheckSquare className="w-3.5 h-3.5" /> : <Square className="w-3.5 h-3.5" />}
+                      {t.name}
+                    </label>
+                  );
+                })}
+              </div>
+              <span className="text-[11px] text-emerald-900">
+                1st-{cycleLabel.toLowerCase()} courses auto-route to 1st {cycleLabel}; 2nd-{cycleLabel.toLowerCase()} courses auto-route to 2nd {cycleLabel}; untagged courses register into all checked {cycleLabel.toLowerCase()}s.
+              </span>
+            </div>
+          )}
 
           {/* Specific Students Picker (when targetMode === STUDENTS) */}
           {targetMode === 'STUDENTS' && (
@@ -738,8 +1241,9 @@ export const CourseRegistrationPanel: React.FC<CourseRegistrationPanelProps> = (
             <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
               <div className="flex flex-wrap items-center gap-2">
                 <span className="font-semibold text-slate-700">
-                  Select {department ? `${department} ` : ''}
-                  {selectedTerm ? `${selectedTerm.name} ` : ''}
+                  Select {selectedSession?.name ? `${selectedSession.name} · ` : ''}
+                  {department ? `${department} ` : ''}
+                  {isBatchMultiSemesterMode ? `${activeBatchTermNames} ` : selectedTerm ? `${selectedTerm.name} ` : ''}
                   {subjectPlural} (adjust credit units inline if needed)
                 </span>
                 {department && (
@@ -794,12 +1298,12 @@ export const CourseRegistrationPanel: React.FC<CourseRegistrationPanelProps> = (
               <div className="p-6 text-center border border-dashed border-slate-300 rounded-lg text-xs text-slate-500 space-y-2">
                 <p>
                   No {subjectPlural.toLowerCase()} tagged for <strong>{department || 'this filter'}</strong> in{' '}
-                  <strong>{selectedTerm?.name || cycleLabel}</strong> yet.
+                  <strong>{isBatchMultiSemesterMode ? activeBatchTermNames : selectedTerm?.name || cycleLabel}</strong> yet.
                 </p>
                 <div className="flex flex-wrap items-center justify-center gap-2">
                   <button
                     type="button"
-                    onClick={() => onOpenBulkCourses(classId || '', activeSemesterCanonical, department || '')}
+                    onClick={() => onOpenBulkCourses(classId || '', activeSemesterCanonical, department || '', sessionId || '')}
                     className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg font-semibold cursor-pointer"
                   >
                     Bulk Upload {department ? `${department} ` : ''}{subjectPlural}
@@ -823,6 +1327,7 @@ export const CourseRegistrationPanel: React.FC<CourseRegistrationPanelProps> = (
                       : String(sub.credit_units ?? 3);
                   const semLabel = formatSemesterTagLabel(sub.semester_tag, cycleLabel, cycleLabels);
                   const deptDisplay = (sub.department || '').trim() || 'General / Shared';
+                  const batchTargets = isBatchMultiSemesterMode ? resolveTargetTermsForSubject(sub) : [];
                   return (
                     <div
                       key={sub.id}
@@ -849,7 +1354,14 @@ export const CourseRegistrationPanel: React.FC<CourseRegistrationPanelProps> = (
                           </p>
                           <p className="text-[11px] text-slate-500 truncate">
                             <span className="font-medium text-slate-700">{deptDisplay}</span> ·{' '}
-                            {sub.class_name || `All ${classLabel}s`} · {semLabel}
+                            {sub.class_name || `All ${classLabel}s`} ·{' '}
+                            {isBatchMultiSemesterMode && batchTargets.length > 0 ? (
+                              <span className="font-semibold text-emerald-700">
+                                → {batchTargets.length === sessionTerms.length ? `All ${cycleLabel}s` : batchTargets.map((t) => t.name).join(' & ')}
+                              </span>
+                            ) : (
+                              semLabel
+                            )}
                           </p>
                         </div>
                       </button>
@@ -875,11 +1387,11 @@ export const CourseRegistrationPanel: React.FC<CourseRegistrationPanelProps> = (
             )}
           </div>
 
-          {selectedUnitsSum > policy.max_credit_units_per_cycle && (
+          {anyBatchTermOverloaded && (
             <div className="p-2.5 rounded-lg bg-amber-50 border border-amber-200 text-xs text-amber-800 flex items-center gap-2">
               <AlertTriangle className="w-4 h-4 shrink-0 text-amber-600" />
               <span>
-                Selected load ({selectedUnitsSum} units) exceeds your institutional maximum of {policy.max_credit_units_per_cycle} credit units per {cycleLabel.toLowerCase()}. You can still override and register if approved.
+                Selected load exceeds your institutional maximum of {policy.max_credit_units_per_cycle} credit units per {cycleLabel.toLowerCase()}. You can still override and register if approved.
               </span>
             </div>
           )}
@@ -887,7 +1399,7 @@ export const CourseRegistrationPanel: React.FC<CourseRegistrationPanelProps> = (
           <div className="flex justify-end pt-1">
             <button
               type="button"
-              disabled={saving || selectedSubjectIds.length === 0}
+              disabled={saving || selectedSubjectIds.length === 0 || sessionTerms.length === 0}
               onClick={handleBulkRegister}
               className="px-4 py-2 text-xs font-semibold text-white bg-emerald-600 rounded-lg hover:bg-emerald-700 disabled:opacity-50 flex items-center gap-1.5 cursor-pointer"
             >
@@ -895,8 +1407,8 @@ export const CourseRegistrationPanel: React.FC<CourseRegistrationPanelProps> = (
               {saving
                 ? 'Registering...'
                 : targetMode === 'CLASS'
-                ? `Bulk Register ${selectedSubjectIds.length} ${subjectPlural} for ${cohortTitle} (${selectedTerm?.name || cycleLabel})`
-                : `Register ${selectedSubjectIds.length} ${subjectPlural} for ${selectedStudentIds.length} ${learnerPlural}`}
+                ? `Bulk Register ${selectedSubjectIds.length} ${subjectPlural} for ${selectedSession?.name || ''} · ${cohortTitle} (${isBatchMultiSemesterMode ? activeBatchTermNames : selectedTerm?.name || cycleLabel})`
+                : `Register ${selectedSubjectIds.length} ${subjectPlural} for ${selectedStudentIds.length} ${learnerPlural} (${selectedSession?.name || ''} · ${isBatchMultiSemesterMode ? activeBatchTermNames : selectedTerm?.name || cycleLabel})`}
             </button>
           </div>
         </div>
@@ -907,18 +1419,34 @@ export const CourseRegistrationPanel: React.FC<CourseRegistrationPanelProps> = (
         <div className="px-4 py-3 border-b border-slate-200 flex flex-wrap items-center justify-between gap-2">
           <div>
             <h4 className="text-xs font-bold text-slate-900 uppercase tracking-wider">
-              {isFullSessionView
-                ? `Full-Session Aggregated ${subjectPlural} Ledger (${selectedSession?.name || ''})`
-                : `Registered ${subjectPlural} Ledger · ${selectedTerm?.name || ''}${department ? ` · ${department}` : ''}`}{' '}
+              {showCombinedLedger
+                ? `Full-Session ${subjectPlural} Ledger (${selectedSession?.name || ''}${department ? ` · ${department}` : ''})`
+                : `Registered ${subjectPlural} Ledger · ${selectedSession?.name || ''} · ${selectedTerm?.name || ''}${department ? ` · ${department}` : ''}`}{' '}
               ({registrations.length} registrations · {studentSummaries.length} {learnerPlural.toLowerCase()})
             </h4>
           </div>
-          <div className="flex items-center gap-2">
-            {!isFullSessionView && isAdmin && onLaunchGradingFromRegistrations && registrations.length > 0 && (
+          <div className="flex flex-wrap items-center gap-2">
+            {isBatchMultiSemesterMode && isAdmin && onLaunchGradingFromRegistrations && registrations.length > 0 && (
+              <>
+                {sessionTerms.map((t) => (
+                  <button
+                    key={t.id}
+                    type="button"
+                    disabled={launchingGrading}
+                    onClick={() => handleLaunchGrading(t.id)}
+                    className="px-2.5 py-1.5 text-xs font-bold text-emerald-800 bg-emerald-50 border border-emerald-200 rounded-lg hover:bg-emerald-100 flex items-center gap-1 cursor-pointer disabled:opacity-50"
+                  >
+                    <ClipboardCheck className="w-3.5 h-3.5" />
+                    <span>Grade {t.name} →</span>
+                  </button>
+                ))}
+              </>
+            )}
+            {!showCombinedLedger && isAdmin && onLaunchGradingFromRegistrations && registrations.length > 0 && (
               <button
                 type="button"
                 disabled={launchingGrading}
-                onClick={handleLaunchGrading}
+                onClick={() => handleLaunchGrading()}
                 className="px-3 py-1.5 text-xs font-bold text-emerald-800 bg-emerald-50 border border-emerald-200 rounded-lg hover:bg-emerald-100 flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
               >
                 <ClipboardCheck className="w-3.5 h-3.5" />
@@ -964,11 +1492,11 @@ export const CourseRegistrationPanel: React.FC<CourseRegistrationPanelProps> = (
                     <p className="text-xs text-slate-500 tabular-nums mt-0.5">
                       {stu.class_name || 'Unassigned'} · {stu.courses_count} {subjectPlural.toLowerCase()} ·{' '}
                       <span className={stu.exceeds_max_units ? 'text-red-600 font-semibold' : 'text-slate-700 font-semibold'}>
-                        {stu.total_credit_units} {isFullSessionView ? 'Session Total Credit Units' : 'Credit Units'}
+                        {stu.total_credit_units} {showCombinedLedger ? 'Session Total Credit Units' : 'Credit Units'}
                         {stu.exceeds_max_units ? ` (Exceeds ${policy.max_credit_units_per_cycle} max/${cycleLabel.toLowerCase()})` : ''}
                       </span>
                     </p>
-                    {isFullSessionView && stu.term_breakdown && stu.term_breakdown.length > 0 && (
+                    {showCombinedLedger && stu.term_breakdown && stu.term_breakdown.length > 0 && (
                       <div className="flex flex-wrap items-center gap-1.5 mt-1">
                         {stu.term_breakdown.map((tb) => (
                           <span
@@ -992,7 +1520,7 @@ export const CourseRegistrationPanel: React.FC<CourseRegistrationPanelProps> = (
                     className="px-2.5 py-1.5 text-xs font-medium text-slate-700 bg-white border border-slate-200 rounded-lg hover:bg-slate-50 flex items-center gap-1.5 cursor-pointer"
                   >
                     <Printer className="w-3.5 h-3.5" />
-                    {isFullSessionView ? 'Session Course Form' : 'Course Form Slip'}
+                    {showCombinedLedger ? 'Session Course Form' : 'Course Form Slip'}
                   </button>
                 </div>
 
@@ -1000,7 +1528,7 @@ export const CourseRegistrationPanel: React.FC<CourseRegistrationPanelProps> = (
                   <table className="w-full text-left text-xs border-collapse">
                     <thead className="text-[11px] text-slate-500 border-b border-slate-100">
                       <tr>
-                        {isFullSessionView && <th className="py-1.5 pr-3">{cycleLabel}</th>}
+                        {showCombinedLedger && <th className="py-1.5 pr-3">{cycleLabel}</th>}
                         <th className="py-1.5 pr-3">Code</th>
                         <th className="py-1.5 pr-3">{subjectLabel}</th>
                         <th className="py-1.5 pr-3">Department</th>
@@ -1012,7 +1540,7 @@ export const CourseRegistrationPanel: React.FC<CourseRegistrationPanelProps> = (
                     <tbody className="divide-y divide-slate-50">
                       {stu.courses.map((c) => (
                         <tr key={c.id}>
-                          {isFullSessionView && (
+                          {showCombinedLedger && (
                             <td className="py-1.5 pr-3 text-slate-600 font-medium whitespace-nowrap">
                               {c.term_name || '—'}
                             </td>
@@ -1087,14 +1615,14 @@ export const CourseRegistrationPanel: React.FC<CourseRegistrationPanelProps> = (
                 </div>
                 <div className="text-right text-xs text-slate-600">
                   <p className="font-semibold text-slate-900">{selectedSession?.name || ''}</p>
-                  <p>{isFullSessionView ? `Full Session (All ${cycleLabel}s)` : selectedTerm?.name || ''}</p>
+                  <p>{showCombinedLedger ? `Full Session (All ${cycleLabel}s)` : selectedTerm?.name || ''}</p>
                 </div>
               </div>
 
               <table className="w-full text-left text-xs border border-slate-200 border-collapse">
                 <thead className="bg-slate-50 border-b border-slate-200 text-slate-600">
                   <tr>
-                    {isFullSessionView && <th className="px-3 py-2 border-r border-slate-200">{cycleLabel}</th>}
+                    {showCombinedLedger && <th className="px-3 py-2 border-r border-slate-200">{cycleLabel}</th>}
                     <th className="px-3 py-2 border-r border-slate-200">Code</th>
                     <th className="px-3 py-2 border-r border-slate-200">{subjectLabel} Title</th>
                     <th className="px-3 py-2 border-r border-slate-200 text-center">Units</th>
@@ -1104,7 +1632,7 @@ export const CourseRegistrationPanel: React.FC<CourseRegistrationPanelProps> = (
                 <tbody className="divide-y divide-slate-200">
                   {printingStudent.courses.map((c) => (
                     <tr key={c.id}>
-                      {isFullSessionView && (
+                      {showCombinedLedger && (
                         <td className="px-3 py-2 border-r border-slate-200 font-medium">{c.term_name || '—'}</td>
                       )}
                       <td className="px-3 py-2 border-r border-slate-200 font-mono font-semibold">{c.subject_code}</td>
@@ -1116,7 +1644,7 @@ export const CourseRegistrationPanel: React.FC<CourseRegistrationPanelProps> = (
                 </tbody>
                 <tfoot className="bg-slate-50 border-t border-slate-200 font-bold">
                   <tr>
-                    <td colSpan={isFullSessionView ? 3 : 2} className="px-3 py-2 text-right border-r border-slate-200">
+                    <td colSpan={showCombinedLedger ? 3 : 2} className="px-3 py-2 text-right border-r border-slate-200">
                       Total Registered Credit Units
                     </td>
                     <td className="px-3 py-2 text-center tabular-nums border-r border-slate-200">

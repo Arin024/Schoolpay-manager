@@ -1,7 +1,7 @@
 import React, { useMemo, useState } from 'react';
-import { Plus, Trash2, Upload, Sparkles, X, CheckCircle2, AlertCircle, BookOpen } from 'lucide-react';
+import { Plus, Trash2, Upload, Sparkles, X, CheckCircle2, AlertCircle, BookOpen, CalendarPlus } from 'lucide-react';
 import { api } from '../../services/api';
-import { ClassItem } from '../../types';
+import { AcademicSessionItem, ClassItem } from '../../types';
 import {
   CanonicalSemesterTag,
   formatSemesterTagLabel,
@@ -22,6 +22,7 @@ interface BulkCourseDraftRow {
 
 interface BulkCoursesModalProps {
   classes: ClassItem[];
+  sessions?: AcademicSessionItem[];
   isTertiary: boolean;
   subjectLabel: string;
   subjectPlural: string;
@@ -32,6 +33,8 @@ interface BulkCoursesModalProps {
   initialClassId?: string;
   initialSemesterTag?: CanonicalSemesterTag;
   initialDepartment?: string;
+  initialSessionId?: string;
+  onSessionsChanged?: () => Promise<void> | void;
   onClose: () => void;
   onSaved: (message: string) => void;
 }
@@ -486,6 +489,7 @@ export function parseCurriculumPaste(
 
 export const BulkCoursesModal: React.FC<BulkCoursesModalProps> = ({
   classes,
+  sessions = [],
   isTertiary,
   subjectLabel,
   subjectPlural,
@@ -496,6 +500,8 @@ export const BulkCoursesModal: React.FC<BulkCoursesModalProps> = ({
   initialClassId = '',
   initialSemesterTag,
   initialDepartment = '',
+  initialSessionId = '',
+  onSessionsChanged,
   onClose,
   onSaved,
 }) => {
@@ -507,6 +513,14 @@ export const BulkCoursesModal: React.FC<BulkCoursesModalProps> = ({
   const [defaultSemesterTag, setDefaultSemesterTag] = useState<CanonicalSemesterTag>(defaultSemInitial);
   const [defaultDepartment, setDefaultDepartment] = useState(initialDepartment);
   const [updateExisting, setUpdateExisting] = useState(true);
+
+  // Optional direct enrollment into any Academic Session (e.g. 2024/2025 1st & 2nd Semester)
+  const [enrollIntoSession, setEnrollIntoSession] = useState(false);
+  const defaultTargetSession = initialSessionId || sessions.find((s) => s.status === 'ACTIVE')?.id || sessions[0]?.id || '__NEW__';
+  const [targetSessionId, setTargetSessionId] = useState(defaultTargetSession);
+  const [customSessionName, setCustomSessionName] = useState('');
+  const [targetCycleMode, setTargetCycleMode] = useState<'AUTO_BOTH' | string>('AUTO_BOTH');
+
   const [rows, setRows] = useState<BulkCourseDraftRow[]>([
     makeEmptyRow(initialClassId, defaultSemInitial, initialDepartment),
     makeEmptyRow(initialClassId, defaultSemInitial, initialDepartment),
@@ -518,6 +532,11 @@ export const BulkCoursesModal: React.FC<BulkCoursesModalProps> = ({
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [rowErrors, setRowErrors] = useState<Array<{ row: number; message: string }>>([]);
+
+  const selectedTargetSession = useMemo(
+    () => (targetSessionId === '__NEW__' ? null : sessions.find((s) => s.id === targetSessionId) || null),
+    [sessions, targetSessionId]
+  );
 
   const semesterOptions = useMemo(
     () => getSemesterTagOptions(cycleLabel, isTertiary, cycleLabels),
@@ -639,7 +658,74 @@ export const BulkCoursesModal: React.FC<BulkCoursesModalProps> = ({
       if (res.errors && res.errors.length > 0) {
         setRowErrors(res.errors);
       }
-      onSaved(res.message);
+
+      let finalMessage = res.message;
+
+      // Optional: immediately register these saved courses for the configured Academic Session + Semester(s) + Department
+      if (enrollIntoSession && Array.isArray(res.subjects) && res.subjects.length > 0) {
+        try {
+          let resolvedSessionId = targetSessionId;
+          let resolvedTerms = selectedTargetSession?.terms || [];
+          let resolvedSessionName = selectedTargetSession?.name || '';
+
+          if (targetSessionId === '__NEW__') {
+            const cleanNewName = customSessionName.trim();
+            if (!cleanNewName) {
+              setError('Enter a session name (e.g. 2024/2025) or uncheck "Also register into Academic Session".');
+              setSubmitting(false);
+              return;
+            }
+            const createdSes = await api.createAcademicSession({
+              name: cleanNewName,
+              status: 'COMPLETED',
+              auto_create_terms: true,
+              reuse_existing: true,
+            });
+            resolvedSessionId = createdSes.session.id;
+            resolvedTerms = createdSes.session.terms || [];
+            resolvedSessionName = createdSes.session.name;
+            if (onSessionsChanged) await onSessionsChanged();
+          } else if (resolvedSessionId && resolvedTerms.length === 0) {
+            const ensured = await api.ensureAcademicSessionTerms(resolvedSessionId);
+            resolvedTerms = ensured.terms || [];
+            if (onSessionsChanged) await onSessionsChanged();
+          }
+
+          const termIdsToUse =
+            targetCycleMode === 'AUTO_BOTH'
+              ? resolvedTerms.map((t) => t.id)
+              : resolvedTerms.some((t) => t.id === targetCycleMode)
+              ? [targetCycleMode]
+              : resolvedTerms.map((t) => t.id);
+
+          if (resolvedSessionId && termIdsToUse.length > 0 && (defaultClassId || defaultDepartment.trim())) {
+            const regRes = await api.bulkRegisterStudentCourses({
+              academic_session_id: resolvedSessionId,
+              term_ids: termIdsToUse,
+              auto_match_semester_tag: targetCycleMode === 'AUTO_BOTH',
+              class_id: defaultClassId || null,
+              department: defaultDepartment.trim() || null,
+              subject_ids: res.subjects.map((s) => ({
+                subject_id: s.id,
+                credit_units: Number(s.credit_units ?? 3),
+              })),
+              registration_type:
+                selectedTargetSession && selectedTargetSession.status !== 'ACTIVE'
+                  ? 'HISTORICAL'
+                  : targetSessionId === '__NEW__'
+                  ? 'HISTORICAL'
+                  : 'REGULAR',
+            });
+            finalMessage = `${res.message} Also enrolled into ${resolvedSessionName}: ${regRes.message}`;
+          } else if (resolvedSessionId) {
+            finalMessage = `${res.message} Session "${resolvedSessionName}" is ready — select a ${classLabel} or Department in Course Registration to enroll learners.`;
+          }
+        } catch (regErr: any) {
+          finalMessage = `${res.message} (Note: catalog saved, but cohort enrollment skipped: ${regErr?.message || 'no matching students yet'}).`;
+        }
+      }
+
+      onSaved(finalMessage);
     } catch (err: any) {
       setError(err?.message || `Failed to bulk register ${subjectPlural.toLowerCase()}.`);
     } finally {
@@ -1041,6 +1127,69 @@ export const BulkCoursesModal: React.FC<BulkCoursesModalProps> = ({
                   Update credit units &amp; details if {subjectLabel.toLowerCase()} code/name already exists
                 </label>
               </div>
+            </div>
+          )}
+        </div>
+
+        {/* Optional: Also Register Uploaded Courses Directly Into an Academic Session */}
+        <div className="px-4 sm:px-5 py-3 bg-emerald-50/60 border-t border-emerald-200/80 space-y-2.5">
+          <label className="flex items-center gap-2 text-xs font-semibold text-emerald-950 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={enrollIntoSession}
+              onChange={(e) => setEnrollIntoSession(e.target.checked)}
+              className="rounded border-emerald-400 text-emerald-600 focus:ring-emerald-500"
+            />
+            <CalendarPlus className="w-3.5 h-3.5 text-emerald-700" />
+            <span>
+              Also enroll {defaultDepartment.trim() || selectedClassName || 'cohort'} into an Academic Session immediately (e.g. 2024/2025 · 1st &amp; 2nd {cycleLabel})
+            </span>
+          </label>
+          {enrollIntoSession && (
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 pt-0.5">
+              <select
+                value={targetSessionId}
+                onChange={(e) => {
+                  setTargetSessionId(e.target.value);
+                  setTargetCycleMode('AUTO_BOTH');
+                }}
+                aria-label="Target Academic Session"
+                className="text-xs px-2.5 py-1.5 bg-white border border-emerald-300 rounded-lg text-slate-800 font-medium"
+              >
+                {sessions.map((s) => (
+                  <option key={s.id} value={s.id}>
+                    Session: {s.name} ({s.status === 'ACTIVE' ? 'Active' : s.status === 'UPCOMING' ? 'Upcoming' : 'Historical'})
+                  </option>
+                ))}
+                <option value="__NEW__">+ Create New / Past Session (e.g. 2024/2025)...</option>
+              </select>
+
+              {targetSessionId === '__NEW__' && (
+                <input
+                  type="text"
+                  value={customSessionName}
+                  onChange={(e) => setCustomSessionName(e.target.value)}
+                  placeholder="Enter session e.g. 2024/2025"
+                  aria-label="Custom Session Name"
+                  className="text-xs px-2.5 py-1.5 bg-white border border-emerald-300 rounded-lg text-slate-800 font-medium"
+                />
+              )}
+
+              <select
+                value={targetCycleMode}
+                onChange={(e) => setTargetCycleMode(e.target.value)}
+                aria-label={`Target ${cycleLabel}s`}
+                className="text-xs px-2.5 py-1.5 bg-white border border-emerald-300 rounded-lg text-slate-800 font-medium"
+              >
+                <option value="AUTO_BOTH">
+                  {isTertiary ? '1st & 2nd Semester (Auto-match rows)' : `All ${cycleLabel}s (Auto-match rows)`}
+                </option>
+                {(selectedTargetSession?.terms || []).map((t) => (
+                  <option key={t.id} value={t.id}>
+                    Only {t.name}
+                  </option>
+                ))}
+              </select>
             </div>
           )}
         </div>

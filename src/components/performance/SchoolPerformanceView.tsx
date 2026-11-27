@@ -103,6 +103,7 @@ export const SchoolPerformanceView: React.FC<SchoolPerformanceViewProps> = ({ re
     classId?: string;
     semesterTag?: CanonicalSemesterTag;
     department?: string;
+    sessionId?: string;
   }>({});
   const [historicalBacklogOpen, setHistoricalBacklogOpen] = useState(false);
   const [broadsheetExamId, setBroadsheetExamId] = useState<string | null>(null);
@@ -2029,14 +2030,16 @@ export const SchoolPerformanceView: React.FC<SchoolPerformanceViewProps> = ({ re
           learnerLabel={isTertiary ? 'Student' : 'Learner'}
           learnerPlural={isTertiary ? 'Students' : 'Learners'}
           onOpenHistoricalBacklog={() => setHistoricalBacklogOpen(true)}
-          onOpenBulkCourses={(prefillClassId, prefillSemTag, prefillDept) => {
+          onOpenBulkCourses={(prefillClassId, prefillSemTag, prefillDept, prefillSessionId) => {
             setBulkCoursesPrefill({
               classId: prefillClassId || '',
               department: prefillDept || '',
               semesterTag: prefillSemTag !== undefined ? prefillSemTag : isTertiary ? '1ST' : '',
+              sessionId: prefillSessionId || '',
             });
             setBulkCoursesOpen(true);
           }}
+          onSessionsChanged={loadBootstrap}
           onOpenSessionReports={() => {
             setReportMode('SESSION');
             setSubTab('reports');
@@ -3940,6 +3943,7 @@ export const SchoolPerformanceView: React.FC<SchoolPerformanceViewProps> = ({ re
       {bulkCoursesOpen && (
         <BulkCoursesModal
           classes={classes}
+          sessions={sessions}
           availableDepartments={availableDepartmentNames}
           isTertiary={isTertiary}
           subjectLabel={instLabels.subject}
@@ -3950,6 +3954,8 @@ export const SchoolPerformanceView: React.FC<SchoolPerformanceViewProps> = ({ re
           initialClassId={bulkCoursesPrefill.classId || ''}
           initialDepartment={bulkCoursesPrefill.department || ''}
           initialSemesterTag={bulkCoursesPrefill.semesterTag}
+          initialSessionId={bulkCoursesPrefill.sessionId || ''}
+          onSessionsChanged={loadBootstrap}
           onClose={() => setBulkCoursesOpen(false)}
           onSaved={async (msg) => {
             setBulkCoursesOpen(false);
