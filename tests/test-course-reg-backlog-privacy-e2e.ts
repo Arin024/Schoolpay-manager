@@ -789,7 +789,7 @@ async function main() {
 
     // Open Bulk Add Courses modal and verify presets render
     await cdp.clickButtonByText('Bulk Add Courses');
-    await cdp.waitForText('University 100L Computing');
+    await cdp.waitForText('University 100L — 1st Semester');
     await cdp.clickButtonByText('Cancel');
 
     // Open Course Registration tab and verify student summaries render

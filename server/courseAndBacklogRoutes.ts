@@ -21,6 +21,7 @@ import {
   computeGpaGradeBand,
   resolveInstitutionProfile,
 } from '../src/utils/institutionMode.ts';
+import { normalizeSemesterTag } from '../src/utils/semesterTag.ts';
 
 export const courseAndBacklogRouter = wrapRouterAsync(express.Router());
 
@@ -99,10 +100,10 @@ courseAndBacklogRouter.post(
       const classByName = new Map(schoolClasses.map((c) => [String(c.name || '').trim().toLowerCase(), c]));
 
       const existingSubjects = await dbAll(
-        `SELECT id, name, code, class_id, credit_units, department, course_type, semester_tag, status
-         FROM subjects WHERE school_id = $1 AND (is_deleted = 0 OR is_deleted IS NULL)`,
-        `SELECT id, name, code, class_id, credit_units, department, course_type, semester_tag, status
-         FROM subjects WHERE school_id = ? AND (is_deleted = 0 OR is_deleted IS NULL)`,
+        `SELECT id, name, code, class_id, credit_units, department, course_type, semester_tag, status, is_deleted
+         FROM subjects WHERE school_id = $1`,
+        `SELECT id, name, code, class_id, credit_units, department, course_type, semester_tag, status, is_deleted
+         FROM subjects WHERE school_id = ?`,
         [schoolId]
       );
 
@@ -114,19 +115,22 @@ courseAndBacklogRouter.post(
 
       for (let i = 0; i < courses.length; i++) {
         const raw = courses[i] || {};
-        const cleanName = String(raw.name || raw.title || '').trim();
+        const cleanName = String(raw.name || raw.title || '').trim().slice(0, 200);
         if (!cleanName) {
           errors.push({ row: i + 1, message: 'Missing course/subject title.' });
           continue;
         }
 
-        const cleanCode = String(raw.code || '').trim().toUpperCase() || generateDefaultCode(cleanName);
+        const rawCode = String(raw.code || '').trim().toUpperCase().slice(0, 32);
+        const cleanCode = rawCode || generateDefaultCode(cleanName).slice(0, 32);
         const cleanUnits = sanitizeCreditUnits(raw.credit_units, 3);
-        const cleanDept = raw.department !== undefined && String(raw.department || '').trim() !== ''
-          ? String(raw.department).trim()
-          : null;
+        const cleanDept =
+          raw.department !== undefined && String(raw.department || '').trim() !== ''
+            ? String(raw.department).trim().slice(0, 120)
+            : null;
         const cleanType = sanitizeCourseType(raw.course_type);
-        const cleanSemTag = raw.semester_tag ? String(raw.semester_tag).trim() : null;
+        const canonicalSem = normalizeSemesterTag(raw.semester_tag ?? body.default_semester_tag ?? '');
+        const cleanSemTag: string | null = canonicalSem || null;
         const validStatus = String(raw.status || 'ACTIVE').toUpperCase() === 'INACTIVE' ? 'INACTIVE' : 'ACTIVE';
 
         // Resolve optional class/level by ID or Name
@@ -138,85 +142,170 @@ courseAndBacklogRouter.post(
           if (match) resolvedClassId = match.id;
         }
 
-        // Match existing subject within same tenant + same class scope by code or exact name
-        const existing = existingSubjects.find((s) => {
-          const sameScope = (s.class_id || null) === resolvedClassId;
-          if (!sameScope) return false;
+        // 1. Match active subject within same tenant + same class + same semester scope by code or name
+        let existing = existingSubjects.find((s) => {
+          if (Number(s.is_deleted || 0) === 1) return false;
+          const sameClass = (s.class_id || null) === resolvedClassId;
+          const sameSem = (normalizeSemesterTag(s.semester_tag) || null) === cleanSemTag;
+          if (!sameClass || !sameSem) return false;
           const sameCode = cleanCode && String(s.code || '').trim().toUpperCase() === cleanCode;
           const sameName = String(s.name || '').trim().toLowerCase() === cleanName.toLowerCase();
           return sameCode || sameName;
         });
 
-        if (existing) {
-          if (!update_existing) {
-            skippedCount += 1;
-            continue;
-          }
-          await dualWrite(
-            `UPDATE subjects
-             SET name = $1, code = $2, department = $3, class_id = $4, credit_units = $5,
-                 course_type = $6, semester_tag = $7, status = $8, updated_at = CURRENT_TIMESTAMP
-             WHERE id = $9 AND school_id = $10`,
-            `UPDATE subjects
-             SET name = ?, code = ?, department = ?, class_id = ?, credit_units = ?,
-                 course_type = ?, semester_tag = ?, status = ?, updated_at = CURRENT_TIMESTAMP
-             WHERE id = ? AND school_id = ?`,
-            [
-              cleanName,
-              cleanCode,
-              cleanDept ?? existing.department ?? null,
-              resolvedClassId,
-              cleanUnits,
-              cleanType,
-              cleanSemTag ?? existing.semester_tag ?? null,
-              validStatus,
-              existing.id,
-              schoolId,
-            ]
-          );
-          existing.name = cleanName;
-          existing.code = cleanCode;
-          existing.credit_units = cleanUnits;
-          updatedCount += 1;
-          savedSubjects.push({ ...existing, credit_units: cleanUnits, course_type: cleanType });
-        } else {
-          const id = newId('sub');
-          await dualWrite(
-            `INSERT INTO subjects (
-              id, school_id, name, code, department, class_id, credit_units, course_type, semester_tag, status, is_deleted, created_at, updated_at
-            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,0,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)`,
-            `INSERT INTO subjects (
-              id, school_id, name, code, department, class_id, credit_units, course_type, semester_tag, status, is_deleted, created_at, updated_at
-            ) VALUES (?,?,?,?,?,?,?,?,?,?,0,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)`,
-            [
-              id,
-              schoolId,
-              cleanName,
-              cleanCode,
-              cleanDept,
-              resolvedClassId,
-              cleanUnits,
-              cleanType,
-              cleanSemTag,
-              validStatus,
-            ]
-          );
-          const created = {
-            id,
-            school_id: schoolId,
-            name: cleanName,
-            code: cleanCode,
-            department: cleanDept,
-            class_id: resolvedClassId,
-            credit_units: cleanUnits,
-            course_type: cleanType,
-            semester_tag: cleanSemTag,
-            status: validStatus,
-          };
-          existingSubjects.push(created);
-          savedSubjects.push(created);
-          createdCount += 1;
+        // 2. If not active in this scope, check for a soft-deleted subject with the same name/code so we cleanly reactivate it
+        if (!existing) {
+          existing = existingSubjects.find((s) => {
+            if (Number(s.is_deleted || 0) !== 1) return false;
+            const sameName = String(s.name || '').trim().toLowerCase() === cleanName.toLowerCase();
+            const sameCode =
+              cleanCode &&
+              String(s.code || '').trim().toUpperCase() === cleanCode &&
+              (s.class_id || null) === resolvedClassId;
+            return sameName || sameCode;
+          });
         }
+
+        try {
+          if (existing) {
+            const wasDeleted = Number(existing.is_deleted || 0) === 1;
+            if (!wasDeleted && !update_existing) {
+              skippedCount += 1;
+              continue;
+            }
+            const nextSemTag = cleanSemTag !== null ? cleanSemTag : (existing.semester_tag || null);
+            await dualWrite(
+              `UPDATE subjects
+               SET name = $1, code = $2, department = $3, class_id = $4, credit_units = $5,
+                   course_type = $6, semester_tag = $7, status = $8, is_deleted = 0, updated_at = CURRENT_TIMESTAMP
+               WHERE id = $9 AND school_id = $10`,
+              `UPDATE subjects
+               SET name = ?, code = ?, department = ?, class_id = ?, credit_units = ?,
+                   course_type = ?, semester_tag = ?, status = ?, is_deleted = 0, updated_at = CURRENT_TIMESTAMP
+               WHERE id = ? AND school_id = ?`,
+              [
+                cleanName,
+                cleanCode,
+                cleanDept ?? existing.department ?? null,
+                resolvedClassId,
+                cleanUnits,
+                cleanType,
+                nextSemTag,
+                validStatus,
+                existing.id,
+                schoolId,
+              ]
+            );
+            existing.name = cleanName;
+            existing.code = cleanCode;
+            existing.class_id = resolvedClassId;
+            existing.credit_units = cleanUnits;
+            existing.course_type = cleanType;
+            existing.semester_tag = nextSemTag;
+            existing.status = validStatus;
+            existing.is_deleted = 0;
+            if (wasDeleted) createdCount += 1;
+            else updatedCount += 1;
+            savedSubjects.push({ ...existing });
+          } else {
+            const id = newId('sub');
+            await dualWrite(
+              `INSERT INTO subjects (
+                id, school_id, name, code, department, class_id, credit_units, course_type, semester_tag, status, is_deleted, created_at, updated_at
+              ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,0,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)`,
+              `INSERT INTO subjects (
+                id, school_id, name, code, department, class_id, credit_units, course_type, semester_tag, status, is_deleted, created_at, updated_at
+              ) VALUES (?,?,?,?,?,?,?,?,?,?,0,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)`,
+              [
+                id,
+                schoolId,
+                cleanName,
+                cleanCode,
+                cleanDept,
+                resolvedClassId,
+                cleanUnits,
+                cleanType,
+                cleanSemTag,
+                validStatus,
+              ]
+            );
+            const created = {
+              id,
+              school_id: schoolId,
+              name: cleanName,
+              code: cleanCode,
+              department: cleanDept,
+              class_id: resolvedClassId,
+              credit_units: cleanUnits,
+              course_type: cleanType,
+              semester_tag: cleanSemTag,
+              status: validStatus,
+              is_deleted: 0,
+            };
+            existingSubjects.push(created);
+            savedSubjects.push(created);
+            createdCount += 1;
+          }
+        } catch (rowErr: any) {
+          const msg = String(rowErr?.message || '');
+          const isDup = rowErr?.code === '23505' || /unique|duplicate/i.test(msg);
+          if (isDup) {
+            // Fallback: find any existing row with the same name in this school and update if allowed
+            const fallbackRow = existingSubjects.find(
+              (s) => String(s.name || '').trim().toLowerCase() === cleanName.toLowerCase()
+            );
+            if (fallbackRow && update_existing) {
+              try {
+                await dualWrite(
+                  `UPDATE subjects
+                   SET code = $1, department = $2, class_id = $3, credit_units = $4,
+                       course_type = $5, semester_tag = $6, status = $7, is_deleted = 0, updated_at = CURRENT_TIMESTAMP
+                   WHERE id = $8 AND school_id = $9`,
+                  `UPDATE subjects
+                   SET code = ?, department = ?, class_id = ?, credit_units = ?,
+                       course_type = ?, semester_tag = ?, status = ?, is_deleted = 0, updated_at = CURRENT_TIMESTAMP
+                   WHERE id = ? AND school_id = ?`,
+                  [
+                    cleanCode,
+                    cleanDept ?? fallbackRow.department ?? null,
+                    resolvedClassId ?? fallbackRow.class_id ?? null,
+                    cleanUnits,
+                    cleanType,
+                    cleanSemTag ?? fallbackRow.semester_tag ?? null,
+                    validStatus,
+                    fallbackRow.id,
+                    schoolId,
+                  ]
+                );
+                fallbackRow.code = cleanCode;
+                fallbackRow.credit_units = cleanUnits;
+                fallbackRow.semester_tag = cleanSemTag ?? fallbackRow.semester_tag ?? null;
+                fallbackRow.is_deleted = 0;
+                updatedCount += 1;
+                savedSubjects.push({ ...fallbackRow });
+                continue;
+              } catch {}
+            }
+            errors.push({
+              row: i + 1,
+              message: `"${cleanName}" (${cleanCode}) already exists in this scope.`,
+            });
+          } else {
+            console.error(`[Bulk Subjects Row ${i + 1} Error]`, rowErr);
+            errors.push({
+              row: i + 1,
+              message: `Could not save "${cleanName}": check title/code formatting and try again.`,
+            });
+          }
+        }
+      }
+
+      if (createdCount === 0 && updatedCount === 0 && skippedCount === 0 && errors.length > 0) {
+        return res.status(400).json({
+          error: 'BULK_SUBJECTS_VALIDATION_FAILED',
+          message: errors[0].message,
+          errors,
+        });
       }
 
       logAudit({
@@ -230,7 +319,7 @@ courseAndBacklogRouter.post(
 
       return res.status(201).json({
         success: true,
-        message: `Processed ${createdCount + updatedCount} course(s)/subject(s) (${createdCount} created, ${updatedCount} updated${skippedCount ? `, ${skippedCount} skipped` : ''}).`,
+        message: `Processed ${createdCount + updatedCount} course(s)/subject(s) (${createdCount} created, ${updatedCount} updated${skippedCount ? `, ${skippedCount} skipped` : ''}${errors.length ? `, ${errors.length} issue(s)` : ''}).`,
         createdCount,
         updatedCount,
         skippedCount,
@@ -351,6 +440,7 @@ courseAndBacklogRouter.get(
              sub.name as subject_name, sub.code as subject_code,
              COALESCE(r.credit_units_snapshot, sub.credit_units, 3) as credit_units,
              sub.course_type,
+             sub.semester_tag,
              ses.name as session_name,
              t.name as term_name
       FROM student_course_registrations r
@@ -368,6 +458,7 @@ courseAndBacklogRouter.get(
              sub.name as subject_name, sub.code as subject_code,
              COALESCE(r.credit_units_snapshot, sub.credit_units, 3) as credit_units,
              sub.course_type,
+             sub.semester_tag,
              ses.name as session_name,
              t.name as term_name
       FROM student_course_registrations r
@@ -406,8 +497,8 @@ courseAndBacklogRouter.get(
       params.push(subject_id);
     }
 
-    pgSql += ` ORDER BY s.full_name ASC, sub.code ASC`;
-    sqSql += ` ORDER BY s.full_name ASC, sub.code ASC`;
+    pgSql += ` ORDER BY s.full_name ASC, t.name ASC, sub.code ASC`;
+    sqSql += ` ORDER BY s.full_name ASC, t.name ASC, sub.code ASC`;
 
     const registrations = await dbAll(pgSql, sqSql, params);
 
@@ -415,7 +506,7 @@ courseAndBacklogRouter.get(
     const maxUnits = Number(acadSettings.max_credit_units_per_cycle ?? 24);
     const minUnits = Number(acadSettings.min_credit_units_per_cycle ?? 12);
 
-    // Aggregate per-student load summary
+    // Aggregate per-student load summary (including per-semester/term breakdown for full-session views)
     const byStudent = new Map<string, {
       student_id: string;
       student_name: string;
@@ -424,6 +515,13 @@ courseAndBacklogRouter.get(
       courses_count: number;
       total_credit_units: number;
       exceeds_max_units: boolean;
+      term_breakdown: Array<{
+        term_id: string;
+        term_name: string;
+        courses_count: number;
+        total_credit_units: number;
+        exceeds_max_units: boolean;
+      }>;
       courses: any[];
     }>();
 
@@ -437,6 +535,7 @@ courseAndBacklogRouter.get(
           courses_count: 0,
           total_credit_units: 0,
           exceeds_max_units: false,
+          term_breakdown: [],
           courses: [],
         });
       }
@@ -444,8 +543,22 @@ courseAndBacklogRouter.get(
       const units = Number(r.credit_units ?? 3);
       entry.courses_count += 1;
       entry.total_credit_units += units;
-      entry.exceeds_max_units = entry.total_credit_units > maxUnits;
       entry.courses.push(r);
+
+      const tId = r.term_id || 'unknown';
+      const tName = r.term_name || 'Cycle';
+      let tb = entry.term_breakdown.find((x) => x.term_id === tId);
+      if (!tb) {
+        tb = { term_id: tId, term_name: tName, courses_count: 0, total_credit_units: 0, exceeds_max_units: false };
+        entry.term_breakdown.push(tb);
+      }
+      tb.courses_count += 1;
+      tb.total_credit_units += units;
+      tb.exceeds_max_units = tb.total_credit_units > maxUnits;
+      // In full-session combined view (no term_id filter), flag overload only if any single semester exceeds maxUnits
+      entry.exceeds_max_units = term_id
+        ? entry.total_credit_units > maxUnits
+        : entry.term_breakdown.some((x) => x.exceeds_max_units);
     }
 
     return res.json({
@@ -991,7 +1104,8 @@ courseAndBacklogRouter.post(
           classesCreated += 1;
         }
 
-        // 4. Resolve or create course/subject with exact modifiable credit_units
+        // 4. Resolve or create course/subject with exact modifiable credit_units & semester tag
+        const inferredSemTag: string | null = normalizeSemesterTag(row.term_name) || null;
         let sub = subjects.find(
           (s) =>
             ((row.subject_code && String(s.code || '').trim().toUpperCase() === row.subject_code) ||
@@ -1000,16 +1114,18 @@ courseAndBacklogRouter.post(
         );
         if (!sub) {
           const subId = newId('sub');
+          const safeSubName = row.subject_name.slice(0, 200);
+          const safeSubCode = row.subject_code.slice(0, 32);
           await dualWrite(
             `INSERT INTO subjects (
-               id, school_id, name, code, class_id, credit_units, course_type, status, is_deleted, created_at, updated_at
-             ) VALUES ($1,$2,$3,$4,$5,$6,'CORE','ACTIVE',0,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)`,
+               id, school_id, name, code, class_id, credit_units, course_type, semester_tag, status, is_deleted, created_at, updated_at
+             ) VALUES ($1,$2,$3,$4,$5,$6,'CORE',$7,'ACTIVE',0,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)`,
             `INSERT INTO subjects (
-               id, school_id, name, code, class_id, credit_units, course_type, status, is_deleted, created_at, updated_at
-             ) VALUES (?,?,?,?,?,?,'CORE','ACTIVE',0,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)`,
-            [subId, schoolId, row.subject_name, row.subject_code, cls.id, row.credit_units]
+               id, school_id, name, code, class_id, credit_units, course_type, semester_tag, status, is_deleted, created_at, updated_at
+             ) VALUES (?,?,?,?,?,?,'CORE',?,'ACTIVE',0,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)`,
+            [subId, schoolId, safeSubName, safeSubCode, cls.id, row.credit_units, inferredSemTag]
           );
-          sub = { id: subId, name: row.subject_name, code: row.subject_code, class_id: cls.id, credit_units: row.credit_units };
+          sub = { id: subId, name: safeSubName, code: safeSubCode, class_id: cls.id, credit_units: row.credit_units, semester_tag: inferredSemTag };
           subjects.push(sub);
           subjectsCreated += 1;
         }

@@ -3447,6 +3447,7 @@ export const api = {
       status?: string;
     }>;
     update_existing?: boolean;
+    default_semester_tag?: string | null;
   }): Promise<{
     success: boolean;
     message: string;
@@ -3492,6 +3493,13 @@ export const api = {
       courses_count: number;
       total_credit_units: number;
       exceeds_max_units: boolean;
+      term_breakdown?: Array<{
+        term_id: string;
+        term_name: string;
+        courses_count: number;
+        total_credit_units: number;
+        exceeds_max_units: boolean;
+      }>;
       courses: CourseRegistrationItem[];
     }>;
     policy: { min_credit_units_per_cycle: number; max_credit_units_per_cycle: number };

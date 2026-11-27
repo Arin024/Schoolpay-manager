@@ -31,6 +31,7 @@ import {
   getAcademicClassStanding,
   resolveInstitutionProfile,
 } from '../src/utils/institutionMode.ts';
+import { normalizeSemesterTag } from '../src/utils/semesterTag.ts';
 
 export const performanceRouter = Router();
 
@@ -633,33 +634,35 @@ performanceRouter.post(
     if (!name || typeof name !== 'string' || !name.trim()) {
       return res.status(400).json({ error: 'MISSING_NAME', message: 'Subject/Course name is required.' });
     }
-    const cleanName = name.trim();
+    const cleanName = name.trim().slice(0, 200);
     const cleanClassId = class_id && String(class_id).trim() ? String(class_id).trim() : null;
     const cleanCode = code && String(code).trim()
-      ? String(code).trim().toUpperCase().slice(0, 24)
+      ? String(code).trim().toUpperCase().slice(0, 32)
       : cleanName.replace(/[^A-Za-z0-9]/g, '').slice(0, 6).toUpperCase() || 'SUB';
+    const cleanSemesterTag: string | null = normalizeSemesterTag(semester_tag) || null;
 
     const dup = await dbGet(
       `SELECT id FROM subjects
        WHERE school_id = $1
          AND COALESCE(class_id, '') = COALESCE($2, '')
-         AND (LOWER(name) = LOWER($3) OR (code IS NOT NULL AND LOWER(code) = LOWER($4)))
+         AND COALESCE(semester_tag, '') = COALESCE($3, '')
+         AND (LOWER(name) = LOWER($4) OR (code IS NOT NULL AND LOWER(code) = LOWER($5)))
          AND (is_deleted = 0 OR is_deleted IS NULL)`,
       `SELECT id FROM subjects
        WHERE school_id = ?
          AND COALESCE(class_id, '') = COALESCE(?, '')
+         AND COALESCE(semester_tag, '') = COALESCE(?, '')
          AND (LOWER(name) = LOWER(?) OR (code IS NOT NULL AND LOWER(code) = LOWER(?)))
          AND (is_deleted = 0 OR is_deleted IS NULL)`,
-      [schoolId, cleanClassId || '', cleanName, cleanCode]
+      [schoolId, cleanClassId || '', cleanSemesterTag || '', cleanName, cleanCode]
     );
     if (dup) {
       return res.status(409).json({
         error: 'DUPLICATE_SUBJECT',
-        message: `"${cleanName}" (${cleanCode}) already exists for this class/level scope.`,
+        message: `"${cleanName}" (${cleanCode}) already exists for this level and semester/term scope.`,
       });
     }
 
-    const id = newId('sub');
     const validStatus = status === 'INACTIVE' ? 'INACTIVE' : 'ACTIVE';
     const hasExplicitUnits = credit_units !== undefined && credit_units !== null && String(credit_units).trim() !== '';
     const parsedUnits = hasExplicitUnits ? Number(credit_units) : 3;
@@ -672,17 +675,38 @@ performanceRouter.post(
     )
       ? String(course_type || 'CORE').toUpperCase()
       : 'CORE';
-    const cleanSemesterTag = semester_tag && String(semester_tag).trim() ? String(semester_tag).trim().slice(0, 64) : null;
-    const cleanDepartment = department && String(department).trim() ? String(department).trim() : null;
+    const cleanDepartment = department && String(department).trim() ? String(department).trim().slice(0, 120) : null;
 
-    await execWrite(
-      `INSERT INTO subjects (id, school_id, name, code, department, class_id, credit_units, course_type, semester_tag, status, is_deleted, created_at, updated_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
-      `INSERT INTO subjects (id, school_id, name, code, department, class_id, credit_units, course_type, semester_tag, status, is_deleted, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-       ON CONFLICT(id) DO UPDATE SET name = excluded.name, credit_units = excluded.credit_units, course_type = excluded.course_type, semester_tag = excluded.semester_tag`,
-      [id, schoolId, cleanName, cleanCode, cleanDepartment, cleanClassId, cleanUnits, validCourseType, cleanSemesterTag, validStatus]
+    // Cleanly reactivate soft-deleted matching subject instead of failing on legacy unique constraints
+    const deletedMatch = await dbGet(
+      `SELECT id FROM subjects WHERE school_id = $1 AND LOWER(name) = LOWER($2) AND is_deleted = 1 LIMIT 1`,
+      `SELECT id FROM subjects WHERE school_id = ? AND LOWER(name) = LOWER(?) AND is_deleted = 1 LIMIT 1`,
+      [schoolId, cleanName]
     );
+
+    const id = deletedMatch ? deletedMatch.id : newId('sub');
+    if (deletedMatch) {
+      await execWrite(
+        `UPDATE subjects
+         SET name = $1, code = $2, department = $3, class_id = $4, credit_units = $5,
+             course_type = $6, semester_tag = $7, status = $8, is_deleted = 0, updated_at = CURRENT_TIMESTAMP
+         WHERE id = $9 AND school_id = $10`,
+        `UPDATE subjects
+         SET name = ?, code = ?, department = ?, class_id = ?, credit_units = ?,
+             course_type = ?, semester_tag = ?, status = ?, is_deleted = 0, updated_at = CURRENT_TIMESTAMP
+         WHERE id = ? AND school_id = ?`,
+        [cleanName, cleanCode, cleanDepartment, cleanClassId, cleanUnits, validCourseType, cleanSemesterTag, validStatus, id, schoolId]
+      );
+    } else {
+      await execWrite(
+        `INSERT INTO subjects (id, school_id, name, code, department, class_id, credit_units, course_type, semester_tag, status, is_deleted, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+        `INSERT INTO subjects (id, school_id, name, code, department, class_id, credit_units, course_type, semester_tag, status, is_deleted, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+         ON CONFLICT(id) DO UPDATE SET name = excluded.name, credit_units = excluded.credit_units, course_type = excluded.course_type, semester_tag = excluded.semester_tag`,
+        [id, schoolId, cleanName, cleanCode, cleanDepartment, cleanClassId, cleanUnits, validCourseType, cleanSemesterTag, validStatus]
+      );
+    }
 
     logAudit({
       actorId: req.user!.id,
@@ -691,7 +715,7 @@ performanceRouter.post(
       action: 'CREATE_SUBJECT',
       entity: 'SUBJECT',
       entityId: id,
-      metadata: { name: cleanName, code: cleanCode, credit_units: cleanUnits, course_type: validCourseType, class_id: cleanClassId },
+      metadata: { name: cleanName, code: cleanCode, credit_units: cleanUnits, course_type: validCourseType, class_id: cleanClassId, semester_tag: cleanSemesterTag },
     });
 
     const subject = await dbGet(
@@ -723,17 +747,17 @@ performanceRouter.put(
       return res.status(404).json({ error: 'NOT_FOUND', message: 'Subject not found.' });
     }
 
-    const nextName = name !== undefined && String(name).trim() ? String(name).trim() : existing.name;
-    const nextCode = code !== undefined && String(code).trim() ? String(code).trim().toUpperCase().slice(0, 24) : existing.code;
+    const nextName = name !== undefined && String(name).trim() ? String(name).trim().slice(0, 200) : existing.name;
+    const nextCode = code !== undefined && String(code).trim() ? String(code).trim().toUpperCase().slice(0, 32) : existing.code;
     const nextDepartment = Object.prototype.hasOwnProperty.call(body, 'department')
-      ? (department && String(department).trim() ? String(department).trim() : null)
+      ? (department && String(department).trim() ? String(department).trim().slice(0, 120) : null)
       : existing.department;
     const nextClassId = Object.prototype.hasOwnProperty.call(body, 'class_id')
       ? (class_id && String(class_id).trim() ? String(class_id).trim() : null)
       : existing.class_id;
-    const nextSemesterTag = Object.prototype.hasOwnProperty.call(body, 'semester_tag')
-      ? (semester_tag && String(semester_tag).trim() ? String(semester_tag).trim().slice(0, 64) : null)
-      : existing.semester_tag || null;
+    const nextSemesterTag: string | null = Object.prototype.hasOwnProperty.call(body, 'semester_tag')
+      ? (normalizeSemesterTag(semester_tag) || null)
+      : (existing.semester_tag || null);
     const nextCourseType = course_type !== undefined && ['CORE', 'ELECTIVE', 'GENERAL', 'CARRYOVER', 'PRACTICAL'].includes(String(course_type).toUpperCase())
       ? String(course_type).toUpperCase()
       : (existing.course_type || 'CORE');

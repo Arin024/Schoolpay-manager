@@ -43,6 +43,13 @@ import { CourseRegistrationPanel } from './CourseRegistrationPanel.js';
 import { HistoricalBacklogImportModal } from './HistoricalBacklogImportModal.js';
 import { ExamBroadsheetModal } from './ExamBroadsheetModal.js';
 import { resolveInstitutionProfile } from '../../utils/institutionMode.js';
+import {
+  CanonicalSemesterTag,
+  formatSemesterTagLabel,
+  getSemesterTagOptions,
+  normalizeSemesterTag,
+  termMatchesSemesterTag,
+} from '../../utils/semesterTag.js';
 
 interface SchoolPerformanceViewProps {
   readOnly?: boolean;
@@ -82,9 +89,16 @@ export const SchoolPerformanceView: React.FC<SchoolPerformanceViewProps> = ({ re
   // Subjects / Courses modal & Bulk / Backlog / Broadsheet modals
   const [subjectModalOpen, setSubjectModalOpen] = useState(false);
   const [bulkCoursesOpen, setBulkCoursesOpen] = useState(false);
+  const [bulkCoursesPrefill, setBulkCoursesPrefill] = useState<{
+    classId?: string;
+    semesterTag?: CanonicalSemesterTag;
+  }>({});
   const [historicalBacklogOpen, setHistoricalBacklogOpen] = useState(false);
   const [broadsheetExamId, setBroadsheetExamId] = useState<string | null>(null);
   const [inlineUnitSavingId, setInlineUnitSavingId] = useState<string | null>(null);
+  const [inlineSemSavingId, setInlineSemSavingId] = useState<string | null>(null);
+  const [subjectFilterClassId, setSubjectFilterClassId] = useState('');
+  const [subjectFilterSemester, setSubjectFilterSemester] = useState<'ALL' | '' | '1ST' | '2ND' | '3RD'>('ALL');
   const [editingSubject, setEditingSubject] = useState<SubjectItem | null>(null);
   const [subjectForm, setSubjectForm] = useState({
     name: '',
@@ -93,6 +107,7 @@ export const SchoolPerformanceView: React.FC<SchoolPerformanceViewProps> = ({ re
     class_id: '',
     credit_units: '3',
     course_type: 'CORE' as 'CORE' | 'ELECTIVE' | 'GENERAL',
+    semester_tag: '' as CanonicalSemesterTag,
     status: 'ACTIVE',
   });
   const [subjectSaving, setSubjectSaving] = useState(false);
@@ -353,6 +368,7 @@ export const SchoolPerformanceView: React.FC<SchoolPerformanceViewProps> = ({ re
         class_id: subjectForm.class_id || null,
         credit_units: safeUnits,
         course_type: subjectForm.course_type,
+        semester_tag: subjectForm.semester_tag || null,
         status: subjectForm.status as 'ACTIVE' | 'INACTIVE',
       };
       if (editingSubject) {
@@ -387,6 +403,25 @@ export const SchoolPerformanceView: React.FC<SchoolPerformanceViewProps> = ({ re
       showMsg('err', err?.message || 'Failed to update credit units');
     } finally {
       setInlineUnitSavingId(null);
+    }
+  };
+
+  const handleInlineSemesterTagChange = async (sub: SubjectItem, nextTag: CanonicalSemesterTag) => {
+    if (normalizeSemesterTag(sub.semester_tag) === nextTag) return;
+    setInlineSemSavingId(sub.id);
+    try {
+      const res = await api.updateSubject(sub.id, { semester_tag: nextTag || null });
+      setSubjects((prev) =>
+        prev.map((item) => (item.id === sub.id ? { ...item, semester_tag: res.subject?.semester_tag ?? (nextTag || null) } : item))
+      );
+      showMsg(
+        'ok',
+        `Assigned ${sub.code || sub.name} to ${formatSemesterTagLabel(nextTag, instLabels.cycle, instProfile.cycleLabels)}.`
+      );
+    } catch (err: any) {
+      showMsg('err', err?.message || `Failed to update ${instLabels.cycle.toLowerCase()} assignment`);
+    } finally {
+      setInlineSemSavingId(null);
     }
   };
 
@@ -1247,7 +1282,18 @@ export const SchoolPerformanceView: React.FC<SchoolPerformanceViewProps> = ({ re
                 </button>
                 <button
                   type="button"
-                  onClick={() => setBulkCoursesOpen(true)}
+                  onClick={() => {
+                    setBulkCoursesPrefill({
+                      classId: subjectFilterClassId || '',
+                      semesterTag:
+                        subjectFilterSemester !== 'ALL'
+                          ? subjectFilterSemester
+                          : isTertiary
+                          ? '1ST'
+                          : '',
+                    });
+                    setBulkCoursesOpen(true);
+                  }}
                   className="px-3.5 py-2 bg-slate-900 hover:bg-slate-800 text-white rounded-xl text-xs font-bold inline-flex items-center gap-1.5 cursor-pointer"
                 >
                   <Upload className="w-3.5 h-3.5" />
@@ -1261,9 +1307,15 @@ export const SchoolPerformanceView: React.FC<SchoolPerformanceViewProps> = ({ re
                       name: '',
                       code: '',
                       department: '',
-                      class_id: '',
+                      class_id: subjectFilterClassId || '',
                       credit_units: '3',
                       course_type: 'CORE',
+                      semester_tag:
+                        subjectFilterSemester !== 'ALL'
+                          ? subjectFilterSemester
+                          : isTertiary
+                          ? '1ST'
+                          : '',
                       status: 'ACTIVE',
                     });
                     setSubjectModalOpen(true);
@@ -1277,140 +1329,238 @@ export const SchoolPerformanceView: React.FC<SchoolPerformanceViewProps> = ({ re
             )}
           </div>
 
-          {subjects.length === 0 ? (
-            <div className="py-10 text-center space-y-2">
-              <p className="text-xs text-slate-400">
-                No {instLabels.subjectPlural.toLowerCase()} configured yet.
-              </p>
-              {!readOnly && (
-                <button
-                  type="button"
-                  onClick={() => setBulkCoursesOpen(true)}
-                  className="px-4 py-2 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-200 rounded-xl text-xs font-semibold inline-flex items-center gap-1.5 cursor-pointer"
-                >
-                  <Upload className="w-3.5 h-3.5" />
-                  <span>Load Preset or Bulk Add {instLabels.subjectPlural}</span>
-                </button>
-              )}
+          {/* Level & Semester Catalog Filters */}
+          {subjects.length > 0 && (
+            <div className="flex flex-wrap items-center gap-2 bg-slate-50 border border-slate-200 rounded-xl p-2.5 text-xs">
+              <select
+                value={subjectFilterClassId}
+                onChange={(e) => setSubjectFilterClassId(e.target.value)}
+                aria-label={`Filter by ${instLabels.classLabel}`}
+                className="px-2.5 py-1.5 bg-white border border-slate-200 rounded-lg text-slate-700 font-medium"
+              >
+                <option value="">All {instLabels.classPlural}</option>
+                {classes.map((c) => (
+                  <option key={c.id} value={c.id}>
+                    {c.name}
+                  </option>
+                ))}
+              </select>
+
+              <div className="flex flex-wrap items-center gap-1">
+                {(
+                  [
+                    { key: 'ALL', label: `All ${instLabels.cycle}s` },
+                    ...getSemesterTagOptions(instLabels.cycle, isTertiary, instProfile.cycleLabels).map((opt) => ({
+                      key: opt.value,
+                      label: opt.value === '' ? 'Full Session' : opt.label,
+                    })),
+                  ] as Array<{ key: 'ALL' | '' | '1ST' | '2ND' | '3RD'; label: string }>
+                ).map((item) => (
+                  <button
+                    key={item.key || 'FULL_SES'}
+                    type="button"
+                    onClick={() => setSubjectFilterSemester(item.key)}
+                    className={`px-2.5 py-1 rounded-lg border font-semibold transition cursor-pointer ${
+                      subjectFilterSemester === item.key
+                        ? 'bg-emerald-600 text-white border-emerald-600'
+                        : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-100'
+                    }`}
+                  >
+                    {item.label}
+                  </button>
+                ))}
+              </div>
             </div>
-          ) : (
-            <div className="overflow-x-auto">
-              <table className="w-full text-left text-xs">
-                <thead>
-                  <tr className="border-b border-slate-200 text-slate-500 bg-slate-50/70">
-                    <th className="py-2.5 px-3">Code</th>
-                    <th className="py-2.5 px-3">{instLabels.subject} Title</th>
-                    <th className="py-2.5 px-3">Credit Units</th>
-                    <th className="py-2.5 px-3">Department</th>
-                    <th className="py-2.5 px-3">Target {instLabels.classLabel}</th>
-                    <th className="py-2.5 px-3">Status</th>
-                    {!readOnly && <th className="py-2.5 px-3 text-right">Actions</th>}
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-100">
-                  {subjects.map((sub) => {
-                    const currentUnits = Number(sub.credit_units ?? 3);
-                    const isSavingUnits = inlineUnitSavingId === sub.id;
-                    return (
-                      <tr key={sub.id} className="hover:bg-slate-50/60">
-                        <td className="py-2.5 px-3 font-mono text-slate-700 font-semibold">{sub.code}</td>
-                        <td className="py-2.5 px-3 font-semibold text-slate-900">
-                          <span>{sub.name}</span>
-                          {sub.course_type && sub.course_type !== 'CORE' && (
-                            <span className="ml-2 text-[10px] font-medium uppercase tracking-wide text-slate-500">
-                              · {sub.course_type}
-                            </span>
-                          )}
-                        </td>
-                        <td className="py-2.5 px-3">
-                          {readOnly ? (
-                            <span className="font-bold tabular-nums text-emerald-700">{currentUnits}u</span>
-                          ) : (
-                            <div className="inline-flex items-center gap-1">
-                              {[1, 2, 3, 4].map((u) => (
-                                <button
-                                  key={u}
-                                  type="button"
+          )}
+
+          {(() => {
+            const visibleSubjects = subjects.filter((sub) => {
+              if (subjectFilterClassId && sub.class_id !== subjectFilterClassId) return false;
+              if (subjectFilterSemester !== 'ALL') {
+                const subTag = normalizeSemesterTag(sub.semester_tag);
+                if (subTag !== subjectFilterSemester) return false;
+              }
+              return true;
+            });
+            const semOpts = getSemesterTagOptions(instLabels.cycle, isTertiary, instProfile.cycleLabels);
+
+            if (subjects.length === 0) {
+              return (
+                <div className="py-10 text-center space-y-2">
+                  <p className="text-xs text-slate-400">
+                    No {instLabels.subjectPlural.toLowerCase()} configured yet.
+                  </p>
+                  {!readOnly && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setBulkCoursesPrefill({ classId: '', semesterTag: isTertiary ? '1ST' : '' });
+                        setBulkCoursesOpen(true);
+                      }}
+                      className="px-4 py-2 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-200 rounded-xl text-xs font-semibold inline-flex items-center gap-1.5 cursor-pointer"
+                    >
+                      <Upload className="w-3.5 h-3.5" />
+                      <span>Load Preset or Bulk Add {instLabels.subjectPlural}</span>
+                    </button>
+                  )}
+                </div>
+              );
+            }
+
+            if (visibleSubjects.length === 0) {
+              return (
+                <div className="py-8 text-center text-xs text-slate-500">
+                  No {instLabels.subjectPlural.toLowerCase()} match the selected {instLabels.classLabel.toLowerCase()} and {instLabels.cycle.toLowerCase()} filter.
+                </div>
+              );
+            }
+
+            return (
+              <div className="overflow-x-auto">
+                <table className="w-full text-left text-xs">
+                  <thead>
+                    <tr className="border-b border-slate-200 text-slate-500 bg-slate-50/70">
+                      <th className="py-2.5 px-3">Code</th>
+                      <th className="py-2.5 px-3">{instLabels.subject} Title</th>
+                      <th className="py-2.5 px-3">Credit Units</th>
+                      <th className="py-2.5 px-3">{instLabels.cycle}</th>
+                      <th className="py-2.5 px-3">Target {instLabels.classLabel}</th>
+                      <th className="py-2.5 px-3">Department</th>
+                      <th className="py-2.5 px-3">Status</th>
+                      {!readOnly && <th className="py-2.5 px-3 text-right">Actions</th>}
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100">
+                    {visibleSubjects.map((sub) => {
+                      const currentUnits = Number(sub.credit_units ?? 3);
+                      const isSavingUnits = inlineUnitSavingId === sub.id;
+                      const currentSemTag = normalizeSemesterTag(sub.semester_tag);
+                      const isSavingSem = inlineSemSavingId === sub.id;
+                      return (
+                        <tr key={sub.id} className="hover:bg-slate-50/60">
+                          <td className="py-2.5 px-3 font-mono text-slate-700 font-semibold whitespace-nowrap">{sub.code}</td>
+                          <td className="py-2.5 px-3 font-semibold text-slate-900">
+                            <span>{sub.name}</span>
+                            {sub.course_type && sub.course_type !== 'CORE' && (
+                              <span className="ml-2 text-[10px] font-medium uppercase tracking-wide text-slate-500">
+                                · {sub.course_type}
+                              </span>
+                            )}
+                          </td>
+                          <td className="py-2.5 px-3">
+                            {readOnly ? (
+                              <span className="font-bold tabular-nums text-emerald-700">{currentUnits}u</span>
+                            ) : (
+                              <div className="inline-flex items-center gap-1">
+                                {[1, 2, 3, 4].map((u) => (
+                                  <button
+                                    key={u}
+                                    type="button"
+                                    disabled={isSavingUnits}
+                                    onClick={() => handleInlineCreditUnitsChange(sub, u)}
+                                    title={`Set ${sub.code || sub.name} to ${u} credit unit${u === 1 ? '' : 's'}`}
+                                    className={`w-6 h-6 rounded-md text-[11px] font-bold tabular-nums transition cursor-pointer ${
+                                      currentUnits === u
+                                        ? 'bg-emerald-600 text-white'
+                                        : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+                                    }`}
+                                  >
+                                    {u}
+                                  </button>
+                                ))}
+                                <select
+                                  aria-label={`Credit units for ${sub.name}`}
                                   disabled={isSavingUnits}
-                                  onClick={() => handleInlineCreditUnitsChange(sub, u)}
-                                  title={`Set ${sub.code || sub.name} to ${u} credit unit${u === 1 ? '' : 's'}`}
-                                  className={`w-6 h-6 rounded-md text-[11px] font-bold tabular-nums transition cursor-pointer ${
-                                    currentUnits === u
-                                      ? 'bg-emerald-600 text-white'
-                                      : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
-                                  }`}
+                                  value={String(currentUnits)}
+                                  onChange={(e) => handleInlineCreditUnitsChange(sub, Number(e.target.value))}
+                                  className="ml-0.5 px-1.5 py-1 bg-slate-50 border border-slate-300 rounded-md text-[11px] font-semibold tabular-nums text-slate-700"
                                 >
-                                  {u}
-                                </button>
-                              ))}
+                                  {[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12].map((u) => (
+                                    <option key={u} value={u}>
+                                      {u}u
+                                    </option>
+                                  ))}
+                                </select>
+                              </div>
+                            )}
+                          </td>
+                          <td className="py-2.5 px-3">
+                            {readOnly ? (
+                              <span className="text-slate-600">
+                                {formatSemesterTagLabel(sub.semester_tag, instLabels.cycle, instProfile.cycleLabels)}
+                              </span>
+                            ) : (
                               <select
-                                aria-label={`Credit units for ${sub.name}`}
-                                disabled={isSavingUnits}
-                                value={String(currentUnits)}
-                                onChange={(e) => handleInlineCreditUnitsChange(sub, Number(e.target.value))}
-                                className="ml-0.5 px-1.5 py-1 bg-slate-50 border border-slate-300 rounded-md text-[11px] font-semibold tabular-nums text-slate-700"
+                                aria-label={`${instLabels.cycle} for ${sub.name}`}
+                                disabled={isSavingSem}
+                                value={currentSemTag}
+                                onChange={(e) =>
+                                  handleInlineSemesterTagChange(sub, e.target.value as CanonicalSemesterTag)
+                                }
+                                className="px-2 py-1 bg-slate-50 border border-slate-200 rounded-md text-[11px] font-medium text-slate-700"
                               >
-                                {[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12].map((u) => (
-                                  <option key={u} value={u}>
-                                    {u}u
+                                {semOpts.map((opt) => (
+                                  <option key={opt.value || 'ALL'} value={opt.value}>
+                                    {opt.value === '' ? `All ${instLabels.cycle}s` : opt.label}
                                   </option>
                                 ))}
                               </select>
-                            </div>
-                          )}
-                        </td>
-                        <td className="py-2.5 px-3 text-slate-600">{sub.department || 'General'}</td>
-                        <td className="py-2.5 px-3 text-slate-600">{sub.class_name || `All ${instLabels.classPlural}`}</td>
-                        <td className="py-2.5 px-3">
-                          <span
-                            className={`text-[11px] font-semibold ${
-                              sub.status === 'ACTIVE' ? 'text-emerald-700' : 'text-slate-400'
-                            }`}
-                          >
-                            {sub.status}
-                          </span>
-                        </td>
-                        {!readOnly && (
-                          <td className="py-2.5 px-3 text-right">
-                            <div className="flex items-center justify-end gap-1">
-                              <button
-                                type="button"
-                                onClick={() => {
-                                  setEditingSubject(sub);
-                                  setSubjectForm({
-                                    name: sub.name,
-                                    code: sub.code,
-                                    department: sub.department || '',
-                                    class_id: sub.class_id || '',
-                                    credit_units: String(sub.credit_units ?? 3),
-                                    course_type: (sub.course_type as 'CORE' | 'ELECTIVE' | 'GENERAL') || 'CORE',
-                                    status: sub.status,
-                                  });
-                                  setSubjectModalOpen(true);
-                                }}
-                                className="p-1.5 text-slate-500 hover:text-blue-700 rounded-lg hover:bg-blue-50"
-                                title={`Edit ${instLabels.subject}`}
-                              >
-                                <Edit2 className="w-3.5 h-3.5" />
-                              </button>
-                              <button
-                                type="button"
-                                onClick={() => handleDeleteSubject(sub)}
-                                className="p-1.5 text-slate-500 hover:text-rose-700 rounded-lg hover:bg-rose-50"
-                                title={`Delete ${instLabels.subject}`}
-                              >
-                                <Trash2 className="w-3.5 h-3.5" />
-                              </button>
-                            </div>
+                            )}
                           </td>
-                        )}
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
-          )}
+                          <td className="py-2.5 px-3 text-slate-600">{sub.class_name || `All ${instLabels.classPlural}`}</td>
+                          <td className="py-2.5 px-3 text-slate-600">{sub.department || 'General'}</td>
+                          <td className="py-2.5 px-3">
+                            <span
+                              className={`text-[11px] font-semibold ${
+                                sub.status === 'ACTIVE' ? 'text-emerald-700' : 'text-slate-400'
+                              }`}
+                            >
+                              {sub.status}
+                            </span>
+                          </td>
+                          {!readOnly && (
+                            <td className="py-2.5 px-3 text-right">
+                              <div className="flex items-center justify-end gap-1">
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setEditingSubject(sub);
+                                    setSubjectForm({
+                                      name: sub.name,
+                                      code: sub.code,
+                                      department: sub.department || '',
+                                      class_id: sub.class_id || '',
+                                      credit_units: String(sub.credit_units ?? 3),
+                                      course_type: (sub.course_type as 'CORE' | 'ELECTIVE' | 'GENERAL') || 'CORE',
+                                      semester_tag: normalizeSemesterTag(sub.semester_tag),
+                                      status: sub.status,
+                                    });
+                                    setSubjectModalOpen(true);
+                                  }}
+                                  className="p-1.5 text-slate-500 hover:text-blue-700 rounded-lg hover:bg-blue-50"
+                                  title={`Edit ${instLabels.subject}`}
+                                >
+                                  <Edit2 className="w-3.5 h-3.5" />
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => handleDeleteSubject(sub)}
+                                  className="p-1.5 text-slate-500 hover:text-rose-700 rounded-lg hover:bg-rose-50"
+                                  title={`Delete ${instLabels.subject}`}
+                                >
+                                  <Trash2 className="w-3.5 h-3.5" />
+                                </button>
+                              </div>
+                            </td>
+                          )}
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            );
+          })()}
         </div>
       )}
 
@@ -1429,10 +1579,21 @@ export const SchoolPerformanceView: React.FC<SchoolPerformanceViewProps> = ({ re
           subjectPlural={instLabels.subjectPlural}
           classLabel={instLabels.classLabel}
           cycleLabel={instLabels.cycle}
+          cycleLabels={instProfile.cycleLabels}
           learnerLabel={isTertiary ? 'Student' : 'Learner'}
           learnerPlural={isTertiary ? 'Students' : 'Learners'}
           onOpenHistoricalBacklog={() => setHistoricalBacklogOpen(true)}
-          onOpenBulkCourses={() => setBulkCoursesOpen(true)}
+          onOpenBulkCourses={(prefillClassId, prefillSemTag) => {
+            setBulkCoursesPrefill({
+              classId: prefillClassId || '',
+              semesterTag: prefillSemTag !== undefined ? prefillSemTag : isTertiary ? '1ST' : '',
+            });
+            setBulkCoursesOpen(true);
+          }}
+          onOpenSessionReports={() => {
+            setReportMode('SESSION');
+            setSubTab('reports');
+          }}
           onToast={(type, text) => showMsg(type === 'success' ? 'ok' : 'err', text)}
         />
       )}
@@ -1598,11 +1759,29 @@ export const SchoolPerformanceView: React.FC<SchoolPerformanceViewProps> = ({ re
                     }}
                     className="px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl text-xs font-medium"
                   >
-                    {subjects.map((sub) => (
-                      <option key={sub.id} value={sub.id}>
-                        {sub.name} ({sub.code})
-                      </option>
-                    ))}
+                    {[...subjects]
+                      .sort((a, b) => {
+                        const aMatch =
+                          (!selectedExam.class_id || !a.class_id || a.class_id === selectedExam.class_id) &&
+                          termMatchesSemesterTag(selectedExam.term_name, a.semester_tag);
+                        const bMatch =
+                          (!selectedExam.class_id || !b.class_id || b.class_id === selectedExam.class_id) &&
+                          termMatchesSemesterTag(selectedExam.term_name, b.semester_tag);
+                        if (aMatch !== bMatch) return aMatch ? -1 : 1;
+                        return a.name.localeCompare(b.name);
+                      })
+                      .map((sub) => {
+                        const semTagLabel = sub.semester_tag
+                          ? ` · ${formatSemesterTagLabel(sub.semester_tag, instLabels.cycle, instProfile.cycleLabels)}`
+                          : '';
+                        return (
+                          <option key={sub.id} value={sub.id}>
+                            {sub.code ? `${sub.code} — ` : ''}
+                            {sub.name}
+                            {semTagLabel}
+                          </option>
+                        );
+                      })}
                   </select>
 
                   {!readOnly && selectedExam.status !== 'PUBLISHED' && (
@@ -2160,8 +2339,8 @@ export const SchoolPerformanceView: React.FC<SchoolPerformanceViewProps> = ({ re
                     <tr className="border-b border-slate-200 text-slate-500 bg-slate-50/70">
                       <th className="py-2.5 px-3">Student</th>
                       <th className="py-2.5 px-3">Class</th>
-                      <th className="py-2.5 px-3">Session / Term Progression</th>
-                      <th className="py-2.5 px-3 text-right">Annual Avg</th>
+                      <th className="py-2.5 px-3">Session / {instLabels.cycle} Progression</th>
+                      <th className="py-2.5 px-3 text-right">{isGpaMode ? 'Sessional CGPA / Avg' : 'Annual Avg'}</th>
                       <th className="py-2.5 px-3 text-right">Position</th>
                       <th className="py-2.5 px-3">Promotion</th>
                       <th className="py-2.5 px-3">Status</th>
@@ -2181,13 +2360,27 @@ export const SchoolPerformanceView: React.FC<SchoolPerformanceViewProps> = ({ re
                           {src.term_averages && src.term_averages.length > 0 && (
                             <span className="block text-[10px] text-slate-500 tabular-nums mt-0.5">
                               {src.term_averages
-                                .map((t) => `${t.term_name}: ${t.subjects_count > 0 ? `${Number(t.average_score).toFixed(1)}%` : '—'}`)
+                                .map((t: any) =>
+                                  isGpaMode && t.gpa !== null && t.gpa !== undefined
+                                    ? `${t.term_name}: ${Number(t.gpa).toFixed(2)} GPA${t.credit_units ? ` (${t.credit_units}u)` : ''}`
+                                    : `${t.term_name}: ${t.subjects_count > 0 ? `${Number(t.average_score).toFixed(1)}%` : '—'}`
+                                )
                                 .join(' · ')}
                             </span>
                           )}
                         </td>
                         <td className="py-2.5 px-3 text-right font-bold tabular-nums text-emerald-700">
-                          {Number(src.average_score || 0).toFixed(1)}%
+                          {isGpaMode && (src as any).cgpa !== null && (src as any).cgpa !== undefined ? (
+                            <>
+                              <span>{Number((src as any).cgpa).toFixed(2)} GPA</span>
+                              <span className="block text-[10px] font-normal text-slate-500">
+                                {Number(src.average_score || 0).toFixed(1)}%
+                                {(src as any).total_credit_units ? ` · ${(src as any).total_credit_units}u` : ''}
+                              </span>
+                            </>
+                          ) : (
+                            `${Number(src.average_score || 0).toFixed(1)}%`
+                          )}
                         </td>
                         <td className="py-2.5 px-3 text-right tabular-nums text-slate-700">
                           {src.class_position ? `${src.class_position} / ${src.class_size || '—'}` : '—'}
@@ -2508,22 +2701,42 @@ export const SchoolPerformanceView: React.FC<SchoolPerformanceViewProps> = ({ re
                   </select>
                 </div>
               </div>
-              <div>
-                <label className="block font-semibold text-slate-700 mb-1">
-                  Target {instLabels.classLabel} (Optional)
-                </label>
-                <select
-                  value={subjectForm.class_id}
-                  onChange={(e) => setSubjectForm({ ...subjectForm, class_id: e.target.value })}
-                  className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl"
-                >
-                  <option value="">All {instLabels.classPlural}</option>
-                  {classes.map((c) => (
-                    <option key={c.id} value={c.id}>
-                      {c.name}
-                    </option>
-                  ))}
-                </select>
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block font-semibold text-slate-700 mb-1">
+                    Target {instLabels.classLabel} (Optional)
+                  </label>
+                  <select
+                    value={subjectForm.class_id}
+                    onChange={(e) => setSubjectForm({ ...subjectForm, class_id: e.target.value })}
+                    className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl"
+                  >
+                    <option value="">All {instLabels.classPlural}</option>
+                    {classes.map((c) => (
+                      <option key={c.id} value={c.id}>
+                        {c.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="block font-semibold text-slate-700 mb-1">
+                    {instLabels.cycle} Offering
+                  </label>
+                  <select
+                    value={subjectForm.semester_tag}
+                    onChange={(e) =>
+                      setSubjectForm({ ...subjectForm, semester_tag: e.target.value as CanonicalSemesterTag })
+                    }
+                    className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl"
+                  >
+                    {getSemesterTagOptions(instLabels.cycle, isTertiary, instProfile.cycleLabels).map((opt) => (
+                      <option key={opt.value || 'ALL'} value={opt.value}>
+                        {opt.label}
+                      </option>
+                    ))}
+                  </select>
+                </div>
               </div>
               <div className="pt-3 border-t border-slate-200 flex justify-end gap-2">
                 <button
@@ -2901,6 +3114,9 @@ export const SchoolPerformanceView: React.FC<SchoolPerformanceViewProps> = ({ re
           subjectPlural={instLabels.subjectPlural}
           classLabel={instLabels.classLabel}
           cycleLabel={instLabels.cycle}
+          cycleLabels={instProfile.cycleLabels}
+          initialClassId={bulkCoursesPrefill.classId || ''}
+          initialSemesterTag={bulkCoursesPrefill.semesterTag}
           onClose={() => setBulkCoursesOpen(false)}
           onSaved={async (msg) => {
             setBulkCoursesOpen(false);

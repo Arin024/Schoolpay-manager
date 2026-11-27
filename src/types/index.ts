@@ -812,6 +812,7 @@ export interface CourseRegistrationItem {
   credit_units: number;
   credit_units_snapshot?: number;
   course_type?: string | null;
+  semester_tag?: string | null;
   department?: string | null;
   registration_type: 'REGULAR' | 'CARRYOVER' | 'ELECTIVE' | 'HISTORICAL' | string;
   status: 'REGISTERED' | 'APPROVED' | 'DROPPED' | string;

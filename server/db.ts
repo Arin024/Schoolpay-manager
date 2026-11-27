@@ -411,6 +411,14 @@ export async function initDatabase() {
             await client.query(mig011Sql);
             console.log('[Neon PostgreSQL] Verified/applied migration 011_course_registration_backlog_and_website_privacy.sql');
           }
+
+          // Execute idempotent 012_subjects_semester_and_constraint_fix.sql migration on Neon PostgreSQL
+          const mig012Path = path.resolve(process.cwd(), 'migrations/012_subjects_semester_and_constraint_fix.sql');
+          if (fs.existsSync(mig012Path)) {
+            const mig012Sql = fs.readFileSync(mig012Path, 'utf8');
+            await client.query(mig012Sql);
+            console.log('[Neon PostgreSQL] Verified/applied migration 012_subjects_semester_and_constraint_fix.sql');
+          }
         } finally {
           client.release();
         }
@@ -1050,6 +1058,63 @@ function migrateStep4Columns() {
           db.exec(`ALTER TABLE subjects ADD COLUMN ${col} ${def};`);
         } catch (e) {}
       }
+    }
+
+    // 2b-i. Safely relax legacy UNIQUE (school_id, name) on SQLite subjects table so courses
+    //       can be separated by level/semester and soft-deleted subjects can be re-registered cleanly.
+    try {
+      const tblMeta: any = db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='subjects'").get();
+      if (tblMeta?.sql && /UNIQUE\s*\(\s*school_id\s*,\s*name\s*\)/i.test(tblMeta.sql)) {
+        db.exec('PRAGMA foreign_keys = OFF;');
+        try {
+          db.exec(`
+            BEGIN TRANSACTION;
+            CREATE TABLE subjects_migrated_012 (
+              id TEXT PRIMARY KEY,
+              school_id TEXT NOT NULL REFERENCES schools(id) ON DELETE CASCADE,
+              name TEXT NOT NULL,
+              code TEXT,
+              department TEXT,
+              class_id TEXT REFERENCES classes(id) ON DELETE SET NULL,
+              credit_units INTEGER DEFAULT 3,
+              course_type TEXT DEFAULT 'CORE',
+              semester_tag TEXT,
+              status TEXT NOT NULL DEFAULT 'ACTIVE' CHECK(status IN ('ACTIVE', 'INACTIVE')),
+              is_deleted INTEGER DEFAULT 0,
+              created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+              updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            );
+            INSERT INTO subjects_migrated_012 (
+              id, school_id, name, code, department, class_id, credit_units, course_type, semester_tag, status, is_deleted, created_at, updated_at
+            )
+            SELECT
+              id, school_id, name, code, department, class_id,
+              COALESCE(credit_units, 3), COALESCE(course_type, 'CORE'), semester_tag,
+              COALESCE(status, 'ACTIVE'), COALESCE(is_deleted, 0), created_at, updated_at
+            FROM subjects;
+            DROP TABLE subjects;
+            ALTER TABLE subjects_migrated_012 RENAME TO subjects;
+            CREATE INDEX IF NOT EXISTS idx_subjects_school ON subjects(school_id, is_deleted);
+            CREATE INDEX IF NOT EXISTS idx_subjects_school_class_sem ON subjects(school_id, class_id, semester_tag);
+            COMMIT;
+          `);
+        } catch (migErr) {
+          try { db.exec('ROLLBACK;'); } catch {}
+          console.warn('[DB Migration 012 SQLite Subjects Rebuild Notice]', (migErr as any)?.message);
+        } finally {
+          db.exec('PRAGMA foreign_keys = ON;');
+        }
+      }
+      db.exec(`
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_subjects_active_scope_unique
+          ON subjects (school_id, LOWER(name), COALESCE(class_id, ''), COALESCE(semester_tag, ''))
+          WHERE (is_deleted = 0 OR is_deleted IS NULL);
+        CREATE INDEX IF NOT EXISTS idx_subjects_school_class_sem
+          ON subjects (school_id, class_id, semester_tag)
+          WHERE (is_deleted = 0 OR is_deleted IS NULL);
+      `);
+    } catch (e) {
+      console.warn('[DB Migration 012 SQLite Index Notice]', (e as any)?.message);
     }
   }
 

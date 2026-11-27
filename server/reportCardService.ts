@@ -633,7 +633,7 @@ export async function compileSessionReportCard(
   const isGpaMode = instProfile.gradingMode === 'GPA_5' || instProfile.gradingMode === 'GPA_4';
 
   const rawScores = await dbAll(
-    `SELECT ss.*, sub.name as subject_name, sub.code as subject_code,
+    `SELECT ss.*, sub.name as subject_name, sub.code as subject_code, sub.semester_tag,
             COALESCE(scr.credit_units_snapshot, sub.credit_units, 3) as credit_units,
             ex.total_max_score, ex.ca_max_score, ex.exam_max_score,
             ex.created_at as exam_created_at, t.name as term_name
@@ -652,7 +652,7 @@ export async function compileSessionReportCard(
        AND (ex.is_deleted = 0 OR ex.is_deleted IS NULL)
        ${pubScoreClause}
      ORDER BY sub.name ASC, ex.created_at DESC`,
-    `SELECT ss.*, sub.name as subject_name, sub.code as subject_code,
+    `SELECT ss.*, sub.name as subject_name, sub.code as subject_code, sub.semester_tag,
             COALESCE(scr.credit_units_snapshot, sub.credit_units, 3) as credit_units,
             ex.total_max_score, ex.ca_max_score, ex.exam_max_score,
             ex.created_at as exam_created_at, t.name as term_name
@@ -680,7 +680,7 @@ export async function compileSessionReportCard(
   }
 
   // Group scores cleanly per subject + term (latest exam per subject+term)
-  const subjectTermMap = new Map<string, { subject_id: string; subject_name: string; subject_code: string; credit_units: number; byTerm: Map<string, any> }>();
+  const subjectTermMap = new Map<string, { subject_id: string; subject_name: string; subject_code: string; semester_tag: string | null; credit_units: number; byTerm: Map<string, any> }>();
   for (const s of rawScores) {
     if (!subjectTermMap.has(s.subject_id)) {
       const rawUnits = s.credit_units !== null && s.credit_units !== undefined ? Number(s.credit_units) : 3;
@@ -688,6 +688,7 @@ export async function compileSessionReportCard(
         subject_id: s.subject_id,
         subject_name: s.subject_name,
         subject_code: s.subject_code,
+        semester_tag: s.semester_tag || null,
         credit_units: Number.isFinite(rawUnits) && rawUnits >= 0 ? Math.round(rawUnits) : 3,
         byTerm: new Map<string, any>(),
       });
@@ -754,6 +755,7 @@ export async function compileSessionReportCard(
       subject_id: sub.subject_id,
       subject_name: sub.subject_name,
       subject_code: sub.subject_code,
+      semester_tag: sub.semester_tag,
       credit_units: sub.credit_units,
       grade_point: gpaBand ? gpaBand.points : null,
       quality_points: gpaBand ? Math.round(sub.credit_units * gpaBand.points * 100) / 100 : null,
@@ -808,11 +810,21 @@ export async function compileSessionReportCard(
     };
   });
 
-  const activeSubjects = await dbAll(
-    `SELECT id FROM subjects WHERE school_id = $1 AND status = 'ACTIVE' AND (is_deleted = 0 OR is_deleted IS NULL)`,
-    `SELECT id FROM subjects WHERE school_id = ? AND status = 'ACTIVE' AND (is_deleted = 0 OR is_deleted IS NULL)`,
-    [schoolId]
-  );
+  const activeSubjects = student.class_id
+    ? await dbAll(
+        `SELECT id FROM subjects
+         WHERE school_id = $1 AND status = 'ACTIVE' AND (is_deleted = 0 OR is_deleted IS NULL)
+           AND (class_id IS NULL OR class_id = $2)`,
+        `SELECT id FROM subjects
+         WHERE school_id = ? AND status = 'ACTIVE' AND (is_deleted = 0 OR is_deleted IS NULL)
+           AND (class_id IS NULL OR class_id = ?)`,
+        [schoolId, student.class_id]
+      )
+    : await dbAll(
+        `SELECT id FROM subjects WHERE school_id = $1 AND status = 'ACTIVE' AND (is_deleted = 0 OR is_deleted IS NULL)`,
+        `SELECT id FROM subjects WHERE school_id = ? AND status = 'ACTIVE' AND (is_deleted = 0 OR is_deleted IS NULL)`,
+        [schoolId]
+      );
 
   const sessionTotal = Math.round(subjects.reduce((acc, s) => acc + Number(s.cumulative_total || 0), 0) * 100) / 100;
   const denom =
@@ -1022,6 +1034,11 @@ export async function compileSessionReportCard(
       class_position: breakdown.class_position,
       class_size: breakdown.class_size,
       promotion_status: promotionStatus,
+      gpa: computedCgpa,
+      cgpa: computedCgpa,
+      gpa_scale_max: instProfile.gpaScaleMax,
+      total_credit_units: isGpaMode ? cumulativeSessionUnits : null,
+      academic_standing: academicStanding,
       term_averages: termAverages,
       teacher_remark: breakdown.teacher_remark,
       principal_remark: breakdown.principal_remark,
