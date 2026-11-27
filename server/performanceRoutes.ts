@@ -2127,9 +2127,34 @@ performanceRouter.post(
       stuSq += ' AND id = ?';
       stuParams.push(student_id);
     } else if (class_id) {
-      stuPg += ' AND class_id = $2';
-      stuSq += ' AND class_id = ?';
-      stuParams.push(class_id);
+      // Match learners currently in class_id OR historically placed/scored in class_id for this academic_session_id
+      stuPg += ` AND (
+        class_id = $2
+        OR EXISTS (
+          SELECT 1 FROM student_enrollment_history h
+          WHERE h.school_id = $3 AND h.student_id = students.id AND h.academic_session_id = $4
+            AND h.class_id = $5 AND h.outcome != 'ROLLED_BACK'
+        )
+        OR EXISTS (
+          SELECT 1 FROM student_scores ss
+          WHERE ss.school_id = $6 AND ss.student_id = students.id AND ss.academic_session_id = $7
+            AND ss.class_id = $8
+        )
+      )`;
+      stuSq += ` AND (
+        class_id = ?
+        OR EXISTS (
+          SELECT 1 FROM student_enrollment_history h
+          WHERE h.school_id = ? AND h.student_id = students.id AND h.academic_session_id = ?
+            AND h.class_id = ? AND h.outcome != 'ROLLED_BACK'
+        )
+        OR EXISTS (
+          SELECT 1 FROM student_scores ss
+          WHERE ss.school_id = ? AND ss.student_id = students.id AND ss.academic_session_id = ?
+            AND ss.class_id = ?
+        )
+      )`;
+      stuParams.push(class_id, schoolId, academic_session_id, class_id, schoolId, academic_session_id, class_id);
     }
     const students = await dbAll(stuPg, stuSq, stuParams);
     if (students.length === 0) {
@@ -2684,9 +2709,33 @@ performanceRouter.post(
       stuSq += ' AND id = ?';
       stuParams.push(student_id);
     } else if (class_id) {
-      stuPg += ' AND class_id = $2';
-      stuSq += ' AND class_id = ?';
-      stuParams.push(class_id);
+      stuPg += ` AND (
+        class_id = $2
+        OR EXISTS (
+          SELECT 1 FROM student_enrollment_history h
+          WHERE h.school_id = $3 AND h.student_id = students.id AND h.academic_session_id = $4
+            AND h.class_id = $5 AND h.outcome != 'ROLLED_BACK'
+        )
+        OR EXISTS (
+          SELECT 1 FROM student_scores ss
+          WHERE ss.school_id = $6 AND ss.student_id = students.id AND ss.academic_session_id = $7
+            AND ss.class_id = $8
+        )
+      )`;
+      stuSq += ` AND (
+        class_id = ?
+        OR EXISTS (
+          SELECT 1 FROM student_enrollment_history h
+          WHERE h.school_id = ? AND h.student_id = students.id AND h.academic_session_id = ?
+            AND h.class_id = ? AND h.outcome != 'ROLLED_BACK'
+        )
+        OR EXISTS (
+          SELECT 1 FROM student_scores ss
+          WHERE ss.school_id = ? AND ss.student_id = students.id AND ss.academic_session_id = ?
+            AND ss.class_id = ?
+        )
+      )`;
+      stuParams.push(class_id, schoolId, academic_session_id, class_id, schoolId, academic_session_id, class_id);
     }
     const students = await dbAll(stuPg, stuSq, stuParams);
     if (students.length === 0) {

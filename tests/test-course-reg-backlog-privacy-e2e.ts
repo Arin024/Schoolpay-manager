@@ -781,11 +781,11 @@ async function main() {
     await cdp.clickButtonByText('Performance');
     await cdp.waitForText('Analytics & Rankings');
 
-    // Go to Courses tab and verify inline Credit Units controls + Bulk Add + Upload Previous Years buttons
+    // Go to Courses tab and verify inline Credit Units controls + Bulk Add + Bulk Upload Results / History buttons
     await cdp.clickButtonByText('Courses');
     await cdp.waitForText('GST 301');
     await cdp.waitForText('Bulk Add Courses');
-    await cdp.waitForText('Upload Previous Years');
+    await cdp.waitForText('Bulk Upload Results / History');
 
     // Open Bulk Add Courses modal and verify presets render
     await cdp.clickButtonByText('Bulk Add Courses');
@@ -798,7 +798,7 @@ async function main() {
 
     // Open Upload Previous Years modal and verify Zero-Distortion guarantee copy
     await cdp.clickButtonByText('Upload Previous Years');
-    await cdp.waitForText('Previous Years');
+    await cdp.waitForText('Safe for Current & Past Years');
     await cdp.clickButtonByText('Cancel');
 
     // Open Examinations & Scores tab -> open Master Broadsheet

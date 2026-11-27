@@ -1556,10 +1556,10 @@ export const SchoolPerformanceView: React.FC<SchoolPerformanceViewProps> = ({ re
                 <button
                   type="button"
                   onClick={() => setHistoricalBacklogOpen(true)}
-                  className="px-3.5 py-2 bg-slate-100 hover:bg-slate-200 text-slate-800 border border-slate-200 rounded-xl text-xs font-semibold inline-flex items-center gap-1.5 cursor-pointer"
+                  className="px-3.5 py-2 bg-slate-100 hover:bg-slate-200 text-slate-800 border border-slate-200 rounded-xl text-xs font-semibold inline-flex items-center gap-1.5 cursor-pointer whitespace-nowrap"
                 >
-                  <History className="w-3.5 h-3.5 text-slate-600" />
-                  <span>Upload Previous Years</span>
+                  <FileSpreadsheet className="w-3.5 h-3.5 text-emerald-700" />
+                  <span>Bulk Upload Results / History</span>
                 </button>
                   <button
                     type="button"
@@ -2076,6 +2076,14 @@ export const SchoolPerformanceView: React.FC<SchoolPerformanceViewProps> = ({ re
                 </select>
                 {!readOnly && (
                   <>
+                    <button
+                      type="button"
+                      onClick={() => setHistoricalBacklogOpen(true)}
+                      className="px-3.5 py-2 bg-emerald-50 hover:bg-emerald-100 text-emerald-900 border border-emerald-200 rounded-xl text-xs font-bold inline-flex items-center gap-1.5 cursor-pointer whitespace-nowrap"
+                    >
+                      <Upload className="w-3.5 h-3.5 text-emerald-700" />
+                      <span>Bulk Upload Results</span>
+                    </button>
                     <button
                       type="button"
                       disabled={openingFromReg || !examForm.academic_session_id || !examForm.term_id}
@@ -2914,7 +2922,9 @@ export const SchoolPerformanceView: React.FC<SchoolPerformanceViewProps> = ({ re
           <div className="bg-white rounded-2xl border border-slate-200 p-6 space-y-5">
             <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4 pb-4 border-b border-slate-200">
               <div className="space-y-2">
-                <h3 className="text-sm font-bold text-slate-900">Official Digital Report Cards Registry</h3>
+                <h3 className="text-sm font-bold text-slate-900">
+                  Official Digital {isTertiary ? 'Results & Transcripts' : 'Report Cards'} Registry
+                </h3>
                 <div className="inline-flex p-1 bg-slate-100 rounded-xl">
                   <button
                     type="button"
@@ -2925,7 +2935,7 @@ export const SchoolPerformanceView: React.FC<SchoolPerformanceViewProps> = ({ re
                         : 'text-slate-600 hover:text-slate-900'
                     }`}
                   >
-                    End-of-Term Report Cards
+                    End-of-{instLabels.cycle} {isTertiary ? 'Results' : 'Report Cards'}
                   </button>
                   <button
                     type="button"
@@ -2945,11 +2955,19 @@ export const SchoolPerformanceView: React.FC<SchoolPerformanceViewProps> = ({ re
                 <div className="flex flex-wrap items-center gap-2">
                   <button
                     type="button"
+                    onClick={() => setHistoricalBacklogOpen(true)}
+                    className="px-3.5 py-2 bg-emerald-50 hover:bg-emerald-100 text-emerald-900 border border-emerald-200 rounded-xl text-xs font-bold inline-flex items-center gap-1.5 cursor-pointer whitespace-nowrap"
+                  >
+                    <Upload className="w-3.5 h-3.5 text-emerald-700" />
+                    <span>Bulk Upload Results</span>
+                  </button>
+                  <button
+                    type="button"
                     disabled={generatingRc}
                     onClick={handleGenerateReportCards}
                     className="px-4 py-2 bg-slate-900 hover:bg-slate-800 text-white rounded-xl text-xs font-bold cursor-pointer disabled:opacity-50 whitespace-nowrap"
                   >
-                    {generatingRc ? 'Generating...' : 'Generate / Recalculate Term Reports'}
+                    {generatingRc ? 'Generating...' : `Generate / Recalculate ${instLabels.cycle} Reports`}
                   </button>
                   <button
                     type="button"
@@ -2964,6 +2982,14 @@ export const SchoolPerformanceView: React.FC<SchoolPerformanceViewProps> = ({ re
 
               {!readOnly && reportMode === 'SESSION' && (
                 <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setHistoricalBacklogOpen(true)}
+                    className="px-3.5 py-2 bg-emerald-50 hover:bg-emerald-100 text-emerald-900 border border-emerald-200 rounded-xl text-xs font-bold inline-flex items-center gap-1.5 cursor-pointer whitespace-nowrap"
+                  >
+                    <Upload className="w-3.5 h-3.5 text-emerald-700" />
+                    <span>Bulk Upload Results</span>
+                  </button>
                   <button
                     type="button"
                     disabled={generatingSessionRc}
@@ -3013,7 +3039,7 @@ export const SchoolPerformanceView: React.FC<SchoolPerformanceViewProps> = ({ re
                   }}
                   className="px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl"
                 >
-                  <option value="">All Terms</option>
+                  <option value="">All {instLabels.cyclePlural}</option>
                   {(rcSessionObj?.terms || sessions.flatMap((s) => s.terms || [])).map((t) => (
                     <option key={t.id} value={t.id}>
                       {t.name}
@@ -3032,7 +3058,7 @@ export const SchoolPerformanceView: React.FC<SchoolPerformanceViewProps> = ({ re
                 }}
                 className="px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl"
               >
-                <option value="">All Classes</option>
+                <option value="">All {isTertiary ? 'Levels' : instLabels.classPlural}</option>
                 {classes.map((c) => (
                   <option key={c.id} value={c.id}>
                     {c.name}
@@ -3968,6 +3994,16 @@ export const SchoolPerformanceView: React.FC<SchoolPerformanceViewProps> = ({ re
       {historicalBacklogOpen && (
         <HistoricalBacklogImportModal
           students={rosterStudents}
+          sessions={sessions}
+          classes={classes}
+          subjects={subjects}
+          departments={availableDepartmentNames}
+          schoolType={activeSchool?.type || ''}
+          cycleLabels={instProfile.cycleLabels}
+          showCreditUnits={showCreditUnits}
+          defaultSessionId={subTab === 'reports' ? rcFilters.academic_session_id : examForm.academic_session_id}
+          defaultTermId={subTab === 'reports' ? rcFilters.term_id : examForm.term_id}
+          defaultClassId={subTab === 'reports' ? rcFilters.class_id : examForm.class_id}
           isTertiary={isTertiary}
           subjectLabel={instLabels.subject}
           subjectPlural={instLabels.subjectPlural}
@@ -3978,7 +4014,11 @@ export const SchoolPerformanceView: React.FC<SchoolPerformanceViewProps> = ({ re
           onImported={async (msg) => {
             setHistoricalBacklogOpen(false);
             showMsg('ok', msg);
-            await loadBootstrap();
+            await Promise.all([
+              loadBootstrap(),
+              loadReportCards(rcFilters),
+              loadSessionReportCards(rcFilters),
+            ]);
           }}
         />
       )}

@@ -1,3 +1,4 @@
+import crypto from 'crypto';
 import express from 'express';
 import { cacheDb, getPgPool, queryPg } from './db.ts';
 import {
@@ -22,6 +23,8 @@ import {
   resolveInstitutionProfile,
 } from '../src/utils/institutionMode.ts';
 import { normalizeSemesterTag } from '../src/utils/semesterTag.ts';
+import { compileSessionReportCard, compileTermReportCard } from './reportCardService.ts';
+import { resolveHistoricalStudentClass } from './progressionService.ts';
 
 export const courseAndBacklogRouter = wrapRouterAsync(express.Router());
 
@@ -1363,19 +1366,23 @@ courseAndBacklogRouter.delete(
 );
 
 // ==============================================================================
-// 4. HISTORICAL / PREVIOUS-YEAR BACKLOG ONBOARDING WIZARD
+// 4. BULK RESULTS & HISTORICAL / CURRENT-YEAR UPLOAD ENGINE
 // POST /api/v1/school/historical-backlog/preview
 // POST /api/v1/school/historical-backlog/import
-// Enables newly onboarded schools & universities to upload previous years,
-// semesters/terms, classes/levels, courses/subjects (with exact credit units),
-// and historical scores WITHOUT moving learners out of their current class/level!
+// Supports ALL school types (Primary, Secondary, and Tertiary) for uploading
+// semester, term, or full-session results for EITHER previous academic years OR
+// the current active academic year — with canonical cycle matching, optional
+// automatic Term/Semester & Full-Session Report Card generation, and zero-distortion
+// protection so past-year uploads never move learners out of their current class!
 // ==============================================================================
 interface BacklogRowInput {
   admission_number?: string;
   student_id?: string;
+  student_name?: string;
   session_name?: string;
   term_name?: string;
   class_name?: string;
+  department?: string;
   subject_code?: string;
   subject_name?: string;
   credit_units?: number | string;
@@ -1384,12 +1391,40 @@ interface BacklogRowInput {
   total_score?: number | string | null;
 }
 
+function normalizeCanonicalCycleRank(name?: string | null): number | null {
+  const lower = String(name || '').trim().toLowerCase();
+  if (!lower) return null;
+  if (/(^|\b)(1st|first|one|i|harmattan|sem\s*1|term\s*1|t1|s1)(\b|$)/i.test(lower)) return 1;
+  if (/(^|\b)(2nd|second|two|ii|rain|sem\s*2|term\s*2|t2|s2)(\b|$)/i.test(lower)) return 2;
+  if (/(^|\b)(3rd|third|three|iii|summer|sem\s*3|term\s*3|t3|s3)(\b|$)/i.test(lower)) return 3;
+  return null;
+}
+
+function findMatchingTermInSession(terms: any[], sessionId: string, termName: string): any | null {
+  const lowerTarget = termName.trim().toLowerCase();
+  const sessionTerms = terms.filter((t) => t.academic_session_id === sessionId);
+  const exact = sessionTerms.find((t) => String(t.name || '').trim().toLowerCase() === lowerTarget);
+  if (exact) return exact;
+  const targetRank = normalizeCanonicalCycleRank(termName);
+  if (targetRank !== null) {
+    const byRank = sessionTerms.find((t) => normalizeCanonicalCycleRank(t.name) === targetRank);
+    if (byRank) return byRank;
+  }
+  return null;
+}
+
 async function analyzeBacklogRows(schoolId: string, rows: BacklogRowInput[]) {
   const students = await dbAll(
-    `SELECT id, admission_number, full_name, class_id, class_name FROM students
-     WHERE school_id = $1 AND (is_deleted = 0 OR is_deleted IS NULL)`,
-    `SELECT id, admission_number, full_name, class_id, class_name FROM students
-     WHERE school_id = ? AND (is_deleted = 0 OR is_deleted IS NULL)`,
+    `SELECT s.id, s.admission_number, s.full_name, s.class_id, s.class_name,
+            s.class_arm_id, COALESCE(NULLIF(TRIM(s.class_arm_name), ''), ca.name, '') as class_arm_name
+     FROM students s
+     LEFT JOIN class_arms ca ON s.class_arm_id = ca.id
+     WHERE s.school_id = $1 AND (s.is_deleted = 0 OR s.is_deleted IS NULL)`,
+    `SELECT s.id, s.admission_number, s.full_name, s.class_id, s.class_name,
+            s.class_arm_id, COALESCE(NULLIF(TRIM(s.class_arm_name), ''), ca.name, '') as class_arm_name
+     FROM students s
+     LEFT JOIN class_arms ca ON s.class_arm_id = ca.id
+     WHERE s.school_id = ? AND (s.is_deleted = 0 OR s.is_deleted IS NULL)`,
     [schoolId]
   );
   const stuById = new Map(students.map((s) => [s.id, s]));
@@ -1398,17 +1433,30 @@ async function analyzeBacklogRows(schoolId: string, rows: BacklogRowInput[]) {
       .filter((s) => s.admission_number)
       .map((s) => [String(s.admission_number).trim().toLowerCase(), s])
   );
+  const stuByNameBuckets = new Map<string, any[]>();
+  for (const s of students) {
+    const key = String(s.full_name || '').trim().replace(/\s+/g, ' ').toLowerCase();
+    if (!key) continue;
+    if (!stuByNameBuckets.has(key)) stuByNameBuckets.set(key, []);
+    stuByNameBuckets.get(key)!.push(s);
+  }
+  const resolveUniqueByName = (rawName?: string | null) => {
+    const key = String(rawName || '').trim().replace(/\s+/g, ' ').toLowerCase();
+    if (!key) return null;
+    const list = stuByNameBuckets.get(key);
+    return list && list.length === 1 ? list[0] : null;
+  };
 
   const sessions = await dbAll(
-    `SELECT id, name FROM academic_sessions WHERE school_id = $1`,
-    `SELECT id, name FROM academic_sessions WHERE school_id = ?`,
+    `SELECT id, name, status FROM academic_sessions WHERE school_id = $1`,
+    `SELECT id, name, status FROM academic_sessions WHERE school_id = ?`,
     [schoolId]
   );
   const sesByName = new Map(sessions.map((s) => [String(s.name || '').trim().toLowerCase(), s]));
 
   const terms = await dbAll(
-    `SELECT id, name, academic_session_id FROM terms WHERE school_id = $1`,
-    `SELECT id, name, academic_session_id FROM terms WHERE school_id = ?`,
+    `SELECT id, name, academic_session_id, status FROM terms WHERE school_id = $1`,
+    `SELECT id, name, academic_session_id, status FROM terms WHERE school_id = ?`,
     [schoolId]
   );
 
@@ -1420,14 +1468,19 @@ async function analyzeBacklogRows(schoolId: string, rows: BacklogRowInput[]) {
   const clsByName = new Map(classes.map((c) => [String(c.name || '').trim().toLowerCase(), c]));
 
   const subjects = await dbAll(
-    `SELECT id, name, code, class_id, credit_units FROM subjects WHERE school_id = $1 AND (is_deleted = 0 OR is_deleted IS NULL)`,
-    `SELECT id, name, code, class_id, credit_units FROM subjects WHERE school_id = ? AND (is_deleted = 0 OR is_deleted IS NULL)`,
+    `SELECT id, name, code, class_id, department, credit_units, semester_tag
+     FROM subjects WHERE school_id = $1 AND (is_deleted = 0 OR is_deleted IS NULL)`,
+    `SELECT id, name, code, class_id, department, credit_units, semester_tag
+     FROM subjects WHERE school_id = ? AND (is_deleted = 0 OR is_deleted IS NULL)`,
     [schoolId]
   );
 
   const newSessions = new Set<string>();
   const newClasses = new Set<string>();
   const newSubjects = new Set<string>();
+  const targetSessionsSummary = new Set<string>();
+  let currentYearRows = 0;
+  let previousYearRows = 0;
   const validRows: any[] = [];
   const invalidRows: Array<{ row: number; reason: string; raw: BacklogRowInput }> = [];
 
@@ -1436,12 +1489,14 @@ async function analyzeBacklogRows(schoolId: string, rows: BacklogRowInput[]) {
     const stu =
       (r.student_id && stuById.get(String(r.student_id).trim())) ||
       (r.admission_number && stuByAdm.get(String(r.admission_number).trim().toLowerCase())) ||
+      (r.student_name && resolveUniqueByName(r.student_name)) ||
+      (r.admission_number && resolveUniqueByName(r.admission_number)) ||
       null;
 
     if (!stu) {
       invalidRows.push({
         row: i + 1,
-        reason: `Learner "${r.admission_number || r.student_id || '(blank)'}" not found in your school directory.`,
+        reason: `Learner "${r.admission_number || r.student_name || r.student_id || '(blank)'}" not found in your school directory.`,
         raw: r,
       });
       continue;
@@ -1450,13 +1505,14 @@ async function analyzeBacklogRows(schoolId: string, rows: BacklogRowInput[]) {
     const sessionName = String(r.session_name || '').trim();
     const termName = String(r.term_name || '').trim();
     const className = String(r.class_name || stu.class_name || '').trim();
+    const deptName = String(r.department || '').trim();
     const subjectName = String(r.subject_name || '').trim();
     const subjectCode = String(r.subject_code || '').trim().toUpperCase() || (subjectName ? generateDefaultCode(subjectName) : '');
 
     if (!sessionName || !termName || !className || (!subjectName && !subjectCode)) {
       invalidRows.push({
         row: i + 1,
-        reason: 'Each row requires Session, Term/Semester, Historical Class/Level, and Course/Subject Name or Code.',
+        reason: 'Each row requires Session, Term/Semester, Class/Level, and Course/Subject Name or Code.',
         raw: r,
       });
       continue;
@@ -1472,6 +1528,14 @@ async function analyzeBacklogRows(schoolId: string, rows: BacklogRowInput[]) {
     let totalScore: number | null = hasTotal ? Number(r.total_score) : null;
 
     if (hasCa || hasExam || hasTotal) {
+      if (caScore !== null && (!Number.isFinite(caScore) || caScore < 0 || caScore > 100)) {
+        invalidRows.push({ row: i + 1, reason: `CA score (${r.ca_score}) must be between 0 and 100.`, raw: r });
+        continue;
+      }
+      if (examScore !== null && (!Number.isFinite(examScore) || examScore < 0 || examScore > 100)) {
+        invalidRows.push({ row: i + 1, reason: `Exam score (${r.exam_score}) must be between 0 and 100.`, raw: r });
+        continue;
+      }
       if (totalScore === null) {
         totalScore = Number(caScore || 0) + Number(examScore || 0);
       } else if (caScore === null && examScore === null) {
@@ -1488,7 +1552,13 @@ async function analyzeBacklogRows(schoolId: string, rows: BacklogRowInput[]) {
       }
     }
 
-    if (!sesByName.has(sessionName.toLowerCase())) newSessions.add(sessionName);
+    const existingSes = sesByName.get(sessionName.toLowerCase()) || null;
+    const isCurrentActiveSession = Boolean(existingSes && String(existingSes.status || '').toUpperCase() === 'ACTIVE');
+    if (isCurrentActiveSession) currentYearRows += 1;
+    else previousYearRows += 1;
+    targetSessionsSummary.add(`${sessionName}${isCurrentActiveSession ? ' (Active)' : ''}`);
+
+    if (!existingSes) newSessions.add(sessionName);
     if (!clsByName.has(className.toLowerCase())) newClasses.add(className);
 
     const matchedCls = clsByName.get(className.toLowerCase()) || null;
@@ -1496,18 +1566,26 @@ async function analyzeBacklogRows(schoolId: string, rows: BacklogRowInput[]) {
       (s) =>
         ((subjectCode && String(s.code || '').trim().toUpperCase() === subjectCode) ||
           (subjectName && String(s.name || '').trim().toLowerCase() === subjectName.toLowerCase())) &&
-        (!matchedCls || !s.class_id || s.class_id === matchedCls.id)
+        (!matchedCls || !s.class_id || s.class_id === matchedCls.id) &&
+        (!deptName || !s.department || String(s.department).trim().toLowerCase() === deptName.toLowerCase())
     );
-    if (!matchedSub) newSubjects.add(`${subjectCode || generateDefaultCode(subjectName)} — ${subjectName || subjectCode} (${units}u)`);
+    if (!matchedSub) {
+      newSubjects.add(`${subjectCode || generateDefaultCode(subjectName)} — ${subjectName || subjectCode} (${units}u)`);
+    }
 
     validRows.push({
       row: i + 1,
       student_id: stu.id,
       student_name: stu.full_name,
       admission_number: stu.admission_number,
+      student_current_class_id: stu.class_id || null,
+      student_current_arm_id: stu.class_arm_id || null,
+      student_current_arm_name: stu.class_arm_name || null,
       session_name: sessionName,
+      is_current_session: isCurrentActiveSession,
       term_name: termName,
       class_name: className,
+      department: deptName || stu.class_arm_name || '',
       subject_code: subjectCode,
       subject_name: subjectName || matchedSub?.name || subjectCode,
       credit_units: units,
@@ -1521,6 +1599,9 @@ async function analyzeBacklogRows(schoolId: string, rows: BacklogRowInput[]) {
   return {
     validRows,
     invalidRows,
+    currentYearRows,
+    previousYearRows,
+    targetSessions: Array.from(targetSessionsSummary),
     willAutoCreate: {
       sessions: Array.from(newSessions),
       classes: Array.from(newClasses),
@@ -1540,10 +1621,10 @@ courseAndBacklogRouter.post(
       const schoolId = req.targetSchoolId!;
       const rows = Array.isArray(req.body?.rows) ? req.body.rows : [];
       if (rows.length === 0) {
-        return res.status(400).json({ error: 'EMPTY_ROWS', message: 'Provide at least one historical record row to preview.' });
+        return res.status(400).json({ error: 'EMPTY_ROWS', message: 'Provide at least one result or record row to preview.' });
       }
-      if (rows.length > 1000) {
-        return res.status(400).json({ error: 'BATCH_TOO_LARGE', message: 'Maximum 1,000 rows per historical import batch.' });
+      if (rows.length > 2500) {
+        return res.status(400).json({ error: 'BATCH_TOO_LARGE', message: 'Maximum 2,500 rows per bulk results upload batch.' });
       }
 
       const analysis = await analyzeBacklogRows(schoolId, rows);
@@ -1556,16 +1637,19 @@ courseAndBacklogRouter.post(
           rows_with_scores: analysis.validRows.filter((r) => r.has_score).length,
           rows_registration_only: analysis.validRows.filter((r) => !r.has_score).length,
           unique_students: new Set(analysis.validRows.map((r) => r.student_id)).size,
+          current_year_rows: analysis.currentYearRows,
+          previous_year_rows: analysis.previousYearRows,
+          target_sessions: analysis.targetSessions,
           will_auto_create: analysis.willAutoCreate,
         },
-        validRows: analysis.validRows.slice(0, 100),
+        validRows: analysis.validRows.slice(0, 120),
         invalidRows: analysis.invalidRows.slice(0, 50),
       });
     } catch (err: any) {
-      console.error('[Historical Backlog Preview Error]', err);
+      console.error('[Bulk Results Preview Error]', err);
       return res.status(500).json({
         error: 'BACKLOG_PREVIEW_FAILED',
-        message: safeClientError(err, 'Failed to validate historical backlog rows.'),
+        message: safeClientError(err, 'Failed to validate bulk result rows.'),
       });
     }
   }
@@ -1582,12 +1666,13 @@ courseAndBacklogRouter.post(
       const actorId = req.user?.id || null;
       const rows = Array.isArray(req.body?.rows) ? req.body.rows : [];
       const publishScores = req.body?.publish_scores !== false;
+      const autoGenerateReports = req.body?.auto_generate_reports !== false;
 
       if (rows.length === 0) {
-        return res.status(400).json({ error: 'EMPTY_ROWS', message: 'Provide at least one historical record row to import.' });
+        return res.status(400).json({ error: 'EMPTY_ROWS', message: 'Provide at least one result or record row to import.' });
       }
-      if (rows.length > 1000) {
-        return res.status(400).json({ error: 'BATCH_TOO_LARGE', message: 'Maximum 1,000 rows per historical import batch.' });
+      if (rows.length > 2500) {
+        return res.status(400).json({ error: 'BATCH_TOO_LARGE', message: 'Maximum 2,500 rows per bulk results upload batch.' });
       }
 
       const analysis = await analyzeBacklogRows(schoolId, rows);
@@ -1612,18 +1697,19 @@ courseAndBacklogRouter.post(
         [schoolId]
       );
       const acadSettings = await getSchoolAcademicSettings(schoolId);
+      const caMax = Number(acadSettings.ca_max_score ?? 40);
+      const examMax = Number(acadSettings.exam_max_score ?? 60);
+      const totalMax = caMax + examMax || 100;
       const instProfile = resolveInstitutionProfile(school, tenantSettings);
       const isGpaMode = instProfile.gradingMode === 'GPA_5' || instProfile.gradingMode === 'GPA_4';
 
       const { sesByName, terms, clsByName, subjects } = analysis.existingMaps;
-      const termKeyMap = new Map<string, any>();
-      for (const t of terms) {
-        termKeyMap.set(`${t.academic_session_id}::${String(t.name || '').trim().toLowerCase()}`, t);
-      }
 
-      // Cache historical exams per (session_id, term_id, class_id)
+      // Cache exams per (session_id, term_id, class_id, dept)
       const examCache = new Map<string, string>();
       const historyRecorded = new Set<string>();
+      const touchedSessionTerms = new Map<string, { sessionId: string; termId: string; studentIds: Set<string>; examId: string | null }>();
+      const touchedSessions = new Map<string, Set<string>>();
 
       let sessionsCreated = 0;
       let termsCreated = 0;
@@ -1633,7 +1719,7 @@ courseAndBacklogRouter.post(
       let scoresSaved = 0;
 
       for (const row of analysis.validRows) {
-        // 1. Resolve or create historical academic session (NEVER mark as active so current session stays untouched!)
+        // 1. Resolve or create academic session (NEVER disturb an existing active session when adding past years!)
         const yearMatch = row.session_name.match(/(19\d{2}|20\d{2})/);
         const startYear = yearMatch ? Number(yearMatch[1]) : 2020;
         const derivedStartDate = `${startYear}-09-01`;
@@ -1649,29 +1735,30 @@ courseAndBacklogRouter.post(
              VALUES (?, ?, ?, ?, ?, 'COMPLETED', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
             [sesId, schoolId, row.session_name, derivedStartDate, derivedEndDate]
           );
-          ses = { id: sesId, name: row.session_name };
+          ses = { id: sesId, name: row.session_name, status: 'COMPLETED' };
           sesByName.set(row.session_name.toLowerCase(), ses);
           sessionsCreated += 1;
         }
+        const isCurrentSession = String(ses.status || '').toUpperCase() === 'ACTIVE';
 
-        // 2. Resolve or create historical term/semester under that session
-        const tKey = `${ses.id}::${row.term_name.toLowerCase()}`;
-        let term = termKeyMap.get(tKey);
+        // 2. Resolve or create term/semester using canonical cycle matching (First Semester == 1st Semester, First Term == 1st Term!)
+        let term = findMatchingTermInSession(terms, ses.id, row.term_name);
         if (!term) {
           const tId = newId('trm');
+          const termStatus = isCurrentSession ? 'UPCOMING' : 'COMPLETED';
           await dualWrite(
             `INSERT INTO terms (id, school_id, academic_session_id, name, start_date, end_date, status, created_at, updated_at)
-             VALUES ($1, $2, $3, $4, $5, $6, 'COMPLETED', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+             VALUES ($1, $2, $3, $4, $5, $6, $7, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
             `INSERT INTO terms (id, school_id, academic_session_id, name, start_date, end_date, status, created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?, 'COMPLETED', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
-            [tId, schoolId, ses.id, row.term_name, derivedStartDate, derivedEndDate]
+             VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+            [tId, schoolId, ses.id, row.term_name, derivedStartDate, derivedEndDate, termStatus]
           );
-          term = { id: tId, name: row.term_name, academic_session_id: ses.id };
-          termKeyMap.set(tKey, term);
+          term = { id: tId, name: row.term_name, academic_session_id: ses.id, status: termStatus };
+          terms.push(term);
           termsCreated += 1;
         }
 
-        // 3. Resolve or create historical class/level
+        // 3. Resolve or create class/level
         let cls = clsByName.get(row.class_name.toLowerCase());
         if (!cls) {
           const cId = newId('cls');
@@ -1688,12 +1775,14 @@ courseAndBacklogRouter.post(
         }
 
         // 4. Resolve or create course/subject with exact modifiable credit_units & semester tag
-        const inferredSemTag: string | null = normalizeSemesterTag(row.term_name) || null;
+        const inferredSemTag: string | null = normalizeSemesterTag(term.name || row.term_name) || null;
+        const cleanDept = row.department ? String(row.department).trim().slice(0, 120) : null;
         let sub = subjects.find(
           (s) =>
             ((row.subject_code && String(s.code || '').trim().toUpperCase() === row.subject_code) ||
               String(s.name || '').trim().toLowerCase() === row.subject_name.toLowerCase()) &&
-            (!s.class_id || s.class_id === cls.id)
+            (!s.class_id || s.class_id === cls.id) &&
+            (!cleanDept || !s.department || String(s.department).trim().toLowerCase() === cleanDept.toLowerCase())
         );
         if (!sub) {
           const subId = newId('sub');
@@ -1701,25 +1790,34 @@ courseAndBacklogRouter.post(
           const safeSubCode = row.subject_code.slice(0, 32);
           await dualWrite(
             `INSERT INTO subjects (
-               id, school_id, name, code, class_id, credit_units, course_type, semester_tag, status, is_deleted, created_at, updated_at
-             ) VALUES ($1,$2,$3,$4,$5,$6,'CORE',$7,'ACTIVE',0,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)`,
+               id, school_id, name, code, class_id, department, credit_units, course_type, semester_tag, status, is_deleted, created_at, updated_at
+             ) VALUES ($1,$2,$3,$4,$5,$6,$7,'CORE',$8,'ACTIVE',0,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)`,
             `INSERT INTO subjects (
-               id, school_id, name, code, class_id, credit_units, course_type, semester_tag, status, is_deleted, created_at, updated_at
-             ) VALUES (?,?,?,?,?,?,'CORE',?,'ACTIVE',0,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)`,
-            [subId, schoolId, safeSubName, safeSubCode, cls.id, row.credit_units, inferredSemTag]
+               id, school_id, name, code, class_id, department, credit_units, course_type, semester_tag, status, is_deleted, created_at, updated_at
+             ) VALUES (?,?,?,?,?,?,?,'CORE',?,'ACTIVE',0,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)`,
+            [subId, schoolId, safeSubName, safeSubCode, cls.id, cleanDept, row.credit_units, inferredSemTag]
           );
-          sub = { id: subId, name: safeSubName, code: safeSubCode, class_id: cls.id, credit_units: row.credit_units, semester_tag: inferredSemTag };
+          sub = {
+            id: subId,
+            name: safeSubName,
+            code: safeSubCode,
+            class_id: cls.id,
+            department: cleanDept,
+            credit_units: row.credit_units,
+            semester_tag: inferredSemTag,
+          };
           subjects.push(sub);
           subjectsCreated += 1;
         }
 
-        // 5. Record historical course registration (preserving exact credit_units_snapshot!)
+        // 5. Record course/subject registration (REGULAR for current active session, HISTORICAL for previous years)
         const regId = newId('creg');
+        const regType = isCurrentSession ? 'REGULAR' : 'HISTORICAL';
         await dualWrite(
           `INSERT INTO student_course_registrations (
              id, school_id, student_id, academic_session_id, term_id, class_id, subject_id,
              credit_units_snapshot, registration_type, status, registered_by, created_at, updated_at
-           ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'HISTORICAL','APPROVED',$9,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)
+           ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'APPROVED',$10,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)
            ON CONFLICT (school_id, student_id, academic_session_id, term_id, subject_id) DO UPDATE SET
              class_id = EXCLUDED.class_id,
              credit_units_snapshot = EXCLUDED.credit_units_snapshot,
@@ -1728,19 +1826,19 @@ courseAndBacklogRouter.post(
           `INSERT INTO student_course_registrations (
              id, school_id, student_id, academic_session_id, term_id, class_id, subject_id,
              credit_units_snapshot, registration_type, status, registered_by, created_at, updated_at
-           ) VALUES (?,?,?,?,?,?,?,?,'HISTORICAL','APPROVED',?,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)
+           ) VALUES (?,?,?,?,?,?,?,?,?,'APPROVED',?,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)
            ON CONFLICT(school_id, student_id, academic_session_id, term_id, subject_id) DO UPDATE SET
              class_id = excluded.class_id,
              credit_units_snapshot = excluded.credit_units_snapshot,
              status = 'APPROVED',
              updated_at = CURRENT_TIMESTAMP`,
-          [regId, schoolId, row.student_id, ses.id, term.id, cls.id, sub.id, row.credit_units, actorId]
+          [regId, schoolId, row.student_id, ses.id, term.id, cls.id, sub.id, row.credit_units, regType, actorId]
         );
         registrationsSaved += 1;
 
-        // 6. Anchor immutable historical enrollment class mapping (NEVER mutating students.class_id!)
+        // 6. Anchor immutable enrollment class mapping for historical sessions (NEVER mutating students.class_id!)
         const histKey = `${row.student_id}::${ses.id}`;
-        if (!historyRecorded.has(histKey)) {
+        if (!historyRecorded.has(histKey) && (!isCurrentSession || row.student_current_class_id !== cls.id)) {
           const existingHist = await dbGet(
             `SELECT id FROM student_enrollment_history
              WHERE school_id = $1 AND student_id = $2 AND academic_session_id = $3
@@ -1752,32 +1850,49 @@ courseAndBacklogRouter.post(
           );
           if (!existingHist) {
             const histId = newId('enrh');
+            const histOutcome = isCurrentSession ? 'ENROLLED' : 'HISTORICAL_IMPORT';
+            const histRemark = isCurrentSession
+              ? 'Current session bulk result upload'
+              : 'Historical backlog onboarding import';
             await dualWrite(
               `INSERT INTO student_enrollment_history (
                  id, school_id, student_id, academic_session_id, session_name, class_id, class_name,
-                 previous_status, new_status, outcome, remarks, recorded_by, created_at
-               ) VALUES ($1,$2,$3,$4,$5,$6,$7,'ACTIVE','ACTIVE','HISTORICAL_IMPORT','Historical backlog onboarding import',$8,CURRENT_TIMESTAMP)`,
+                 class_arm_id, class_arm_name, previous_status, new_status, outcome, remarks, recorded_by, created_at
+               ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'ACTIVE','ACTIVE',$10,$11,$12,CURRENT_TIMESTAMP)`,
               `INSERT INTO student_enrollment_history (
                  id, school_id, student_id, academic_session_id, session_name, class_id, class_name,
-                 previous_status, new_status, outcome, remarks, recorded_by, created_at
-               ) VALUES (?,?,?,?,?,?,?,'ACTIVE','ACTIVE','HISTORICAL_IMPORT','Historical backlog onboarding import',?,CURRENT_TIMESTAMP)`,
-              [histId, schoolId, row.student_id, ses.id, ses.name, cls.id, cls.name, actorId]
+                 class_arm_id, class_arm_name, previous_status, new_status, outcome, remarks, recorded_by, created_at
+               ) VALUES (?,?,?,?,?,?,?,?,?,'ACTIVE','ACTIVE',?,?,?,CURRENT_TIMESTAMP)`,
+              [
+                histId,
+                schoolId,
+                row.student_id,
+                ses.id,
+                ses.name,
+                cls.id,
+                cls.name,
+                row.student_current_arm_id || null,
+                cleanDept || row.student_current_arm_name || null,
+                histOutcome,
+                histRemark,
+                actorId,
+              ]
             );
           }
           historyRecorded.add(histKey);
         }
 
-        // 7. If scores are provided, upsert historical examination + student_scores cleanly
+        // 7. If scores are provided, upsert examination + student_scores cleanly
         if (row.has_score && row.total_score !== null) {
           const exKey = `${ses.id}::${term.id}::${cls.id}`;
           let examId = examCache.get(exKey);
           if (!examId) {
             const existingExam = await dbGet(
-              `SELECT id FROM examinations
+              `SELECT id, status FROM examinations
                WHERE school_id = $1 AND academic_session_id = $2 AND term_id = $3 AND class_id = $4
                  AND (is_deleted = 0 OR is_deleted IS NULL)
                ORDER BY created_at DESC LIMIT 1`,
-              `SELECT id FROM examinations
+              `SELECT id, status FROM examinations
                WHERE school_id = ? AND academic_session_id = ? AND term_id = ? AND class_id = ?
                  AND (is_deleted = 0 OR is_deleted IS NULL)
                ORDER BY created_at DESC LIMIT 1`,
@@ -1785,22 +1900,38 @@ courseAndBacklogRouter.post(
             );
             if (existingExam) {
               examId = existingExam.id;
+              if (publishScores && existingExam.status !== 'PUBLISHED') {
+                await dualWrite(
+                  `UPDATE examinations
+                   SET status = 'PUBLISHED', published_by = COALESCE(published_by, $1),
+                       published_at = COALESCE(published_at, CURRENT_TIMESTAMP), updated_at = CURRENT_TIMESTAMP
+                   WHERE id = $2 AND school_id = $3`,
+                  `UPDATE examinations
+                   SET status = 'PUBLISHED', published_by = COALESCE(published_by, ?),
+                       published_at = COALESCE(published_at, CURRENT_TIMESTAMP), updated_at = CURRENT_TIMESTAMP
+                   WHERE id = ? AND school_id = ?`,
+                  [actorId, examId, schoolId]
+                );
+              }
             } else {
               examId = newId('exm');
-              const exTitle = `${ses.name} ${term.name} (${cls.name}) — Historical Record`;
+              const exTitle = isCurrentSession
+                ? `${ses.name} ${term.name} (${cls.name}) — Bulk Results`
+                : `${ses.name} ${term.name} (${cls.name}) — Historical Record`;
+              const exType = isCurrentSession ? 'END_OF_TERM' : 'HISTORICAL';
               const exStatus = publishScores ? 'PUBLISHED' : 'DRAFT';
               await dualWrite(
                 `INSERT INTO examinations (
                    id, school_id, academic_session_id, term_id, class_id, title, exam_type,
                    ca_max_score, exam_max_score, total_max_score, status, created_by,
                    published_by, published_at, is_deleted, created_at, updated_at
-                 ) VALUES ($1,$2,$3,$4,$5,$6,'HISTORICAL',40,60,100,$7,$8,$9,${publishScores ? 'CURRENT_TIMESTAMP' : 'NULL'},0,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)`,
+                 ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,${publishScores ? 'CURRENT_TIMESTAMP' : 'NULL'},0,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)`,
                 `INSERT INTO examinations (
                    id, school_id, academic_session_id, term_id, class_id, title, exam_type,
                    ca_max_score, exam_max_score, total_max_score, status, created_by,
                    published_by, published_at, is_deleted, created_at, updated_at
-                 ) VALUES (?,?,?,?,?,?,'HISTORICAL',40,60,100,?,?,?,${publishScores ? 'CURRENT_TIMESTAMP' : 'NULL'},0,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)`,
-                [examId, schoolId, ses.id, term.id, cls.id, exTitle, exStatus, actorId, publishScores ? actorId : null]
+                 ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,${publishScores ? 'CURRENT_TIMESTAMP' : 'NULL'},0,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)`,
+                [examId, schoolId, ses.id, term.id, cls.id, exTitle, exType, caMax, examMax, totalMax, exStatus, actorId, publishScores ? actorId : null]
               );
             }
             if (examId) examCache.set(exKey, examId);
@@ -1858,6 +1989,268 @@ courseAndBacklogRouter.post(
             ]
           );
           scoresSaved += 1;
+
+          // Track touched (session, term) and session for automatic report card generation
+          const stKey = `${ses.id}::${term.id}`;
+          if (!touchedSessionTerms.has(stKey)) {
+            touchedSessionTerms.set(stKey, { sessionId: ses.id, termId: term.id, studentIds: new Set(), examId: examId || null });
+          }
+          touchedSessionTerms.get(stKey)!.studentIds.add(row.student_id);
+
+          if (!touchedSessions.has(ses.id)) touchedSessions.set(ses.id, new Set());
+          touchedSessions.get(ses.id)!.add(row.student_id);
+        }
+      }
+
+      // 8. Auto-compile Term/Semester Report Cards & Full-Session Cumulative Report Cards when enabled
+      let termReportsGenerated = 0;
+      let sessionReportsGenerated = 0;
+
+      if (autoGenerateReports && scoresSaved > 0) {
+        const rcStatus = publishScores ? 'PUBLISHED' : 'DRAFT';
+
+        // 8a. Generate/update Term/Semester Report Cards for every touched (session, term)
+        for (const [, entry] of touchedSessionTerms) {
+          const { sessionId, termId, examId } = entry;
+          // Gather all students who have scores in this (session, term) so class positions are accurate
+          const scoredStudents = await dbAll(
+            `SELECT DISTINCT s.id, s.class_id, s.class_name
+             FROM student_scores ss
+             JOIN students s ON ss.student_id = s.id
+             WHERE ss.school_id = $1 AND ss.academic_session_id = $2 AND ss.term_id = $3
+               AND (s.is_deleted = 0 OR s.is_deleted IS NULL)`,
+            `SELECT DISTINCT s.id, s.class_id, s.class_name
+             FROM student_scores ss
+             JOIN students s ON ss.student_id = s.id
+             WHERE ss.school_id = ? AND ss.academic_session_id = ? AND ss.term_id = ?
+               AND (s.is_deleted = 0 OR s.is_deleted IS NULL)`,
+            [schoolId, sessionId, termId]
+          );
+
+          const computed: Array<{
+            studentId: string;
+            histClassId: string | null;
+            totalScore: number;
+            averageScore: number;
+            subjectsCount: number;
+          }> = [];
+
+          for (const stu of scoredStudents) {
+            const histCls = await resolveHistoricalStudentClass(schoolId, stu.id, sessionId, stu);
+            const stuScores = await dbAll(
+              `SELECT ss.total_score, COALESCE(ex.total_max_score, 100) as total_max_score
+               FROM student_scores ss
+               LEFT JOIN examinations ex ON ss.examination_id = ex.id
+               WHERE ss.school_id = $1 AND ss.student_id = $2 AND ss.academic_session_id = $3 AND ss.term_id = $4`,
+              `SELECT ss.total_score, COALESCE(ex.total_max_score, 100) as total_max_score
+               FROM student_scores ss
+               LEFT JOIN examinations ex ON ss.examination_id = ex.id
+               WHERE ss.school_id = ? AND ss.student_id = ? AND ss.academic_session_id = ? AND ss.term_id = ?`,
+              [schoolId, stu.id, sessionId, termId]
+            );
+            const valid = stuScores.filter((s) => s.total_score !== null && s.total_score !== undefined);
+            if (valid.length === 0) continue;
+            const totalScore = Math.round(valid.reduce((acc, s) => acc + Number(s.total_score || 0), 0) * 100) / 100;
+            const pctSum = valid.reduce((acc, s) => {
+              const max = Number(s.total_max_score) > 0 ? Number(s.total_max_score) : 100;
+              return acc + (Number(s.total_score) / max) * 100;
+            }, 0);
+            const averageScore = Math.round((pctSum / valid.length) * 100) / 100;
+            computed.push({
+              studentId: stu.id,
+              histClassId: histCls.class_id || stu.class_id || null,
+              totalScore,
+              averageScore,
+              subjectsCount: valid.length,
+            });
+          }
+
+          const byClass = new Map<string, typeof computed>();
+          for (const item of computed) {
+            const key = item.histClassId || 'UNASSIGNED';
+            if (!byClass.has(key)) byClass.set(key, []);
+            byClass.get(key)!.push(item);
+          }
+
+          for (const [, group] of byClass) {
+            const sorted = [...group].sort((a, b) => b.averageScore - a.averageScore);
+            const classSize = sorted.length;
+            for (let idx = 0; idx < sorted.length; idx++) {
+              const item = sorted[idx];
+              const position = idx > 0 && item.averageScore === sorted[idx - 1].averageScore ? idx : idx + 1;
+              const rcId = newId('rc');
+              const verCode = `RC-${crypto.randomBytes(3).toString('hex').toUpperCase()}`;
+
+              await dualWrite(
+                `INSERT INTO report_cards (
+                   id, school_id, student_id, class_id, academic_session_id, term_id, examination_id,
+                   status, total_score, average_score, subjects_count, class_position, class_size,
+                   verification_code, created_by, published_by, published_at, created_at, updated_at
+                 ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,${publishScores ? 'CURRENT_TIMESTAMP' : 'NULL'},CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)
+                 ON CONFLICT (school_id, student_id, academic_session_id, term_id) DO UPDATE SET
+                   class_id = EXCLUDED.class_id,
+                   examination_id = COALESCE(EXCLUDED.examination_id, report_cards.examination_id),
+                   status = CASE WHEN $8 = 'PUBLISHED' THEN 'PUBLISHED' ELSE report_cards.status END,
+                   total_score = EXCLUDED.total_score,
+                   average_score = EXCLUDED.average_score,
+                   subjects_count = EXCLUDED.subjects_count,
+                   class_position = EXCLUDED.class_position,
+                   class_size = EXCLUDED.class_size,
+                   published_by = COALESCE(report_cards.published_by, EXCLUDED.published_by),
+                   published_at = COALESCE(report_cards.published_at, EXCLUDED.published_at),
+                   updated_at = CURRENT_TIMESTAMP`,
+                `INSERT INTO report_cards (
+                   id, school_id, student_id, class_id, academic_session_id, term_id, examination_id,
+                   status, total_score, average_score, subjects_count, class_position, class_size,
+                   verification_code, created_by, published_by, published_at, created_at, updated_at
+                 ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,${publishScores ? 'CURRENT_TIMESTAMP' : 'NULL'},CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)
+                 ON CONFLICT(school_id, student_id, academic_session_id, term_id) DO UPDATE SET
+                   class_id = excluded.class_id,
+                   examination_id = COALESCE(excluded.examination_id, report_cards.examination_id),
+                   status = CASE WHEN excluded.status = 'PUBLISHED' THEN 'PUBLISHED' ELSE report_cards.status END,
+                   total_score = excluded.total_score,
+                   average_score = excluded.average_score,
+                   subjects_count = excluded.subjects_count,
+                   class_position = excluded.class_position,
+                   class_size = excluded.class_size,
+                   published_by = COALESCE(report_cards.published_by, excluded.published_by),
+                   published_at = COALESCE(report_cards.published_at, excluded.published_at),
+                   updated_at = CURRENT_TIMESTAMP`,
+                [
+                  rcId,
+                  schoolId,
+                  item.studentId,
+                  item.histClassId,
+                  sessionId,
+                  termId,
+                  examId,
+                  rcStatus,
+                  item.totalScore,
+                  item.averageScore,
+                  item.subjectsCount,
+                  position,
+                  classSize,
+                  verCode,
+                  actorId,
+                  publishScores ? actorId : null,
+                ]
+              );
+
+              if (publishScores) {
+                const compiledTerm = await compileTermReportCard(schoolId, item.studentId, sessionId, termId, {
+                  onlyPublished: false,
+                  visibilityRole: 'ADMIN',
+                  forceLive: true,
+                });
+                if (compiledTerm?.reportCard?.breakdown) {
+                  const bd = compiledTerm.reportCard.breakdown;
+                  await dualWrite(
+                    `UPDATE report_cards
+                     SET snapshot_json = $1, attendance_summary_json = $2, behaviour_summary_json = $3, updated_at = CURRENT_TIMESTAMP
+                     WHERE school_id = $4 AND student_id = $5 AND academic_session_id = $6 AND term_id = $7`,
+                    `UPDATE report_cards
+                     SET snapshot_json = ?, attendance_summary_json = ?, behaviour_summary_json = ?, updated_at = CURRENT_TIMESTAMP
+                     WHERE school_id = ? AND student_id = ? AND academic_session_id = ? AND term_id = ?`,
+                    [
+                      JSON.stringify(bd),
+                      JSON.stringify(bd.attendance_summary || {}),
+                      JSON.stringify(bd.behaviour_summary || {}),
+                      schoolId,
+                      item.studentId,
+                      sessionId,
+                      termId,
+                    ]
+                  );
+                }
+              }
+              termReportsGenerated += 1;
+            }
+          }
+        }
+
+        // 8b. Generate/update Full-Session Cumulative Report Cards for every touched session
+        for (const [sessionId, studentIdSet] of touchedSessions) {
+          for (const studentId of studentIdSet) {
+            const compiled = await compileSessionReportCard(schoolId, studentId, sessionId, {
+              onlyPublished: false,
+              visibilityRole: 'ADMIN',
+              forceLive: true,
+            });
+            if (!compiled?.reportCard?.breakdown) continue;
+            const bd = compiled.reportCard.breakdown;
+            const srcId = newId('src');
+            const verCode = `SRC-${crypto.randomBytes(3).toString('hex').toUpperCase()}`;
+            const histClassId = compiled.reportCard.class_id || null;
+
+            await dualWrite(
+              `INSERT INTO session_report_cards (
+                 id, school_id, student_id, class_id, academic_session_id,
+                 status, total_score, average_score, subjects_count, terms_count,
+                 class_position, class_size, promotion_status, term_averages_json,
+                 attendance_summary_json, behaviour_summary_json, teacher_remark, verification_code,
+                 snapshot_json, created_by, published_by, published_at, created_at, updated_at
+               ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,${publishScores ? 'CURRENT_TIMESTAMP' : 'NULL'},CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)
+               ON CONFLICT (school_id, student_id, academic_session_id) DO UPDATE SET
+                 class_id = EXCLUDED.class_id,
+                 status = CASE WHEN $6 = 'PUBLISHED' THEN 'PUBLISHED' ELSE session_report_cards.status END,
+                 total_score = EXCLUDED.total_score,
+                 average_score = EXCLUDED.average_score,
+                 subjects_count = EXCLUDED.subjects_count,
+                 terms_count = EXCLUDED.terms_count,
+                 class_position = EXCLUDED.class_position,
+                 class_size = EXCLUDED.class_size,
+                 term_averages_json = EXCLUDED.term_averages_json,
+                 snapshot_json = CASE WHEN $6 = 'PUBLISHED' THEN EXCLUDED.snapshot_json ELSE session_report_cards.snapshot_json END,
+                 published_by = COALESCE(session_report_cards.published_by, EXCLUDED.published_by),
+                 published_at = COALESCE(session_report_cards.published_at, EXCLUDED.published_at),
+                 updated_at = CURRENT_TIMESTAMP`,
+              `INSERT INTO session_report_cards (
+                 id, school_id, student_id, class_id, academic_session_id,
+                 status, total_score, average_score, subjects_count, terms_count,
+                 class_position, class_size, promotion_status, term_averages_json,
+                 attendance_summary_json, behaviour_summary_json, teacher_remark, verification_code,
+                 snapshot_json, created_by, published_by, published_at, created_at, updated_at
+               ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,${publishScores ? 'CURRENT_TIMESTAMP' : 'NULL'},CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)
+               ON CONFLICT(school_id, student_id, academic_session_id) DO UPDATE SET
+                 class_id = excluded.class_id,
+                 status = CASE WHEN excluded.status = 'PUBLISHED' THEN 'PUBLISHED' ELSE session_report_cards.status END,
+                 total_score = excluded.total_score,
+                 average_score = excluded.average_score,
+                 subjects_count = excluded.subjects_count,
+                 terms_count = excluded.terms_count,
+                 class_position = excluded.class_position,
+                 class_size = excluded.class_size,
+                 term_averages_json = excluded.term_averages_json,
+                 snapshot_json = CASE WHEN excluded.status = 'PUBLISHED' THEN excluded.snapshot_json ELSE session_report_cards.snapshot_json END,
+                 published_by = COALESCE(session_report_cards.published_by, excluded.published_by),
+                 published_at = COALESCE(session_report_cards.published_at, excluded.published_at),
+                 updated_at = CURRENT_TIMESTAMP`,
+              [
+                srcId,
+                schoolId,
+                studentId,
+                histClassId,
+                sessionId,
+                rcStatus,
+                bd.total_score,
+                bd.average_score,
+                bd.subjects_count,
+                bd.terms_count,
+                bd.class_position,
+                bd.class_size,
+                bd.promotion_status || 'PENDING',
+                JSON.stringify(bd.term_averages || []),
+                JSON.stringify(bd.attendance_summary || {}),
+                JSON.stringify(bd.behaviour_summary || {}),
+                bd.teacher_remark || null,
+                verCode,
+                publishScores ? JSON.stringify(bd) : null,
+                actorId,
+                publishScores ? actorId : null,
+              ]
+            );
+            sessionReportsGenerated += 1;
+          }
         }
       }
 
@@ -1865,7 +2258,7 @@ courseAndBacklogRouter.post(
         actorId,
         actorEmail: req.user?.email,
         schoolId,
-        action: 'IMPORT_HISTORICAL_BACKLOG',
+        action: 'IMPORT_BULK_RESULTS',
         entity: 'HISTORICAL_BACKLOG',
         metadata: {
           rowsImported: analysis.validRows.length,
@@ -1876,13 +2269,22 @@ courseAndBacklogRouter.post(
           subjectsCreated,
           registrationsSaved,
           scoresSaved,
+          termReportsGenerated,
+          sessionReportsGenerated,
           publishScores,
+          autoGenerateReports,
         },
       });
 
+      const learnerCount = new Set(analysis.validRows.map((r) => r.student_id)).size;
+      const reportSummaryText =
+        autoGenerateReports && scoresSaved > 0
+          ? ` Compiled ${termReportsGenerated} ${instProfile.labels.cycle.toLowerCase()} report(s) and ${sessionReportsGenerated} session cumulative report(s).`
+          : '';
+
       return res.status(201).json({
         success: true,
-        message: `Imported ${registrationsSaved} historical course registration(s) and ${scoresSaved} score(s) across ${new Set(analysis.validRows.map((r) => r.student_id)).size} learner(s). Current class placements remain untouched.`,
+        message: `Imported ${registrationsSaved} registration(s) and ${scoresSaved} result score(s) across ${learnerCount} learner(s).${reportSummaryText} Current class placements remain untouched.`,
         summary: {
           rowsImported: analysis.validRows.length,
           invalidRows: analysis.invalidRows.length,
@@ -1892,14 +2294,16 @@ courseAndBacklogRouter.post(
           subjectsCreated,
           registrationsSaved,
           scoresSaved,
+          termReportsGenerated,
+          sessionReportsGenerated,
         },
         invalidRows: analysis.invalidRows.slice(0, 20),
       });
     } catch (err: any) {
-      console.error('[Historical Backlog Import Error]', err);
+      console.error('[Bulk Results Import Error]', err);
       return res.status(500).json({
         error: 'BACKLOG_IMPORT_FAILED',
-        message: safeClientError(err, 'Failed to import historical backlog records.'),
+        message: safeClientError(err, 'Failed to import bulk results.'),
       });
     }
   }

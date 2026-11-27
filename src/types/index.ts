@@ -856,9 +856,11 @@ export interface CourseRegistrationItem {
 export interface HistoricalBacklogInputRow {
   admission_number?: string;
   student_id?: string;
+  student_name?: string;
   session_name: string;
   term_name: string;
   class_name: string;
+  department?: string;
   subject_code?: string;
   subject_name: string;
   credit_units: number;

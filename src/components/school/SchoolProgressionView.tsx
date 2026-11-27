@@ -958,6 +958,13 @@ export const SchoolProgressionView: React.FC = () => {
       {backlogModalOpen && (
         <HistoricalBacklogImportModal
           students={allStudents}
+          sessions={sessions}
+          classes={classes}
+          schoolType={activeSchool?.type || ''}
+          cycleLabels={instProfile.cycleLabels}
+          showCreditUnits={isTertiary || isGpaMode}
+          defaultSessionId={fromSessionId}
+          defaultClassId={fromClassId}
           isTertiary={isTertiary}
           subjectLabel={labels.subject}
           subjectPlural={labels.subjectPlural}

@@ -3667,6 +3667,9 @@ export const api = {
       rows_with_scores: number;
       rows_registration_only: number;
       unique_students: number;
+      current_year_rows?: number;
+      previous_year_rows?: number;
+      target_sessions?: string[];
       will_auto_create: {
         sessions: string[];
         classes: string[];
@@ -3679,8 +3682,10 @@ export const api = {
       student_name: string;
       admission_number: string;
       session_name: string;
+      is_current_session?: boolean;
       term_name: string;
       class_name: string;
+      department?: string;
       subject_code: string;
       subject_name: string;
       credit_units: number;
@@ -3701,6 +3706,7 @@ export const api = {
   async importHistoricalBacklog(payload: {
     rows: HistoricalBacklogInputRow[];
     publish_scores?: boolean;
+    auto_generate_reports?: boolean;
   }): Promise<{
     success: boolean;
     message: string;
@@ -3713,6 +3719,8 @@ export const api = {
       subjectsCreated: number;
       registrationsSaved: number;
       scoresSaved: number;
+      termReportsGenerated?: number;
+      sessionReportsGenerated?: number;
     };
     invalidRows: Array<{ row: number; reason: string }>;
   }> {
