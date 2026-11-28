@@ -988,20 +988,49 @@ performanceRouter.put(
     if (!exam) {
       return res.status(404).json({ error: 'NOT_FOUND', message: 'Examination not found.' });
     }
-    const { title, exam_type, class_id, academic_session_id, term_id } = req.body || {};
+    const body = req.body || {};
+    const nextTitle =
+      typeof body.title === 'string' && body.title.trim() ? body.title.trim().slice(0, 160) : exam.title;
+    const nextExamType = body.exam_type || exam.exam_type;
+    const nextClassId = 'class_id' in body ? (body.class_id || null) : exam.class_id;
+    const nextSessionId = 'academic_session_id' in body ? (body.academic_session_id || null) : exam.academic_session_id;
+    const nextTermId = 'term_id' in body ? (body.term_id || null) : exam.term_id;
+    const nextDept =
+      'department' in body
+        ? body.department && String(body.department).trim()
+          ? String(body.department).trim().slice(0, 120)
+          : null
+        : exam.department;
+    const nextCaMax = body.ca_max_score !== undefined ? Number(body.ca_max_score) : Number(exam.ca_max_score ?? 40);
+    const nextExamMax = body.exam_max_score !== undefined ? Number(body.exam_max_score) : Number(exam.exam_max_score ?? 60);
+    const nextTotalMax = nextCaMax + nextExamMax;
+    if (!Number.isFinite(nextCaMax) || !Number.isFinite(nextExamMax) || nextCaMax < 0 || nextExamMax < 0 || nextTotalMax <= 0) {
+      return res.status(400).json({ error: 'INVALID_WEIGHTS', message: 'CA and Exam max scores must be valid positive numbers.' });
+    }
+
     await execWrite(
       `UPDATE examinations
-       SET title = COALESCE($1, title), exam_type = COALESCE($2, exam_type),
-           class_id = COALESCE($3, class_id), academic_session_id = COALESCE($4, academic_session_id),
-           term_id = COALESCE($5, term_id), updated_at = CURRENT_TIMESTAMP
-       WHERE id = $6 AND school_id = $7`,
+       SET title = $1, exam_type = $2, class_id = $3, academic_session_id = $4, term_id = $5,
+           department = $6, ca_max_score = $7, exam_max_score = $8, total_max_score = $9,
+           updated_at = CURRENT_TIMESTAMP
+       WHERE id = $10 AND school_id = $11`,
       `UPDATE examinations
-       SET title = COALESCE(?, title), exam_type = COALESCE(?, exam_type),
-           class_id = COALESCE(?, class_id), academic_session_id = COALESCE(?, academic_session_id),
-           term_id = COALESCE(?, term_id), updated_at = CURRENT_TIMESTAMP
+       SET title = ?, exam_type = ?, class_id = ?, academic_session_id = ?, term_id = ?,
+           department = ?, ca_max_score = ?, exam_max_score = ?, total_max_score = ?,
+           updated_at = CURRENT_TIMESTAMP
        WHERE id = ? AND school_id = ?`,
-      [title?.trim() || null, exam_type || null, class_id ?? null, academic_session_id ?? null, term_id ?? null, id, schoolId]
+      [nextTitle, nextExamType, nextClassId, nextSessionId, nextTermId, nextDept, nextCaMax, nextExamMax, nextTotalMax, id, schoolId]
     );
+
+    logAudit({
+      actorId: req.user!.id,
+      actorEmail: req.user!.email,
+      schoolId,
+      action: 'UPDATE_EXAMINATION',
+      entity: 'EXAMINATION',
+      entityId: id,
+      metadata: { title: nextTitle, academic_session_id: nextSessionId, term_id: nextTermId, class_id: nextClassId, department: nextDept, caMax: nextCaMax, examMax: nextExamMax },
+    });
 
     const updated = await dbGet(`SELECT * FROM examinations WHERE id = $1`, `SELECT * FROM examinations WHERE id = ?`, [id]);
     return res.json({ success: true, examination: updated });

@@ -101,6 +101,8 @@ export const BulkResultsManagerModal: React.FC<BulkResultsManagerModalProps> = (
   // Reassign form state
   const [targetClassId, setTargetClassId] = useState('');
   const [targetSessionId, setTargetSessionId] = useState('');
+  const [targetCustomSessionName, setTargetCustomSessionName] = useState('');
+  const [targetCustomTermName, setTargetCustomTermName] = useState('');
   const [targetTermId, setTargetTermId] = useState('');
   const [targetDepartment, setTargetDepartment] = useState('');
   const [newExamTitle, setNewExamTitle] = useState('');
@@ -191,6 +193,8 @@ export const BulkResultsManagerModal: React.FC<BulkResultsManagerModalProps> = (
     setShowFilters(false);
     setTargetClassId('');
     setTargetSessionId('');
+    setTargetCustomSessionName('');
+    setTargetCustomTermName(isTertiary ? '1st Semester' : '1st Term');
     setTargetTermId('');
     setTargetDepartment('');
     setNewExamTitle('');
@@ -355,6 +359,11 @@ export const BulkResultsManagerModal: React.FC<BulkResultsManagerModalProps> = (
       setError('Select at least one batch or score row to reassign.');
       return;
     }
+    const isCustomSession = targetSessionId === '__CUSTOM__';
+    if (isCustomSession && !targetCustomSessionName.trim()) {
+      setError('Enter the new Academic Session name (e.g. 2027/2028 or 2035/2036).');
+      return;
+    }
     if (!targetClassId && !targetSessionId && !targetTermId && !targetDepartment.trim() && !newExamTitle.trim()) {
       setError(`Choose a new ${classLabel}, Session, ${cycleLabel}, Department, or Title below before clicking Apply.`);
       return;
@@ -363,12 +372,33 @@ export const BulkResultsManagerModal: React.FC<BulkResultsManagerModalProps> = (
     setError(null);
     setNotice(null);
     try {
+      let resolvedTargetSessionId: string | null = targetSessionId && !isCustomSession ? targetSessionId : null;
+      let resolvedTargetTermId: string | null = targetTermId || null;
+
+      if (isCustomSession) {
+        const desiredTerm = targetCustomTermName.trim();
+        const sessRes = await api.createAcademicSession({
+          name: targetCustomSessionName.trim(),
+          status: 'UPCOMING',
+          auto_create_terms: true,
+          reuse_existing: true,
+          term_names: desiredTerm ? [desiredTerm] : undefined,
+        });
+        const createdSess = sessRes.session;
+        resolvedTargetSessionId = createdSess.id;
+        const matchedTerm =
+          (createdSess.terms || []).find(
+            (t) => desiredTerm && t.name.trim().toLowerCase() === desiredTerm.toLowerCase()
+          ) || createdSess.terms?.[0];
+        resolvedTargetTermId = matchedTerm?.id || null;
+      }
+
       const res = await api.bulkReassignResults({
         examination_ids: examIds.length > 0 ? examIds : undefined,
         score_ids: scoreIds.length > 0 ? scoreIds : undefined,
         target_class_id: targetClassId || null,
-        target_academic_session_id: targetSessionId || null,
-        target_term_id: targetTermId || null,
+        target_academic_session_id: resolvedTargetSessionId,
+        target_term_id: resolvedTargetTermId,
         target_department: targetDepartment.trim() || null,
         new_exam_title: newExamTitle.trim() || null,
         reason: reassignReason.trim() || `Corrected ${classLabel.toLowerCase()} assignment`,
@@ -377,6 +407,7 @@ export const BulkResultsManagerModal: React.FC<BulkResultsManagerModalProps> = (
       setActionMode(null);
       setSelectedExamIds([]);
       setSelectedScoreIds([]);
+      setTargetCustomSessionName('');
       await loadData({
         academic_session_id: filterSessionId || undefined,
         term_id: filterTermId || undefined,
@@ -572,24 +603,55 @@ export const BulkResultsManagerModal: React.FC<BulkResultsManagerModalProps> = (
                         {s.name}
                       </option>
                     ))}
+                    <option value="__CUSTOM__">+ Create / Type New Session (e.g. 2027/2028, 2035/2036)...</option>
                   </select>
+                  {targetSessionId === '__CUSTOM__' && (
+                    <input
+                      type="text"
+                      aria-label="Custom Target Session for Reassignment"
+                      list="reassign-custom-session-options"
+                      value={targetCustomSessionName}
+                      onChange={(e) => setTargetCustomSessionName(e.target.value)}
+                      placeholder="e.g. 2027/2028 or 2035/2036"
+                      className="w-full mt-2 px-3 py-2 bg-emerald-50 border border-emerald-300 rounded-lg font-mono font-semibold text-sm sm:text-xs"
+                    />
+                  )}
+                  <datalist id="reassign-custom-session-options">
+                    {Array.from({ length: 18 }, (_, i) => {
+                      const y = new Date().getFullYear() - 5 + i;
+                      return `${y}/${y + 1}`;
+                    }).map((yr) => (
+                      <option key={yr} value={yr} />
+                    ))}
+                  </datalist>
                 </div>
 
                 <div>
                   <label className="block font-semibold text-slate-800 mb-1">New / Correct {cycleLabel}</label>
-                  <select
-                    aria-label={`Target ${cycleLabel} for Reassignment`}
-                    value={targetTermId}
-                    onChange={(e) => setTargetTermId(e.target.value)}
-                    className="w-full px-3 py-2.5 bg-white border border-slate-300 rounded-lg text-sm sm:text-xs"
-                  >
-                    <option value="">Keep current {cycleLabel.toLowerCase()}</option>
-                    {(targetSessionObj?.terms || sessions.flatMap((s) => s.terms || [])).map((t) => (
-                      <option key={t.id} value={t.id}>
-                        {t.name}
-                      </option>
-                    ))}
-                  </select>
+                  {targetSessionId === '__CUSTOM__' ? (
+                    <input
+                      type="text"
+                      aria-label={`Custom Target ${cycleLabel} for Reassignment`}
+                      value={targetCustomTermName}
+                      onChange={(e) => setTargetCustomTermName(e.target.value)}
+                      placeholder={isTertiary ? 'e.g. 1st Semester' : 'e.g. 1st Term'}
+                      className="w-full px-3 py-2.5 bg-emerald-50 border border-emerald-300 rounded-lg text-sm sm:text-xs"
+                    />
+                  ) : (
+                    <select
+                      aria-label={`Target ${cycleLabel} for Reassignment`}
+                      value={targetTermId}
+                      onChange={(e) => setTargetTermId(e.target.value)}
+                      className="w-full px-3 py-2.5 bg-white border border-slate-300 rounded-lg text-sm sm:text-xs"
+                    >
+                      <option value="">Keep current {cycleLabel.toLowerCase()}</option>
+                      {(targetSessionObj?.terms || sessions.flatMap((s) => s.terms || [])).map((t) => (
+                        <option key={t.id} value={t.id}>
+                          {t.name}
+                        </option>
+                      ))}
+                    </select>
+                  )}
                 </div>
 
                 <div>

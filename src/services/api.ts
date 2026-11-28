@@ -1014,12 +1014,55 @@ export const api = {
     });
   },
 
+  async updateAcademicSession(
+    sessionId: string,
+    data: { name?: string; start_date?: string | null; end_date?: string | null; status?: string }
+  ): Promise<{ success: boolean; session: AcademicSessionItem; message: string }> {
+    return safeFetch(`${API_BASE}/school/academic-sessions/${encodeURIComponent(sessionId)}`, {
+      method: 'PUT',
+      headers: getAuthHeaders(),
+      body: JSON.stringify(data),
+    });
+  },
+
+  async deleteAcademicSession(sessionId: string): Promise<{ success: boolean; message: string }> {
+    return safeFetch(`${API_BASE}/school/academic-sessions/${encodeURIComponent(sessionId)}`, {
+      method: 'DELETE',
+      headers: getAuthHeaders(),
+    });
+  },
+
   async createTerm(sessionId: string, data: { name: string; start_date?: string; end_date?: string; status?: string }): Promise<{ term: TermItem; message: string }> {
-    return safeFetch(`${API_BASE}/school/academic-sessions/${sessionId}/terms`, {
+    return safeFetch(`${API_BASE}/school/academic-sessions/${encodeURIComponent(sessionId)}/terms`, {
       method: 'POST',
       headers: getAuthHeaders(),
       body: JSON.stringify(data),
     });
+  },
+
+  async updateTerm(
+    sessionId: string,
+    termId: string,
+    data: { name?: string; start_date?: string | null; end_date?: string | null; status?: string }
+  ): Promise<{ success: boolean; term: TermItem; message: string }> {
+    return safeFetch(
+      `${API_BASE}/school/academic-sessions/${encodeURIComponent(sessionId)}/terms/${encodeURIComponent(termId)}`,
+      {
+        method: 'PUT',
+        headers: getAuthHeaders(),
+        body: JSON.stringify(data),
+      }
+    );
+  },
+
+  async deleteTerm(sessionId: string, termId: string): Promise<{ success: boolean; message: string }> {
+    return safeFetch(
+      `${API_BASE}/school/academic-sessions/${encodeURIComponent(sessionId)}/terms/${encodeURIComponent(termId)}`,
+      {
+        method: 'DELETE',
+        headers: getAuthHeaders(),
+      }
+    );
   },
 
   async getSchoolFees(): Promise<{ fees: FeeItem[]; count: number }> {
@@ -2190,6 +2233,26 @@ export const api = {
   }): Promise<{ success: boolean; examination: ExaminationItem }> {
     return safeFetch(`${API_BASE}/school/examinations`, {
       method: 'POST',
+      headers: getAuthHeaders(),
+      body: JSON.stringify(data),
+    });
+  },
+
+  async updateExamination(
+    id: string,
+    data: {
+      title?: string;
+      exam_type?: string;
+      academic_session_id?: string | null;
+      term_id?: string | null;
+      class_id?: string | null;
+      department?: string | null;
+      ca_max_score?: number;
+      exam_max_score?: number;
+    }
+  ): Promise<{ success: boolean; examination: ExaminationItem }> {
+    return safeFetch(`${API_BASE}/school/examinations/${encodeURIComponent(id)}`, {
+      method: 'PUT',
       headers: getAuthHeaders(),
       body: JSON.stringify(data),
     });

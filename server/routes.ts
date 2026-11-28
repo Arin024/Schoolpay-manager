@@ -1868,33 +1868,37 @@ apiRouter.put(
       );
     }
 
-    cacheDb.prepare(`
-      UPDATE school_settings
-      SET current_academic_session = ?,
-          current_term = ?,
-          payment_notification_email = ?,
-          payment_notification_sms = ?,
-          allow_partial_payments = ?,
-          institution_category = COALESCE(?, institution_category),
-          academic_cycle_type = COALESCE(?, academic_cycle_type),
-          cycle_labels_json = COALESCE(?, cycle_labels_json),
-          grading_mode = COALESCE(?, grading_mode),
-          terminology_json = COALESCE(?, terminology_json),
-          updated_at = CURRENT_TIMESTAMP
-      WHERE school_id = ?
-    `).run(
-      current_academic_session || '2024/2025',
-      current_term || '1st Term',
-      payment_notification_email || null,
-      payment_notification_sms ? 1 : 0,
-      allow_partial_payments !== undefined ? (allow_partial_payments ? 1 : 0) : 1,
-      cleanCategory,
-      cleanCycleType,
-      serializedCycleLabels,
-      cleanGradingMode,
-      serializedTerminology,
-      schoolId
-    );
+    try {
+      cacheDb.prepare(`
+        UPDATE school_settings
+        SET current_academic_session = ?,
+            current_term = ?,
+            payment_notification_email = ?,
+            payment_notification_sms = ?,
+            allow_partial_payments = ?,
+            institution_category = COALESCE(?, institution_category),
+            academic_cycle_type = COALESCE(?, academic_cycle_type),
+            cycle_labels_json = COALESCE(?, cycle_labels_json),
+            grading_mode = COALESCE(?, grading_mode),
+            terminology_json = COALESCE(?, terminology_json),
+            updated_at = CURRENT_TIMESTAMP
+        WHERE school_id = ?
+      `).run(
+        (current_academic_session && String(current_academic_session).trim()) || '2024/2025',
+        (current_term && String(current_term).trim()) || '1st Term',
+        payment_notification_email || null,
+        payment_notification_sms ? 1 : 0,
+        allow_partial_payments !== undefined ? (allow_partial_payments ? 1 : 0) : 1,
+        cleanCategory,
+        cleanCycleType,
+        serializedCycleLabels,
+        cleanGradingMode,
+        serializedTerminology,
+        schoolId
+      );
+    } catch (cacheErr) {
+      if (!pool) throw cacheErr;
+    }
 
     logAudit({
       actorId: req.user!.id,
@@ -5475,6 +5479,18 @@ apiRouter.post(
       }
     }
 
+    if (validStatus === 'ACTIVE') {
+      try {
+        if (pool) {
+          await queryPg(
+            'UPDATE school_settings SET current_academic_session = $1, updated_at = CURRENT_TIMESTAMP WHERE school_id = $2',
+            [safeName, schoolId]
+          );
+        }
+        cacheDb.prepare('UPDATE school_settings SET current_academic_session = ?, updated_at = CURRENT_TIMESTAMP WHERE school_id = ?').run(safeName, schoolId);
+      } catch {}
+    }
+
     const pgSession = pool ? await queryPg('SELECT * FROM academic_sessions WHERE id = $1', [sessionId]) : null;
     const session = pgSession?.rows[0] || cacheDb.prepare('SELECT * FROM academic_sessions WHERE id = ?').get(sessionId);
     const terms = pool
@@ -5489,6 +5505,246 @@ apiRouter.post(
         : `Academic session "${safeName}" is ready (${terms.length} cycle(s)).`,
       session: { ...session, terms },
     });
+  }
+);
+
+// PUT /api/v1/school/academic-sessions/:id (Edit/rename session e.g. 2027/2028, 2035/2036, dates, or status)
+apiRouter.put(
+  '/v1/school/academic-sessions/:id',
+  requireAuth,
+  requireTenant,
+  requireRole(['SCHOOL_OWNER', 'SCHOOL_ADMIN']),
+  async (req: AuthenticatedRequest, res) => {
+    const schoolId = req.targetSchoolId!;
+    const { id: sessionId } = req.params;
+    const { name, start_date, end_date, status } = req.body || {};
+    const pool = getPgPool();
+
+    try {
+      const existing: any = pool
+        ? (await queryPg('SELECT * FROM academic_sessions WHERE id = $1 AND school_id = $2 LIMIT 1', [sessionId, schoolId])).rows[0]
+        : cacheDb.prepare('SELECT * FROM academic_sessions WHERE id = ? AND school_id = ? LIMIT 1').get(sessionId, schoolId);
+
+      if (!existing) {
+        return res.status(404).json({ error: 'SESSION_NOT_FOUND', message: 'Academic session not found in your school.' });
+      }
+
+      const nextName =
+        name !== undefined && typeof name === 'string' && name.trim()
+          ? name.trim().slice(0, 64)
+          : String(existing.name || '').trim();
+      if (!nextName) {
+        return res.status(400).json({ error: 'MISSING_FIELDS', message: 'Session name cannot be empty (e.g. 2027/2028).' });
+      }
+
+      // Guard against duplicate session names in the same tenant
+      const dup: any = pool
+        ? (
+            await queryPg(
+              'SELECT id FROM academic_sessions WHERE school_id = $1 AND LOWER(TRIM(name)) = LOWER(TRIM($2)) AND id != $3 LIMIT 1',
+              [schoolId, nextName, sessionId]
+            )
+          ).rows[0]
+        : cacheDb
+            .prepare('SELECT id FROM academic_sessions WHERE school_id = ? AND LOWER(TRIM(name)) = LOWER(TRIM(?)) AND id != ? LIMIT 1')
+            .get(schoolId, nextName, sessionId);
+
+      if (dup) {
+        return res.status(409).json({
+          error: 'SESSION_EXISTS',
+          message: `Another academic session named "${nextName}" already exists in your school.`,
+        });
+      }
+
+      const rawStatus = status !== undefined ? String(status).toUpperCase() : String(existing.status || 'UPCOMING').toUpperCase();
+      const normalizedStatus: 'ACTIVE' | 'UPCOMING' | 'COMPLETED' =
+        rawStatus === 'ACTIVE'
+          ? 'ACTIVE'
+          : rawStatus === 'COMPLETED' || rawStatus === 'ARCHIVED'
+          ? 'COMPLETED'
+          : 'UPCOMING';
+
+      const nextStartDate =
+        start_date !== undefined ? (start_date ? String(start_date).trim() : null) : existing.start_date || null;
+      const nextEndDate =
+        end_date !== undefined ? (end_date ? String(end_date).trim() : null) : existing.end_date || null;
+
+      if (normalizedStatus === 'ACTIVE') {
+        if (pool) {
+          await queryPg("UPDATE academic_sessions SET status = 'COMPLETED', updated_at = CURRENT_TIMESTAMP WHERE school_id = $1 AND status = 'ACTIVE' AND id != $2", [
+            schoolId,
+            sessionId,
+          ]);
+        }
+        try {
+          cacheDb
+            .prepare("UPDATE academic_sessions SET status = 'COMPLETED', updated_at = CURRENT_TIMESTAMP WHERE school_id = ? AND status = 'ACTIVE' AND id != ?")
+            .run(schoolId, sessionId);
+        } catch (e) {
+          if (!pool) throw e;
+        }
+      }
+
+      if (pool) {
+        await queryPg(
+          `UPDATE academic_sessions
+           SET name = $1, start_date = $2, end_date = $3, status = $4, updated_at = CURRENT_TIMESTAMP
+           WHERE id = $5 AND school_id = $6`,
+          [nextName, nextStartDate, nextEndDate, normalizedStatus, sessionId, schoolId]
+        );
+      }
+
+      try {
+        cacheDb
+          .prepare(`
+            INSERT INTO academic_sessions (id, school_id, name, start_date, end_date, status, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+            ON CONFLICT(id) DO UPDATE SET
+              name = excluded.name,
+              start_date = excluded.start_date,
+              end_date = excluded.end_date,
+              status = excluded.status,
+              updated_at = CURRENT_TIMESTAMP
+          `)
+          .run(sessionId, schoolId, nextName, nextStartDate, nextEndDate, normalizedStatus);
+      } catch (e) {
+        if (!pool) throw e;
+      }
+
+      if (normalizedStatus === 'ACTIVE') {
+        try {
+          if (pool) {
+            await queryPg(
+              'UPDATE school_settings SET current_academic_session = $1, updated_at = CURRENT_TIMESTAMP WHERE school_id = $2',
+              [nextName, schoolId]
+            );
+          }
+          cacheDb.prepare('UPDATE school_settings SET current_academic_session = ?, updated_at = CURRENT_TIMESTAMP WHERE school_id = ?').run(nextName, schoolId);
+        } catch {}
+      }
+
+      logAudit({
+        actorId: req.user!.id,
+        actorEmail: req.user!.email,
+        schoolId,
+        action: 'UPDATE_ACADEMIC_SESSION',
+        entity: 'ACADEMIC_SESSION',
+        entityId: sessionId,
+        ipAddress: req.ip || '127.0.0.1',
+        metadata: { previousName: existing.name, name: nextName, status: normalizedStatus },
+      });
+
+      const updated = pool
+        ? (await queryPg('SELECT * FROM academic_sessions WHERE id = $1 AND school_id = $2 LIMIT 1', [sessionId, schoolId])).rows[0]
+        : cacheDb.prepare('SELECT * FROM academic_sessions WHERE id = ? AND school_id = ? LIMIT 1').get(sessionId, schoolId);
+      const terms = pool
+        ? (await queryPg('SELECT * FROM terms WHERE school_id = $1 AND academic_session_id = $2 ORDER BY name ASC, created_at ASC', [schoolId, sessionId])).rows
+        : (cacheDb.prepare('SELECT * FROM terms WHERE school_id = ? AND academic_session_id = ? ORDER BY name ASC, created_at ASC').all(schoolId, sessionId) as any[]);
+
+      return res.json({
+        success: true,
+        message: `Academic session updated to "${nextName}".`,
+        session: { ...updated, terms },
+      });
+    } catch (err: any) {
+      console.error('[PUT /v1/school/academic-sessions/:id Error]', err);
+      return res.status(500).json({ error: 'UPDATE_FAILED', message: safeClientError(err, 'Failed to update academic session.') });
+    }
+  }
+);
+
+// DELETE /api/v1/school/academic-sessions/:id (Safe deletion only when no linked academic or billing records exist)
+apiRouter.delete(
+  '/v1/school/academic-sessions/:id',
+  requireAuth,
+  requireTenant,
+  requireRole(['SCHOOL_OWNER', 'SCHOOL_ADMIN']),
+  async (req: AuthenticatedRequest, res) => {
+    const schoolId = req.targetSchoolId!;
+    const { id: sessionId } = req.params;
+    const pool = getPgPool();
+
+    try {
+      const existing: any = pool
+        ? (await queryPg('SELECT * FROM academic_sessions WHERE id = $1 AND school_id = $2 LIMIT 1', [sessionId, schoolId])).rows[0]
+        : cacheDb.prepare('SELECT * FROM academic_sessions WHERE id = ? AND school_id = ? LIMIT 1').get(sessionId, schoolId);
+
+      if (!existing) {
+        return res.status(404).json({ error: 'SESSION_NOT_FOUND', message: 'Academic session not found in your school.' });
+      }
+
+      const countRefs = async (pgSql: string, sqSql: string): Promise<number> => {
+        try {
+          if (pool) {
+            const r = await queryPg(pgSql, [schoolId, sessionId]);
+            return Number(r.rows[0]?.c || 0);
+          }
+          const r = cacheDb.prepare(sqSql).get(schoolId, sessionId) as any;
+          return Number(r?.c || 0);
+        } catch {
+          return 0;
+        }
+      };
+
+      const [examCnt, rcCnt, regCnt, invCnt] = await Promise.all([
+        countRefs(
+          'SELECT COUNT(*) as c FROM examinations WHERE school_id = $1 AND academic_session_id = $2 AND (is_deleted = 0 OR is_deleted IS NULL)',
+          'SELECT COUNT(*) as c FROM examinations WHERE school_id = ? AND academic_session_id = ? AND (is_deleted = 0 OR is_deleted IS NULL)'
+        ),
+        countRefs(
+          'SELECT COUNT(*) as c FROM report_cards WHERE school_id = $1 AND academic_session_id = $2',
+          'SELECT COUNT(*) as c FROM report_cards WHERE school_id = ? AND academic_session_id = ?'
+        ),
+        countRefs(
+          "SELECT COUNT(*) as c FROM student_course_registrations WHERE school_id = $1 AND academic_session_id = $2 AND status != 'DROPPED'",
+          "SELECT COUNT(*) as c FROM student_course_registrations WHERE school_id = ? AND academic_session_id = ? AND status != 'DROPPED'"
+        ),
+        countRefs(
+          'SELECT COUNT(*) as c FROM invoices WHERE school_id = $1 AND academic_session_id = $2 AND (is_deleted = 0 OR is_deleted IS NULL)',
+          'SELECT COUNT(*) as c FROM invoices WHERE school_id = ? AND academic_session_id = ? AND (is_deleted = 0 OR is_deleted IS NULL)'
+        ),
+      ]);
+
+      const totalRefs = examCnt + rcCnt + regCnt + invCnt;
+      if (totalRefs > 0) {
+        const parts: string[] = [];
+        if (examCnt > 0) parts.push(`${examCnt} exam(s)`);
+        if (rcCnt > 0) parts.push(`${rcCnt} report card(s)`);
+        if (regCnt > 0) parts.push(`${regCnt} course registration(s)`);
+        if (invCnt > 0) parts.push(`${invCnt} invoice(s)`);
+        return res.status(409).json({
+          error: 'SESSION_IN_USE',
+          message: `Cannot delete "${existing.name}" because it has ${parts.join(', ')}. Use Edit to rename it instead, or remove those records first.`,
+        });
+      }
+
+      if (pool) {
+        await queryPg('DELETE FROM terms WHERE academic_session_id = $1 AND school_id = $2', [sessionId, schoolId]);
+        await queryPg('DELETE FROM academic_sessions WHERE id = $1 AND school_id = $2', [sessionId, schoolId]);
+      }
+      try {
+        cacheDb.prepare('DELETE FROM terms WHERE academic_session_id = ? AND school_id = ?').run(sessionId, schoolId);
+        cacheDb.prepare('DELETE FROM academic_sessions WHERE id = ? AND school_id = ?').run(sessionId, schoolId);
+      } catch (e) {
+        if (!pool) throw e;
+      }
+
+      logAudit({
+        actorId: req.user!.id,
+        actorEmail: req.user!.email,
+        schoolId,
+        action: 'DELETE_ACADEMIC_SESSION',
+        entity: 'ACADEMIC_SESSION',
+        entityId: sessionId,
+        ipAddress: req.ip || '127.0.0.1',
+        metadata: { name: existing.name },
+      });
+
+      return res.json({ success: true, message: `Academic session "${existing.name}" deleted.` });
+    } catch (err: any) {
+      console.error('[DELETE /v1/school/academic-sessions/:id Error]', err);
+      return res.status(500).json({ error: 'DELETE_FAILED', message: safeClientError(err, 'Failed to delete academic session.') });
+    }
   }
 );
 
@@ -5560,9 +5816,265 @@ apiRouter.post(
       if (!pool) throw e;
     }
 
+    if (safeTermStatus === 'ACTIVE') {
+      try {
+        if (pool) {
+          await queryPg(
+            'UPDATE school_settings SET current_term = $1, updated_at = CURRENT_TIMESTAMP WHERE school_id = $2',
+            [safeName, schoolId]
+          );
+        }
+        cacheDb.prepare('UPDATE school_settings SET current_term = ?, updated_at = CURRENT_TIMESTAMP WHERE school_id = ?').run(safeName, schoolId);
+      } catch {}
+    }
+
     const pgTerm = pool ? await queryPg('SELECT * FROM terms WHERE id = $1', [termId]) : null;
     const term = pgTerm?.rows[0] || cacheDb.prepare('SELECT * FROM terms WHERE id = ?').get(termId);
     return res.status(201).json({ success: true, message: 'Term created successfully', term });
+  }
+);
+
+// PUT /api/v1/school/academic-sessions/:sessionId/terms/:termId (Edit/rename term/semester, dates, or status)
+apiRouter.put(
+  '/v1/school/academic-sessions/:sessionId/terms/:termId',
+  requireAuth,
+  requireTenant,
+  requireRole(['SCHOOL_OWNER', 'SCHOOL_ADMIN']),
+  async (req: AuthenticatedRequest, res) => {
+    const schoolId = req.targetSchoolId!;
+    const { sessionId, termId } = req.params;
+    const { name, start_date, end_date, status } = req.body || {};
+    const pool = getPgPool();
+
+    try {
+      const existing: any = pool
+        ? (
+            await queryPg(
+              'SELECT * FROM terms WHERE id = $1 AND academic_session_id = $2 AND school_id = $3 LIMIT 1',
+              [termId, sessionId, schoolId]
+            )
+          ).rows[0]
+        : cacheDb
+            .prepare('SELECT * FROM terms WHERE id = ? AND academic_session_id = ? AND school_id = ? LIMIT 1')
+            .get(termId, sessionId, schoolId);
+
+      if (!existing) {
+        return res.status(404).json({ error: 'TERM_NOT_FOUND', message: 'Term / Semester not found in this session.' });
+      }
+
+      const nextName =
+        name !== undefined && typeof name === 'string' && name.trim()
+          ? name.trim().slice(0, 64)
+          : String(existing.name || '').trim();
+      if (!nextName) {
+        return res.status(400).json({ error: 'MISSING_FIELDS', message: 'Term / Semester name cannot be empty.' });
+      }
+
+      const dup: any = pool
+        ? (
+            await queryPg(
+              'SELECT id FROM terms WHERE school_id = $1 AND academic_session_id = $2 AND LOWER(TRIM(name)) = LOWER(TRIM($3)) AND id != $4 LIMIT 1',
+              [schoolId, sessionId, nextName, termId]
+            )
+          ).rows[0]
+        : cacheDb
+            .prepare('SELECT id FROM terms WHERE school_id = ? AND academic_session_id = ? AND LOWER(TRIM(name)) = LOWER(TRIM(?)) AND id != ? LIMIT 1')
+            .get(schoolId, sessionId, nextName, termId);
+
+      if (dup) {
+        return res.status(409).json({
+          error: 'TERM_EXISTS',
+          message: `"${nextName}" already exists in this academic session.`,
+        });
+      }
+
+      const rawStatus = status !== undefined ? String(status).toUpperCase() : String(existing.status || 'UPCOMING').toUpperCase();
+      const nextStatus: 'ACTIVE' | 'UPCOMING' | 'COMPLETED' =
+        rawStatus === 'ACTIVE'
+          ? 'ACTIVE'
+          : rawStatus === 'COMPLETED' || rawStatus === 'ARCHIVED'
+          ? 'COMPLETED'
+          : 'UPCOMING';
+
+      const nextStartDate =
+        start_date !== undefined ? (start_date ? String(start_date).trim() : null) : existing.start_date || null;
+      const nextEndDate =
+        end_date !== undefined ? (end_date ? String(end_date).trim() : null) : existing.end_date || null;
+
+      if (nextStatus === 'ACTIVE') {
+        if (pool) {
+          await queryPg("UPDATE terms SET status = 'COMPLETED', updated_at = CURRENT_TIMESTAMP WHERE school_id = $1 AND status = 'ACTIVE' AND id != $2", [
+            schoolId,
+            termId,
+          ]);
+        }
+        try {
+          cacheDb
+            .prepare("UPDATE terms SET status = 'COMPLETED', updated_at = CURRENT_TIMESTAMP WHERE school_id = ? AND status = 'ACTIVE' AND id != ?")
+            .run(schoolId, termId);
+        } catch (e) {
+          if (!pool) throw e;
+        }
+      }
+
+      if (pool) {
+        await queryPg(
+          `UPDATE terms
+           SET name = $1, start_date = $2, end_date = $3, status = $4, updated_at = CURRENT_TIMESTAMP
+           WHERE id = $5 AND academic_session_id = $6 AND school_id = $7`,
+          [nextName, nextStartDate, nextEndDate, nextStatus, termId, sessionId, schoolId]
+        );
+      }
+
+      try {
+        cacheDb
+          .prepare(`
+            INSERT INTO terms (id, school_id, academic_session_id, name, start_date, end_date, status, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+            ON CONFLICT(id) DO UPDATE SET
+              name = excluded.name,
+              start_date = excluded.start_date,
+              end_date = excluded.end_date,
+              status = excluded.status,
+              updated_at = CURRENT_TIMESTAMP
+          `)
+          .run(termId, schoolId, sessionId, nextName, nextStartDate, nextEndDate, nextStatus);
+      } catch (e) {
+        if (!pool) throw e;
+      }
+
+      if (nextStatus === 'ACTIVE') {
+        try {
+          if (pool) {
+            await queryPg('UPDATE school_settings SET current_term = $1, updated_at = CURRENT_TIMESTAMP WHERE school_id = $2', [
+              nextName,
+              schoolId,
+            ]);
+          }
+          cacheDb.prepare('UPDATE school_settings SET current_term = ?, updated_at = CURRENT_TIMESTAMP WHERE school_id = ?').run(nextName, schoolId);
+        } catch {}
+      }
+
+      logAudit({
+        actorId: req.user!.id,
+        actorEmail: req.user!.email,
+        schoolId,
+        action: 'UPDATE_ACADEMIC_TERM',
+        entity: 'TERM',
+        entityId: termId,
+        ipAddress: req.ip || '127.0.0.1',
+        metadata: { sessionId, previousName: existing.name, name: nextName, status: nextStatus },
+      });
+
+      const updated = pool
+        ? (await queryPg('SELECT * FROM terms WHERE id = $1 AND school_id = $2 LIMIT 1', [termId, schoolId])).rows[0]
+        : cacheDb.prepare('SELECT * FROM terms WHERE id = ? AND school_id = ? LIMIT 1').get(termId, schoolId);
+
+      return res.json({ success: true, message: `Updated to "${nextName}".`, term: updated });
+    } catch (err: any) {
+      console.error('[PUT /v1/school/academic-sessions/:sessionId/terms/:termId Error]', err);
+      return res.status(500).json({ error: 'UPDATE_FAILED', message: safeClientError(err, 'Failed to update term/semester.') });
+    }
+  }
+);
+
+// DELETE /api/v1/school/academic-sessions/:sessionId/terms/:termId
+apiRouter.delete(
+  '/v1/school/academic-sessions/:sessionId/terms/:termId',
+  requireAuth,
+  requireTenant,
+  requireRole(['SCHOOL_OWNER', 'SCHOOL_ADMIN']),
+  async (req: AuthenticatedRequest, res) => {
+    const schoolId = req.targetSchoolId!;
+    const { sessionId, termId } = req.params;
+    const pool = getPgPool();
+
+    try {
+      const existing: any = pool
+        ? (
+            await queryPg(
+              'SELECT * FROM terms WHERE id = $1 AND academic_session_id = $2 AND school_id = $3 LIMIT 1',
+              [termId, sessionId, schoolId]
+            )
+          ).rows[0]
+        : cacheDb
+            .prepare('SELECT * FROM terms WHERE id = ? AND academic_session_id = ? AND school_id = ? LIMIT 1')
+            .get(termId, sessionId, schoolId);
+
+      if (!existing) {
+        return res.status(404).json({ error: 'TERM_NOT_FOUND', message: 'Term / Semester not found in this session.' });
+      }
+
+      const countRefs = async (pgSql: string, sqSql: string): Promise<number> => {
+        try {
+          if (pool) {
+            const r = await queryPg(pgSql, [schoolId, termId]);
+            return Number(r.rows[0]?.c || 0);
+          }
+          const r = cacheDb.prepare(sqSql).get(schoolId, termId) as any;
+          return Number(r?.c || 0);
+        } catch {
+          return 0;
+        }
+      };
+
+      const [examCnt, rcCnt, regCnt, invCnt] = await Promise.all([
+        countRefs(
+          'SELECT COUNT(*) as c FROM examinations WHERE school_id = $1 AND term_id = $2 AND (is_deleted = 0 OR is_deleted IS NULL)',
+          'SELECT COUNT(*) as c FROM examinations WHERE school_id = ? AND term_id = ? AND (is_deleted = 0 OR is_deleted IS NULL)'
+        ),
+        countRefs(
+          'SELECT COUNT(*) as c FROM report_cards WHERE school_id = $1 AND term_id = $2',
+          'SELECT COUNT(*) as c FROM report_cards WHERE school_id = ? AND term_id = ?'
+        ),
+        countRefs(
+          "SELECT COUNT(*) as c FROM student_course_registrations WHERE school_id = $1 AND term_id = $2 AND status != 'DROPPED'",
+          "SELECT COUNT(*) as c FROM student_course_registrations WHERE school_id = ? AND term_id = ? AND status != 'DROPPED'"
+        ),
+        countRefs(
+          'SELECT COUNT(*) as c FROM invoices WHERE school_id = $1 AND term_id = $2 AND (is_deleted = 0 OR is_deleted IS NULL)',
+          'SELECT COUNT(*) as c FROM invoices WHERE school_id = ? AND term_id = ? AND (is_deleted = 0 OR is_deleted IS NULL)'
+        ),
+      ]);
+
+      if (examCnt + rcCnt + regCnt + invCnt > 0) {
+        return res.status(409).json({
+          error: 'TERM_IN_USE',
+          message: `Cannot delete "${existing.name}" because it has linked exams, results, registrations, or invoices. Use Edit to rename it instead.`,
+        });
+      }
+
+      if (pool) {
+        await queryPg('DELETE FROM terms WHERE id = $1 AND academic_session_id = $2 AND school_id = $3', [
+          termId,
+          sessionId,
+          schoolId,
+        ]);
+      }
+      try {
+        cacheDb
+          .prepare('DELETE FROM terms WHERE id = ? AND academic_session_id = ? AND school_id = ?')
+          .run(termId, sessionId, schoolId);
+      } catch (e) {
+        if (!pool) throw e;
+      }
+
+      logAudit({
+        actorId: req.user!.id,
+        actorEmail: req.user!.email,
+        schoolId,
+        action: 'DELETE_ACADEMIC_TERM',
+        entity: 'TERM',
+        entityId: termId,
+        ipAddress: req.ip || '127.0.0.1',
+        metadata: { sessionId, name: existing.name },
+      });
+
+      return res.json({ success: true, message: `"${existing.name}" deleted.` });
+    } catch (err: any) {
+      console.error('[DELETE /v1/school/academic-sessions/:sessionId/terms/:termId Error]', err);
+      return res.status(500).json({ error: 'DELETE_FAILED', message: safeClientError(err, 'Failed to delete term/semester.') });
+    }
   }
 );
 

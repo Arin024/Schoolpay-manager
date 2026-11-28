@@ -166,6 +166,7 @@ export const SchoolPerformanceView: React.FC<SchoolPerformanceViewProps> = ({ re
   const [examsLoading, setExamsLoading] = useState(false);
   const [examFilterStatus, setExamFilterStatus] = useState('');
   const [examModalOpen, setExamModalOpen] = useState(false);
+  const [editingExamId, setEditingExamId] = useState<string | null>(null);
   const [examForm, setExamForm] = useState({
     title: '',
     exam_type: 'TERMLY',
@@ -176,6 +177,11 @@ export const SchoolPerformanceView: React.FC<SchoolPerformanceViewProps> = ({ re
     ca_max_score: 40,
     exam_max_score: 60,
   });
+  const [examCustomSessionName, setExamCustomSessionName] = useState('');
+  const [examCustomTermName, setExamCustomTermName] = useState('');
+  const [renamingExamSession, setRenamingExamSession] = useState(false);
+  const [renameExamSessionDraft, setRenameExamSessionDraft] = useState('');
+  const [renameExamSessionSaving, setRenameExamSessionSaving] = useState(false);
   const [examSaving, setExamSaving] = useState(false);
   const [openingFromReg, setOpeningFromReg] = useState(false);
 
@@ -614,27 +620,133 @@ export const SchoolPerformanceView: React.FC<SchoolPerformanceViewProps> = ({ re
     }
   };
 
+  const openNewExamModal = () => {
+    setEditingExamId(null);
+    setExamCustomSessionName('');
+    setExamCustomTermName(instProfile.cycleLabels?.[0] || (isTertiary ? '1st Semester' : '1st Term'));
+    setRenamingExamSession(false);
+    setRenameExamSessionDraft('');
+    setExamForm((prev) => ({
+      ...prev,
+      title: '',
+      academic_session_id: prev.academic_session_id === '__CUSTOM__' ? (sessions.find((s) => s.status === 'ACTIVE')?.id || sessions[0]?.id || '') : prev.academic_session_id,
+    }));
+    setExamModalOpen(true);
+  };
+
+  const openEditExamModal = (ex: ExaminationItem) => {
+    setEditingExamId(ex.id);
+    setExamCustomSessionName('');
+    setExamCustomTermName(instProfile.cycleLabels?.[0] || (isTertiary ? '1st Semester' : '1st Term'));
+    setRenamingExamSession(false);
+    setRenameExamSessionDraft('');
+    setExamForm({
+      title: ex.title || '',
+      exam_type: ex.exam_type || 'TERMLY',
+      academic_session_id: ex.academic_session_id || '',
+      term_id: ex.term_id || '',
+      class_id: ex.class_id || '',
+      department: ex.department || '',
+      ca_max_score: Number(ex.ca_max_score ?? 40),
+      exam_max_score: Number(ex.exam_max_score ?? 60),
+    });
+    setExamModalOpen(true);
+  };
+
+  const handleRenameSessionFromExamModal = async () => {
+    const targetId = examForm.academic_session_id;
+    const cleanName = renameExamSessionDraft.trim();
+    if (!targetId || targetId === '__CUSTOM__' || !cleanName) return;
+    setRenameExamSessionSaving(true);
+    try {
+      const res = await api.updateAcademicSession(targetId, { name: cleanName });
+      setRenamingExamSession(false);
+      setRenameExamSessionDraft('');
+      await loadBootstrap();
+      await loadExams();
+      showMsg('ok', res.message || `Renamed academic session to "${cleanName}".`);
+    } catch (err: any) {
+      showMsg('err', err?.message || 'Failed to rename academic session.');
+    } finally {
+      setRenameExamSessionSaving(false);
+    }
+  };
+
   const handleCreateExam = async (e: React.FormEvent) => {
     e.preventDefault();
     setExamSaving(true);
     try {
-      const res = await api.createExamination({
-        ...examForm,
-        class_id: examForm.class_id || undefined,
-        department: examForm.department.trim() || undefined,
-      });
-      setExamModalOpen(false);
-      setExamForm((prev) => ({ ...prev, title: '' }));
-      await loadExams();
-      if (res.examination) {
-        setSelectedExam(res.examination);
-        const subj = scoreSubjectId || subjects[0]?.id || '';
-        setScoreSubjectId(subj);
-        await loadExamScoreSheet(res.examination, subj, { registeredOnly: true, autoPickRegistered: true });
+      let resolvedSessionId = examForm.academic_session_id;
+      let resolvedTermId = examForm.term_id;
+
+      // Support typing/creating ANY custom session (e.g. 2027/2028, 2035/2036) directly from the modal!
+      if (resolvedSessionId === '__CUSTOM__') {
+        const customName = examCustomSessionName.trim();
+        if (!customName) {
+          showMsg('err', 'Please enter an academic session name (e.g. 2027/2028 or 2035/2036).');
+          setExamSaving(false);
+          return;
+        }
+        const desiredTermName = (examCustomTermName || '').trim();
+        const sessRes = await api.createAcademicSession({
+          name: customName,
+          status: 'UPCOMING',
+          auto_create_terms: true,
+          reuse_existing: true,
+          term_names: desiredTermName
+            ? Array.from(new Set([desiredTermName, ...(instProfile.cycleLabels || [])]))
+            : undefined,
+        });
+        const createdSess = sessRes.session;
+        resolvedSessionId = createdSess.id;
+        const matchedTerm =
+          (createdSess.terms || []).find(
+            (t) => desiredTermName && t.name.trim().toLowerCase() === desiredTermName.toLowerCase()
+          ) || createdSess.terms?.[0];
+        resolvedTermId = matchedTerm?.id || '';
       }
-      showMsg('ok', 'Examination created in DRAFT state.');
+
+      if (editingExamId) {
+        await api.updateExamination(editingExamId, {
+          title: examForm.title,
+          exam_type: examForm.exam_type,
+          academic_session_id: resolvedSessionId || null,
+          term_id: resolvedTermId || null,
+          class_id: examForm.class_id || null,
+          department: examForm.department.trim() || null,
+          ca_max_score: examForm.ca_max_score,
+          exam_max_score: examForm.exam_max_score,
+        });
+        setExamModalOpen(false);
+        setEditingExamId(null);
+        await Promise.all([loadBootstrap(), loadExams()]);
+        showMsg('ok', 'Examination updated successfully.');
+      } else {
+        const res = await api.createExamination({
+          ...examForm,
+          academic_session_id: resolvedSessionId || undefined,
+          term_id: resolvedTermId || undefined,
+          class_id: examForm.class_id || undefined,
+          department: examForm.department.trim() || undefined,
+        });
+        setExamModalOpen(false);
+        setExamForm((prev) => ({
+          ...prev,
+          title: '',
+          academic_session_id: resolvedSessionId || prev.academic_session_id,
+          term_id: resolvedTermId || prev.term_id,
+        }));
+        await Promise.all([loadBootstrap(), loadExams()]);
+        if (res.examination) {
+          setSelectedExam(res.examination);
+          const subj = scoreSubjectId || subjects[0]?.id || '';
+          setScoreSubjectId(subj);
+          await loadExamScoreSheet(res.examination, subj, { registeredOnly: true, autoPickRegistered: true });
+        }
+        showMsg('ok', 'Examination created in DRAFT state.');
+      }
     } catch (err: any) {
-      showMsg('err', err?.message || 'Failed to create examination');
+      showMsg('err', err?.message || (editingExamId ? 'Failed to update examination' : 'Failed to create examination'));
     } finally {
       setExamSaving(false);
     }
@@ -2165,7 +2277,7 @@ export const SchoolPerformanceView: React.FC<SchoolPerformanceViewProps> = ({ re
                     </button>
                     <button
                       type="button"
-                      onClick={() => setExamModalOpen(true)}
+                      onClick={openNewExamModal}
                       className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold inline-flex items-center gap-1.5 cursor-pointer whitespace-nowrap"
                     >
                       <Plus className="w-4 h-4" />
@@ -2311,6 +2423,17 @@ export const SchoolPerformanceView: React.FC<SchoolPerformanceViewProps> = ({ re
                             </button>
                             {!readOnly && (
                               <>
+                                {ex.status !== 'PUBLISHED' && (
+                                  <button
+                                    type="button"
+                                    onClick={() => openEditExamModal(ex)}
+                                    className="px-2 py-1 rounded-lg bg-white hover:bg-slate-100 text-slate-700 border border-slate-300 text-[11px] font-semibold inline-flex items-center gap-1 cursor-pointer"
+                                    title="Edit examination title, session, semester/term, or max scores"
+                                  >
+                                    <Edit2 className="w-3 h-3 text-slate-500" />
+                                    <span>Edit</span>
+                                  </button>
+                                )}
                                 <button
                                   type="button"
                                   onClick={() => openResultsManager({ tab: 'BATCHES', examIds: [ex.id], action: 'REASSIGN' })}
@@ -3794,18 +3917,20 @@ export const SchoolPerformanceView: React.FC<SchoolPerformanceViewProps> = ({ re
         </ModalPortal>
       )}
 
-      {/* CREATE EXAMINATION MODAL */}
+      {/* CREATE / EDIT EXAMINATION MODAL */}
       {examModalOpen && (
         <ModalPortal onEscape={() => setExamModalOpen(false)}>
           <div
             className="fixed inset-0 z-[9999] flex items-end sm:items-center justify-center bg-slate-900/60 backdrop-blur-[1px] p-0 sm:p-4"
             role="dialog"
             aria-modal="true"
-            aria-label="Create Examination Assessment"
+            aria-label={editingExamId ? 'Edit Examination Assessment' : 'Create Examination Assessment'}
           >
             <div className="bg-white rounded-t-2xl sm:rounded-2xl max-w-lg w-full max-h-[92dvh] flex flex-col shadow-2xl border border-slate-200 overflow-hidden">
               <div className="shrink-0 bg-slate-900 px-5 py-4 text-white flex items-center justify-between">
-                <h3 className="font-bold text-sm">Create Examination Assessment</h3>
+                <h3 className="font-bold text-sm">
+                  {editingExamId ? 'Edit Examination Assessment' : 'Create Examination Assessment'}
+                </h3>
                 <button
                   type="button"
                   onClick={() => setExamModalOpen(false)}
@@ -3815,7 +3940,7 @@ export const SchoolPerformanceView: React.FC<SchoolPerformanceViewProps> = ({ re
                   <X className="w-4 h-4" />
                 </button>
               </div>
-              <form onSubmit={handleCreateExam} className="flex-1 min-h-0 overflow-y-auto overscroll-contain p-5 space-y-3 text-xs">
+              <form onSubmit={handleCreateExam} className="flex-1 min-h-0 overflow-y-auto overscroll-contain p-5 space-y-3.5 text-xs">
                 <div>
                   <label className="block font-semibold text-slate-700 mb-1">Examination Title *</label>
                   <input
@@ -3824,16 +3949,37 @@ export const SchoolPerformanceView: React.FC<SchoolPerformanceViewProps> = ({ re
                     value={examForm.title}
                     onChange={(e) => setExamForm({ ...examForm, title: e.target.value })}
                     placeholder={isTertiary ? 'e.g. 1st Semester Examination' : 'e.g. First Term Terminal Examination'}
-                    className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl"
+                    className="w-full px-3 py-2.5 bg-slate-50 border border-slate-300 rounded-xl text-sm sm:text-xs"
                   />
                 </div>
-                <div className="grid grid-cols-2 gap-3">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                   <div>
-                    <label className="block font-semibold text-slate-700 mb-1">Academic Session</label>
+                    <div className="flex items-center justify-between gap-2 mb-1">
+                      <label className="block font-semibold text-slate-700">Academic Session</label>
+                      {examForm.academic_session_id && examForm.academic_session_id !== '__CUSTOM__' && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const current = sessions.find((s) => s.id === examForm.academic_session_id);
+                            setRenameExamSessionDraft(current?.name || '');
+                            setRenamingExamSession((v) => !v);
+                          }}
+                          className="text-[11px] font-semibold text-emerald-700 hover:text-emerald-800 cursor-pointer"
+                        >
+                          {renamingExamSession ? 'Cancel edit' : 'Edit / Rename'}
+                        </button>
+                      )}
+                    </div>
                     <select
+                      aria-label="Examination Academic Session"
                       value={examForm.academic_session_id}
                       onChange={(e) => {
                         const nextId = e.target.value;
+                        setRenamingExamSession(false);
+                        if (nextId === '__CUSTOM__') {
+                          setExamForm({ ...examForm, academic_session_id: '__CUSTOM__', term_id: '' });
+                          return;
+                        }
                         const matched = sessions.find((s) => s.id === nextId);
                         setExamForm({
                           ...examForm,
@@ -3841,7 +3987,7 @@ export const SchoolPerformanceView: React.FC<SchoolPerformanceViewProps> = ({ re
                           term_id: matched?.terms?.[0]?.id || '',
                         });
                       }}
-                      className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl"
+                      className="w-full px-3 py-2.5 bg-slate-50 border border-slate-300 rounded-xl text-sm sm:text-xs"
                     >
                       <option value="">Select Session...</option>
                       {sessions.map((s) => (
@@ -3849,31 +3995,103 @@ export const SchoolPerformanceView: React.FC<SchoolPerformanceViewProps> = ({ re
                           {s.name}
                         </option>
                       ))}
+                      <option value="__CUSTOM__">+ Add / Type Custom Session (e.g. 2027/2028, 2035/2036)...</option>
                     </select>
                   </div>
                   <div>
                     <label className="block font-semibold text-slate-700 mb-1">{instLabels.cycle}</label>
-                    <select
-                      value={examForm.term_id}
-                      onChange={(e) => setExamForm({ ...examForm, term_id: e.target.value })}
-                      className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl"
-                    >
-                      <option value="">Select {instLabels.cycle}...</option>
-                      {(examFormSessionObj?.terms || []).map((t) => (
-                        <option key={t.id} value={t.id}>
-                          {t.name}
-                        </option>
+                    {examForm.academic_session_id === '__CUSTOM__' ? (
+                      <input
+                        type="text"
+                        aria-label={`Custom Examination ${instLabels.cycle}`}
+                        list="exam-custom-cycle-options"
+                        value={examCustomTermName}
+                        onChange={(e) => setExamCustomTermName(e.target.value)}
+                        placeholder={instProfile.cycleLabels?.[0] || (isTertiary ? '1st Semester' : '1st Term')}
+                        className="w-full px-3 py-2.5 bg-white border border-emerald-300 rounded-xl text-sm sm:text-xs"
+                      />
+                    ) : (
+                      <select
+                        aria-label={`Examination ${instLabels.cycle}`}
+                        value={examForm.term_id}
+                        onChange={(e) => setExamForm({ ...examForm, term_id: e.target.value })}
+                        className="w-full px-3 py-2.5 bg-slate-50 border border-slate-300 rounded-xl text-sm sm:text-xs"
+                      >
+                        <option value="">Select {instLabels.cycle}...</option>
+                        {(examFormSessionObj?.terms || []).map((t) => (
+                          <option key={t.id} value={t.id}>
+                            {t.name}
+                          </option>
+                        ))}
+                      </select>
+                    )}
+                    <datalist id="exam-custom-cycle-options">
+                      {(instProfile.cycleLabels || []).map((c) => (
+                        <option key={c} value={c} />
                       ))}
-                    </select>
+                    </datalist>
                   </div>
                 </div>
-                <div className="grid grid-cols-2 gap-3">
+
+                {renamingExamSession && examForm.academic_session_id && examForm.academic_session_id !== '__CUSTOM__' && (
+                  <div className="p-3 rounded-xl bg-slate-50 border border-slate-300 space-y-2">
+                    <label className="block text-[11px] font-bold text-slate-800">
+                      Modify Selected Academic Session Name (e.g. 2027/2028, 2035/2036)
+                    </label>
+                    <div className="flex flex-col sm:flex-row gap-2">
+                      <input
+                        type="text"
+                        aria-label="Rename Selected Academic Session"
+                        value={renameExamSessionDraft}
+                        onChange={(e) => setRenameExamSessionDraft(e.target.value)}
+                        placeholder="e.g. 2027/2028 or 2035/2036"
+                        className="flex-1 px-3 py-2 bg-white border border-slate-300 rounded-lg font-mono font-semibold text-sm sm:text-xs"
+                      />
+                      <button
+                        type="button"
+                        disabled={renameExamSessionSaving || !renameExamSessionDraft.trim()}
+                        onClick={handleRenameSessionFromExamModal}
+                        className="px-3.5 py-2 bg-slate-900 hover:bg-slate-800 text-white rounded-lg font-bold cursor-pointer disabled:opacity-50 whitespace-nowrap"
+                      >
+                        {renameExamSessionSaving ? 'Saving...' : 'Save Session Name'}
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                {examForm.academic_session_id === '__CUSTOM__' && (
+                  <div className="p-3 rounded-xl bg-emerald-50 border border-emerald-200 space-y-2">
+                    <label className="block text-[11px] font-bold text-emerald-950">
+                      New Academic Session Year * (auto-creates session &amp; {instLabels.cyclePlural.toLowerCase()})
+                    </label>
+                    <input
+                      type="text"
+                      required
+                      aria-label="Custom Examination Academic Session"
+                      list="exam-custom-session-options"
+                      value={examCustomSessionName}
+                      onChange={(e) => setExamCustomSessionName(e.target.value)}
+                      placeholder="e.g. 2027/2028 or 2035/2036"
+                      className="w-full px-3 py-2 bg-white border border-emerald-300 rounded-lg font-mono font-semibold text-sm sm:text-xs"
+                    />
+                    <datalist id="exam-custom-session-options">
+                      {Array.from({ length: 18 }, (_, i) => {
+                        const y = new Date().getFullYear() - 5 + i;
+                        return `${y}/${y + 1}`;
+                      }).map((yr) => (
+                        <option key={yr} value={yr} />
+                      ))}
+                    </datalist>
+                  </div>
+                )}
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                   <div>
                     <label className="block font-semibold text-slate-700 mb-1">{instLabels.classLabel} Scope</label>
                     <select
                       value={examForm.class_id}
                       onChange={(e) => setExamForm({ ...examForm, class_id: e.target.value })}
-                      className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl"
+                      className="w-full px-3 py-2.5 bg-slate-50 border border-slate-300 rounded-xl text-sm sm:text-xs"
                     >
                       <option value="">All {instLabels.classPlural}</option>
                       {classes.map((c) => (
@@ -3893,7 +4111,7 @@ export const SchoolPerformanceView: React.FC<SchoolPerformanceViewProps> = ({ re
                       value={examForm.department}
                       onChange={(e) => setExamForm({ ...examForm, department: e.target.value })}
                       placeholder="All Departments (or e.g. Family Healthcare)"
-                      className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl"
+                      className="w-full px-3 py-2.5 bg-slate-50 border border-slate-300 rounded-xl text-sm sm:text-xs"
                     />
                   </div>
                 </div>
@@ -3906,7 +4124,7 @@ export const SchoolPerformanceView: React.FC<SchoolPerformanceViewProps> = ({ re
                       max={100}
                       value={examForm.ca_max_score}
                       onChange={(e) => setExamForm({ ...examForm, ca_max_score: Number(e.target.value) })}
-                      className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl tabular-nums"
+                      className="w-full px-3 py-2.5 bg-slate-50 border border-slate-300 rounded-xl tabular-nums text-sm sm:text-xs"
                     />
                   </div>
                   <div>
@@ -3917,7 +4135,7 @@ export const SchoolPerformanceView: React.FC<SchoolPerformanceViewProps> = ({ re
                       max={100}
                       value={examForm.exam_max_score}
                       onChange={(e) => setExamForm({ ...examForm, exam_max_score: Number(e.target.value) })}
-                      className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl tabular-nums"
+                      className="w-full px-3 py-2.5 bg-slate-50 border border-slate-300 rounded-xl tabular-nums text-sm sm:text-xs"
                     />
                   </div>
                 </div>
@@ -3934,7 +4152,7 @@ export const SchoolPerformanceView: React.FC<SchoolPerformanceViewProps> = ({ re
                     disabled={examSaving}
                     className="px-5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl font-bold cursor-pointer disabled:opacity-60"
                   >
-                    {examSaving ? 'Creating...' : 'Create Examination'}
+                    {examSaving ? 'Saving...' : editingExamId ? 'Save Changes' : 'Create Examination'}
                   </button>
                 </div>
               </form>

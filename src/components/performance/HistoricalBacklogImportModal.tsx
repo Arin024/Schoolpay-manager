@@ -192,7 +192,7 @@ export const HistoricalBacklogImportModal: React.FC<HistoricalBacklogImportModal
     const set = new Set<string>();
     sessions.forEach((s) => set.add(s.name));
     const yr = new Date().getFullYear();
-    for (let y = yr + 1; y >= yr - 8; y--) {
+    for (let y = yr + 10; y >= yr - 8; y--) {
       set.add(`${y}/${y + 1}`);
     }
     return Array.from(set);

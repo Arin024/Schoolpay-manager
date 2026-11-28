@@ -16,6 +16,7 @@ import { useAuth } from '../../context/AuthContext.js';
 import { api } from '../../services/api.js';
 import { ClassItem, ClassArmItem, StaffItem } from '../../types/index.js';
 import { resolveInstitutionProfile } from '../../utils/institutionMode.js';
+import { ModalPortal } from '../common/ModalPortal.js';
 
 const K12_ARM_QUICK_PRESETS = [
   { label: 'A, B', value: 'A, B' },
@@ -533,25 +534,32 @@ export const SchoolClassesView: React.FC = () => {
         </div>
       )}
 
-      {/* ADD CLASS MODAL */}
+      {/* ADD CLASS / LEVEL MODAL */}
       {isAddClassModalOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-xs p-4 overflow-y-auto">
-          <div className="bg-white rounded-2xl max-w-md w-full shadow-2xl border border-slate-200 overflow-hidden text-xs my-6">
-            <div className="bg-slate-900 px-6 py-4 flex items-center justify-between text-white border-b border-slate-800">
-              <div className="flex items-center gap-2">
-                <Building2 className="w-5 h-5 text-emerald-400" />
-                <h3 className="font-bold text-base">Create Academic Class</h3>
+        <ModalPortal onEscape={() => setIsAddClassModalOpen(false)}>
+          <div
+            className="fixed inset-0 z-[9999] flex items-end sm:items-center justify-center bg-slate-900/65 backdrop-blur-[1px] p-0 sm:p-4"
+            role="dialog"
+            aria-modal="true"
+            aria-label={`Create Academic ${labels.classLabel}`}
+          >
+            <div className="bg-white rounded-t-2xl sm:rounded-2xl max-w-md w-full max-h-[92dvh] flex flex-col shadow-2xl border border-slate-200 overflow-hidden text-xs">
+              <div className="shrink-0 bg-slate-900 px-6 py-4 flex items-center justify-between text-white border-b border-slate-800">
+                <div className="flex items-center gap-2">
+                  <Building2 className="w-5 h-5 text-emerald-400" />
+                  <h3 className="font-bold text-base">Create Academic {labels.classLabel}</h3>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setIsAddClassModalOpen(false)}
+                  aria-label="Close create class modal"
+                  className="p-1 rounded-lg text-slate-400 hover:text-white cursor-pointer"
+                >
+                  <X className="w-5 h-5" />
+                </button>
               </div>
-              <button
-                type="button"
-                onClick={() => setIsAddClassModalOpen(false)}
-                className="p-1 rounded-lg text-slate-400 hover:text-white"
-              >
-                <X className="w-5 h-5" />
-              </button>
-            </div>
 
-            <form onSubmit={handleAddClass} className="p-6 space-y-4">
+              <form onSubmit={handleAddClass} className="flex-1 min-h-0 overflow-y-auto overscroll-contain p-6 space-y-4">
               {formError && (
                 <div className="p-3 bg-red-50 border border-red-200 text-red-700 rounded-xl flex items-center gap-2">
                   <AlertCircle className="w-4 h-4 flex-shrink-0" />
@@ -652,29 +660,37 @@ export const SchoolClassesView: React.FC = () => {
             </form>
           </div>
         </div>
+        </ModalPortal>
       )}
 
       {/* ADD ARM / DEPARTMENT MODAL */}
       {isAddArmModalOpen && selectedClassForArm && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-xs p-4 overflow-y-auto">
-          <div className="bg-white rounded-2xl max-w-md w-full shadow-2xl border border-slate-200 overflow-hidden text-xs my-6">
-            <div className="bg-slate-900 px-6 py-4 flex items-center justify-between text-white border-b border-slate-800">
-              <div className="flex items-center gap-2">
-                <Layers className="w-5 h-5 text-emerald-400" />
-                <h3 className="font-bold text-base">
-                  Add {labels.armLabel} to {selectedClassForArm.name}
-                </h3>
+        <ModalPortal onEscape={() => setIsAddArmModalOpen(false)}>
+          <div
+            className="fixed inset-0 z-[9999] flex items-end sm:items-center justify-center bg-slate-900/65 backdrop-blur-[1px] p-0 sm:p-4"
+            role="dialog"
+            aria-modal="true"
+            aria-label={`Add ${labels.armLabel} to ${selectedClassForArm.name}`}
+          >
+            <div className="bg-white rounded-t-2xl sm:rounded-2xl max-w-md w-full max-h-[92dvh] flex flex-col shadow-2xl border border-slate-200 overflow-hidden text-xs">
+              <div className="shrink-0 bg-slate-900 px-6 py-4 flex items-center justify-between text-white border-b border-slate-800">
+                <div className="flex items-center gap-2">
+                  <Layers className="w-5 h-5 text-emerald-400" />
+                  <h3 className="font-bold text-base">
+                    Add {labels.armLabel} to {selectedClassForArm.name}
+                  </h3>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setIsAddArmModalOpen(false)}
+                  aria-label="Close add arm modal"
+                  className="p-1 rounded-lg text-slate-400 hover:text-white cursor-pointer"
+                >
+                  <X className="w-5 h-5" />
+                </button>
               </div>
-              <button
-                type="button"
-                onClick={() => setIsAddArmModalOpen(false)}
-                className="p-1 rounded-lg text-slate-400 hover:text-white"
-              >
-                <X className="w-5 h-5" />
-              </button>
-            </div>
 
-            <form onSubmit={handleAddArm} className="p-6 space-y-4">
+              <form onSubmit={handleAddArm} className="flex-1 min-h-0 overflow-y-auto overscroll-contain p-6 space-y-4">
               {formError && (
                 <div className="p-3 bg-red-50 border border-red-200 text-red-700 rounded-xl flex items-center gap-2">
                   <AlertCircle className="w-4 h-4 flex-shrink-0" />
@@ -752,34 +768,42 @@ export const SchoolClassesView: React.FC = () => {
                   disabled={formSubmitting}
                   className="px-5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl font-bold disabled:opacity-60 cursor-pointer"
                 >
-                  {formSubmitting ? 'Saving...' : 'Add Arm'}
+                  {formSubmitting ? 'Saving...' : `Add ${labels.armLabel}`}
                 </button>
               </div>
             </form>
           </div>
         </div>
+        </ModalPortal>
       )}
 
-      {/* EDIT ARM MODAL */}
+      {/* EDIT ARM / DEPARTMENT MODAL */}
       {editingArm && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-xs p-4">
-          <div className="bg-white rounded-2xl max-w-md w-full shadow-2xl border border-slate-200 overflow-hidden text-xs">
-            <div className="bg-slate-900 px-6 py-4 flex items-center justify-between text-white border-b border-slate-800">
-              <div className="flex items-center gap-2">
-                <Edit2 className="w-4 h-4 text-emerald-400" />
-                <h3 className="font-bold text-sm">
-                  Edit Arm · {editingArm.classItem.name} ({editingArm.arm.name})
-                </h3>
+        <ModalPortal onEscape={() => setEditingArm(null)}>
+          <div
+            className="fixed inset-0 z-[9999] flex items-end sm:items-center justify-center bg-slate-900/65 backdrop-blur-[1px] p-0 sm:p-4"
+            role="dialog"
+            aria-modal="true"
+            aria-label={`Edit ${labels.armLabel} ${editingArm.arm.name}`}
+          >
+            <div className="bg-white rounded-t-2xl sm:rounded-2xl max-w-md w-full max-h-[92dvh] flex flex-col shadow-2xl border border-slate-200 overflow-hidden text-xs">
+              <div className="shrink-0 bg-slate-900 px-6 py-4 flex items-center justify-between text-white border-b border-slate-800">
+                <div className="flex items-center gap-2">
+                  <Edit2 className="w-4 h-4 text-emerald-400" />
+                  <h3 className="font-bold text-sm">
+                    Edit {labels.armLabel} · {editingArm.classItem.name} ({editingArm.arm.name})
+                  </h3>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setEditingArm(null)}
+                  aria-label="Close edit arm modal"
+                  className="p-1 rounded-lg text-slate-400 hover:text-white cursor-pointer"
+                >
+                  <X className="w-4 h-4" />
+                </button>
               </div>
-              <button
-                type="button"
-                onClick={() => setEditingArm(null)}
-                className="p-1 rounded-lg text-slate-400 hover:text-white"
-              >
-                <X className="w-4 h-4" />
-              </button>
-            </div>
-            <form onSubmit={handleUpdateArm} className="p-6 space-y-4">
+              <form onSubmit={handleUpdateArm} className="flex-1 min-h-0 overflow-y-auto overscroll-contain p-6 space-y-4">
               {formError && (
                 <div className="p-3 bg-red-50 border border-red-200 text-red-700 rounded-xl flex items-center gap-2">
                   <AlertCircle className="w-4 h-4 flex-shrink-0" />
@@ -841,78 +865,95 @@ export const SchoolClassesView: React.FC = () => {
             </form>
           </div>
         </div>
+        </ModalPortal>
       )}
 
-      {/* CONFIRM DELETE ARM MODAL */}
+      {/* CONFIRM DELETE ARM / DEPARTMENT MODAL */}
       {armToDelete && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-xs p-4">
-          <div className="bg-white rounded-2xl max-w-md w-full shadow-2xl border border-slate-200 p-6 space-y-4 text-xs">
-            <div className="w-12 h-12 rounded-full bg-red-100 text-red-700 flex items-center justify-center mx-auto">
-              <Trash2 className="w-6 h-6" />
-            </div>
-            <div className="text-center space-y-1">
-              <h3 className="font-bold text-sm text-slate-900">
-                Remove Arm: {armToDelete.classItem.name} — {armToDelete.arm.name}
-              </h3>
-              <p className="text-slate-500">
-                {Number(armToDelete.arm.total_students || 0) > 0
-                  ? `${armToDelete.arm.total_students} student(s) in this arm will stay in ${armToDelete.classItem.name} without an arm assigned.`
-                  : 'Are you sure you want to remove this class arm?'}
-              </p>
-            </div>
-            <div className="pt-2 flex items-center justify-end gap-2">
-              <button
-                type="button"
-                onClick={() => setArmToDelete(null)}
-                className="w-full py-2 border border-slate-300 text-slate-700 rounded-xl hover:bg-slate-50"
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                disabled={formSubmitting}
-                onClick={handleDeleteArm}
-                className="w-full py-2 bg-red-600 hover:bg-red-700 text-white rounded-xl font-bold cursor-pointer"
-              >
-                {formSubmitting ? 'Removing...' : 'Confirm Remove'}
-              </button>
+        <ModalPortal onEscape={() => setArmToDelete(null)}>
+          <div
+            className="fixed inset-0 z-[9999] flex items-center justify-center bg-slate-900/65 backdrop-blur-[1px] p-4"
+            role="dialog"
+            aria-modal="true"
+            aria-label={`Remove ${labels.armLabel}`}
+          >
+            <div className="bg-white rounded-2xl max-w-md w-full shadow-2xl border border-slate-200 p-6 space-y-4 text-xs">
+              <div className="w-12 h-12 rounded-full bg-red-100 text-red-700 flex items-center justify-center mx-auto">
+                <Trash2 className="w-6 h-6" />
+              </div>
+              <div className="text-center space-y-1">
+                <h3 className="font-bold text-sm text-slate-900">
+                  Remove {labels.armLabel}: {armToDelete.classItem.name} — {armToDelete.arm.name}
+                </h3>
+                <p className="text-slate-500">
+                  {Number(armToDelete.arm.total_students || 0) > 0
+                    ? `${armToDelete.arm.total_students} student(s) will stay in ${armToDelete.classItem.name} without a ${labels.armLabel.toLowerCase()} assigned.`
+                    : `Are you sure you want to remove this ${labels.armLabel.toLowerCase()}?`}
+                </p>
+              </div>
+              <div className="pt-2 flex items-center justify-end gap-2">
+                <button
+                  type="button"
+                  onClick={() => setArmToDelete(null)}
+                  className="w-full py-2 border border-slate-300 text-slate-700 rounded-xl hover:bg-slate-50 cursor-pointer"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  disabled={formSubmitting}
+                  onClick={handleDeleteArm}
+                  className="w-full py-2 bg-red-600 hover:bg-red-700 text-white rounded-xl font-bold cursor-pointer"
+                >
+                  {formSubmitting ? 'Removing...' : 'Confirm Remove'}
+                </button>
+              </div>
             </div>
           </div>
-        </div>
+        </ModalPortal>
       )}
 
-      {/* CONFIRM DELETE CLASS MODAL */}
+      {/* CONFIRM DELETE CLASS / LEVEL MODAL */}
       {classToDelete && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-xs p-4">
-          <div className="bg-white rounded-2xl max-w-md w-full shadow-2xl border border-slate-200 p-6 space-y-4 text-xs">
-            <div className="w-12 h-12 rounded-full bg-red-100 text-red-700 flex items-center justify-center mx-auto">
-              <Trash2 className="w-6 h-6" />
-            </div>
-            <div className="text-center space-y-1">
-              <h3 className="font-bold text-sm text-slate-900">Delete Class: {classToDelete.name}</h3>
-              <p className="text-slate-500">
-                Are you sure you want to delete this class? This will also remove any arms under it.
-              </p>
-            </div>
-            <div className="pt-2 flex items-center justify-end gap-2">
-              <button
-                type="button"
-                onClick={() => setClassToDelete(null)}
-                className="w-full py-2 border border-slate-300 text-slate-700 rounded-xl hover:bg-slate-50"
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                disabled={formSubmitting}
-                onClick={handleDeleteClass}
-                className="w-full py-2 bg-red-600 hover:bg-red-700 text-white rounded-xl font-bold cursor-pointer"
-              >
-                {formSubmitting ? 'Deleting...' : 'Confirm Delete'}
-              </button>
+        <ModalPortal onEscape={() => setClassToDelete(null)}>
+          <div
+            className="fixed inset-0 z-[9999] flex items-center justify-center bg-slate-900/65 backdrop-blur-[1px] p-4"
+            role="dialog"
+            aria-modal="true"
+            aria-label={`Delete ${labels.classLabel}`}
+          >
+            <div className="bg-white rounded-2xl max-w-md w-full shadow-2xl border border-slate-200 p-6 space-y-4 text-xs">
+              <div className="w-12 h-12 rounded-full bg-red-100 text-red-700 flex items-center justify-center mx-auto">
+                <Trash2 className="w-6 h-6" />
+              </div>
+              <div className="text-center space-y-1">
+                <h3 className="font-bold text-sm text-slate-900">
+                  Delete {labels.classLabel}: {classToDelete.name}
+                </h3>
+                <p className="text-slate-500">
+                  Are you sure you want to delete this {labels.classLabel.toLowerCase()}? This will also remove any {labels.armLabel.toLowerCase()}s under it.
+                </p>
+              </div>
+              <div className="pt-2 flex items-center justify-end gap-2">
+                <button
+                  type="button"
+                  onClick={() => setClassToDelete(null)}
+                  className="w-full py-2 border border-slate-300 text-slate-700 rounded-xl hover:bg-slate-50 cursor-pointer"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  disabled={formSubmitting}
+                  onClick={handleDeleteClass}
+                  className="w-full py-2 bg-red-600 hover:bg-red-700 text-white rounded-xl font-bold cursor-pointer"
+                >
+                  {formSubmitting ? 'Deleting...' : 'Confirm Delete'}
+                </button>
+              </div>
             </div>
           </div>
-        </div>
+        </ModalPortal>
       )}
     </div>
   );

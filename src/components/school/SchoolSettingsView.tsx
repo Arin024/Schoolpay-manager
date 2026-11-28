@@ -43,6 +43,7 @@ export const SchoolSettingsView: React.FC = () => {
   });
 
   const [showCustomTerminology, setShowCustomTerminology] = useState(false);
+  const [schoolSessions, setSchoolSessions] = useState<string[]>([]);
   const [loading, setLoading] = useState(false);
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
@@ -68,7 +69,7 @@ export const SchoolSettingsView: React.FC = () => {
     }
   }, [activeSettings, activeSchool]);
 
-  // Fetch authoritative settings on mount or when active school ID switches
+  // Fetch authoritative settings & sessions on mount or when active school ID switches
   useEffect(() => {
     if (activeSchoolId) {
       api
@@ -81,8 +82,22 @@ export const SchoolSettingsView: React.FC = () => {
         .catch((err) => {
           console.warn('Could not fetch authoritative school settings:', err?.message || err);
         });
+      api
+        .getSchoolAcademicSessions()
+        .then((res) => {
+          setSchoolSessions((res.sessions || []).map((s) => s.name).filter(Boolean));
+        })
+        .catch(() => {});
     }
   }, [activeSchoolId]);
+
+  const suggestedSessionOptions = Array.from(
+    new Set([
+      ...schoolSessions,
+      formData.current_academic_session,
+      ...Array.from({ length: 20 }, (_, i) => `${2020 + i}/${2021 + i}`),
+    ].filter(Boolean))
+  );
 
   const parsedCycleLabels = formData.cycle_labels_text
     .split(',')
@@ -389,24 +404,29 @@ export const SchoolSettingsView: React.FC = () => {
             </p>
           </div>
 
-          {/* Academic Session */}
+          {/* Academic Session — Editable for ANY past, current, or future year (e.g. 2027/2028, 2035/2036) */}
           <div className="p-4 rounded-xl bg-slate-50 border border-slate-200">
             <label className="block text-xs font-semibold text-slate-700 mb-1">
               Current Academic Session
             </label>
-            <select
+            <input
+              type="text"
               name="current_academic_session"
+              list="school-settings-session-options"
               disabled={!canEdit}
               value={formData.current_academic_session}
               onChange={handleChange}
-              className="w-full mt-1.5 px-3 py-2 text-sm bg-white border border-slate-300 rounded-lg focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500"
-            >
-              <option value="2023/2024">2023/2024 Session</option>
-              <option value="2024/2025">2024/2025 Session</option>
-              <option value="2025/2026">2025/2026 Session</option>
-              <option value="2026/2027">2026/2027 Session</option>
-              <option value="2027/2028">2027/2028 Session</option>
-            </select>
+              placeholder="e.g. 2027/2028 or 2035/2036"
+              className="w-full mt-1.5 px-3 py-2 text-sm font-mono font-semibold bg-white border border-slate-300 rounded-lg focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500"
+            />
+            <datalist id="school-settings-session-options">
+              {suggestedSessionOptions.map((s) => (
+                <option key={s} value={s} />
+              ))}
+            </datalist>
+            <p className="text-[11px] text-slate-500 mt-1">
+              Pick a suggestion or type any academic year (e.g. 2027/2028, 2035/2036).
+            </p>
           </div>
 
           {/* Active Term / Semester */}
@@ -414,19 +434,21 @@ export const SchoolSettingsView: React.FC = () => {
             <label className="block text-xs font-semibold text-slate-700 mb-1">
               Active {formData.terminology.cycle}
             </label>
-            <select
+            <input
+              type="text"
               name="current_term"
+              list="school-settings-term-options"
               disabled={!canEdit}
               value={formData.current_term}
               onChange={handleChange}
+              placeholder={`e.g. ${selectableTerms[0] || '1st Semester'}`}
               className="w-full mt-1.5 px-3 py-2 text-sm bg-white border border-slate-300 rounded-lg focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500"
-            >
+            />
+            <datalist id="school-settings-term-options">
               {selectableTerms.map((label) => (
-                <option key={label} value={label}>
-                  {label}
-                </option>
+                <option key={label} value={label} />
               ))}
-            </select>
+            </datalist>
           </div>
 
           {/* Base Currency */}
