@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { Download, Printer, X, FileSpreadsheet, AlertCircle } from 'lucide-react';
 import { api } from '../../services/api';
+import { ModalPortal } from '../common/ModalPortal';
 import { ExamBroadsheetData } from '../../types';
 
 interface ExamBroadsheetModalProps {
@@ -94,10 +95,16 @@ export const ExamBroadsheetModal: React.FC<ExamBroadsheetModalProps> = ({
   };
 
   return (
-    <div className="fixed inset-0 z-50 bg-slate-900/50 backdrop-blur-[1px] flex items-center justify-center p-3 sm:p-6 overflow-y-auto">
-      <div className="bg-white rounded-xl border border-slate-200 w-full max-w-6xl max-h-[92vh] flex flex-col overflow-hidden">
-        {/* Header */}
-        <div className="px-5 py-4 border-b border-slate-200 flex flex-wrap items-center justify-between gap-3 print:hidden">
+    <ModalPortal onEscape={onClose}>
+      <div
+        className="fixed inset-0 z-[9999] bg-slate-900/60 backdrop-blur-[1px] flex items-end sm:items-center justify-center p-0 sm:p-4"
+        role="dialog"
+        aria-modal="true"
+        aria-label="Master Examination Broadsheet"
+      >
+        <div className="bg-white rounded-t-2xl sm:rounded-2xl border border-slate-200 shadow-2xl w-full max-w-6xl h-[94dvh] sm:h-auto sm:max-h-[92vh] flex flex-col overflow-hidden">
+          {/* Header */}
+          <div className="shrink-0 px-4 sm:px-5 py-3.5 border-b border-slate-200 flex flex-wrap items-center justify-between gap-3 print:hidden">
           <div className="flex items-center gap-2">
             <FileSpreadsheet className="w-4 h-4 text-emerald-700" />
             <div>
@@ -273,5 +280,6 @@ export const ExamBroadsheetModal: React.FC<ExamBroadsheetModalProps> = ({
         </div>
       </div>
     </div>
+    </ModalPortal>
   );
 };

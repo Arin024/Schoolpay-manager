@@ -1,6 +1,7 @@
 import React, { useMemo, useState } from 'react';
 import { Plus, Trash2, Upload, Sparkles, X, CheckCircle2, AlertCircle, BookOpen, CalendarPlus } from 'lucide-react';
 import { api } from '../../services/api';
+import { ModalPortal } from '../common/ModalPortal';
 import { AcademicSessionItem, ClassItem } from '../../types';
 import {
   CanonicalSemesterTag,
@@ -734,154 +735,160 @@ export const BulkCoursesModal: React.FC<BulkCoursesModalProps> = ({
   };
 
   return (
-    <div className="fixed inset-0 z-50 bg-slate-900/50 backdrop-blur-[1px] flex items-center justify-center p-2.5 sm:p-6 overflow-y-auto">
-      <div className="bg-white rounded-xl border border-slate-200 w-full max-w-6xl max-h-[92vh] flex flex-col overflow-hidden">
-        {/* Header */}
-        <div className="px-4 sm:px-5 py-3.5 sm:py-4 border-b border-slate-200 flex items-start justify-between gap-3">
-          <div>
-            <div className="flex items-center gap-2">
-              <BookOpen className="w-4 h-4 text-emerald-700 shrink-0" />
-              <h3 className="text-base font-bold text-slate-900">
-                Bulk Register {subjectPlural} &amp; Credit Units
-              </h3>
+    <ModalPortal onEscape={onClose}>
+      <div
+        className="fixed inset-0 z-[9999] bg-slate-900/60 backdrop-blur-[1px] flex items-end sm:items-center justify-center p-0 sm:p-4"
+        role="dialog"
+        aria-modal="true"
+        aria-label={`Bulk Register ${subjectPlural}`}
+      >
+        <div className="bg-white rounded-t-2xl sm:rounded-2xl border border-slate-200 shadow-2xl w-full max-w-6xl h-[94dvh] sm:h-auto sm:max-h-[92vh] flex flex-col overflow-hidden">
+          {/* Compact Sticky Header */}
+          <div className="shrink-0 px-4 sm:px-5 py-3.5 border-b border-slate-200 flex items-center justify-between gap-3">
+            <div className="min-w-0">
+              <div className="flex items-center gap-2">
+                <BookOpen className="w-4 h-4 text-emerald-700 shrink-0" />
+                <h3 className="text-sm sm:text-base font-bold text-slate-900 truncate">
+                  Bulk Register {subjectPlural} &amp; Credit Units
+                </h3>
+              </div>
+              <p className="hidden sm:block text-xs text-slate-500 mt-0.5">
+                Organize {subjectPlural.toLowerCase()} by {classLabel.toLowerCase()} and {cycleLabel.toLowerCase()} (e.g. 100L 1st {cycleLabel} separate from 2nd {cycleLabel}). Paste directly from Excel/Word/CSV (S/N columns &amp; headers are handled automatically).
+              </p>
             </div>
-            <p className="text-xs text-slate-500 mt-0.5">
-              Organize {subjectPlural.toLowerCase()} by {classLabel.toLowerCase()} and {cycleLabel.toLowerCase()} (e.g. 100L 1st {cycleLabel} separate from 2nd {cycleLabel}). Paste directly from Excel/Word/CSV (S/N columns &amp; headers are handled automatically).
-            </p>
-          </div>
-          <button
-            type="button"
-            onClick={onClose}
-            className="p-1.5 rounded-lg text-slate-400 hover:text-slate-700 hover:bg-slate-100"
-            aria-label="Close bulk courses modal"
-          >
-            <X className="w-4 h-4" />
-          </button>
-        </div>
-
-        {/* Controls Bar */}
-        <div className="px-4 sm:px-5 py-3 bg-slate-50 border-b border-slate-200 flex flex-wrap items-center justify-between gap-2.5">
-          <div className="flex items-center gap-2">
             <button
               type="button"
-              onClick={() => setMode('GRID')}
-              className={`px-3 py-1.5 text-xs font-semibold rounded-lg border transition-colors ${
-                mode === 'GRID'
-                  ? 'bg-slate-900 text-white border-slate-900'
-                  : 'bg-white text-slate-700 border-slate-200 hover:bg-slate-100'
-              }`}
+              onClick={onClose}
+              className="p-2 rounded-lg text-slate-500 hover:text-slate-900 hover:bg-slate-100 cursor-pointer shrink-0"
+              aria-label="Close bulk courses modal"
             >
-              Interactive Table ({validRows.length})
-            </button>
-            <button
-              type="button"
-              onClick={() => setMode('PASTE')}
-              className={`px-3 py-1.5 text-xs font-semibold rounded-lg border flex items-center gap-1.5 transition-colors ${
-                mode === 'PASTE'
-                  ? 'bg-slate-900 text-white border-slate-900'
-                  : 'bg-white text-slate-700 border-slate-200 hover:bg-slate-100'
-              }`}
-            >
-              <Upload className="w-3.5 h-3.5" />
-              Paste Excel / CSV
+              <X className="w-5 h-5" />
             </button>
           </div>
 
-          <div className="flex flex-wrap items-center gap-2">
-            <select
-              value={defaultClassId}
-              onChange={(e) => {
-                const nextCls = e.target.value;
-                const prevDefault = defaultClassId;
-                setDefaultClassId(nextCls);
-                setRows((prev) =>
-                  prev.map((r) =>
-                    r.class_id === '' || r.class_id === prevDefault ? { ...r, class_id: nextCls } : r
-                  )
-                );
-              }}
-              className="text-xs px-2.5 py-1.5 bg-white border border-slate-200 rounded-lg text-slate-700 font-medium"
-              aria-label={`Default ${classLabel}`}
-            >
-              <option value="">Default Scope: All {classLabel}s</option>
-              {classes.map((c) => (
-                <option key={c.id} value={c.id}>
-                  {classLabel}: {c.name}
-                </option>
-              ))}
-            </select>
+          {/* Single Unified Scrollable Body */}
+          <div className="flex-1 min-h-0 overflow-y-auto overscroll-contain p-4 sm:p-5 space-y-4">
+            {/* Controls Bar */}
+            <div className="p-3 bg-slate-50 border border-slate-200 rounded-xl flex flex-wrap items-center justify-between gap-2.5">
+              <div className="grid grid-cols-2 sm:inline-flex items-center gap-2 w-full sm:w-auto">
+                <button
+                  type="button"
+                  onClick={() => setMode('GRID')}
+                  className={`px-3 py-2 text-xs font-semibold rounded-lg border transition-colors cursor-pointer text-center ${
+                    mode === 'GRID'
+                      ? 'bg-slate-900 text-white border-slate-900'
+                      : 'bg-white text-slate-700 border-slate-200 hover:bg-slate-100'
+                  }`}
+                >
+                  Interactive Table ({validRows.length})
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setMode('PASTE')}
+                  className={`px-3 py-2 text-xs font-semibold rounded-lg border flex items-center justify-center gap-1.5 transition-colors cursor-pointer ${
+                    mode === 'PASTE'
+                      ? 'bg-slate-900 text-white border-slate-900'
+                      : 'bg-white text-slate-700 border-slate-200 hover:bg-slate-100'
+                  }`}
+                >
+                  <Upload className="w-3.5 h-3.5 shrink-0" />
+                  <span>Paste Excel / CSV</span>
+                </button>
+              </div>
 
-            <select
-              value={defaultSemesterTag}
-              onChange={(e) => {
-                const nextSem = e.target.value as CanonicalSemesterTag;
-                const prevDefault = defaultSemesterTag;
-                setDefaultSemesterTag(nextSem);
-                setRows((prev) =>
-                  prev.map((r) =>
-                    r.semester_tag === prevDefault ? { ...r, semester_tag: nextSem } : r
-                  )
-                );
-              }}
-              className="text-xs px-2.5 py-1.5 bg-white border border-emerald-300 rounded-lg text-emerald-900 font-semibold"
-              aria-label={`Default ${cycleLabel}`}
-            >
-              {semesterOptions.map((opt) => (
-                <option key={opt.value || 'ALL'} value={opt.value}>
-                  {cycleLabel}: {opt.label}
-                </option>
-              ))}
-            </select>
+              <div className="grid grid-cols-1 sm:flex sm:flex-wrap items-center gap-2 w-full sm:w-auto">
+                <select
+                  value={defaultClassId}
+                  onChange={(e) => {
+                    const nextCls = e.target.value;
+                    const prevDefault = defaultClassId;
+                    setDefaultClassId(nextCls);
+                    setRows((prev) =>
+                      prev.map((r) =>
+                        r.class_id === '' || r.class_id === prevDefault ? { ...r, class_id: nextCls } : r
+                      )
+                    );
+                  }}
+                  className="text-xs px-2.5 py-2 sm:py-1.5 bg-white border border-slate-200 rounded-lg text-slate-700 font-medium w-full sm:w-auto"
+                  aria-label={`Default ${classLabel}`}
+                >
+                  <option value="">Default Scope: All {classLabel}s</option>
+                  {classes.map((c) => (
+                    <option key={c.id} value={c.id}>
+                      {classLabel}: {c.name}
+                    </option>
+                  ))}
+                </select>
 
-            <div className="relative flex items-center">
-              <input
-                type="text"
-                list="bursariq-bulk-dept-options"
-                value={defaultDepartment}
-                onChange={(e) => {
-                  const nextDept = e.target.value;
-                  const prevDept = defaultDepartment;
-                  setDefaultDepartment(nextDept);
-                  setRows((prev) =>
-                    prev.map((r) =>
-                      r.department === '' || r.department === prevDept ? { ...r, department: nextDept } : r
-                    )
-                  );
-                }}
-                placeholder="Department (blank = General / Shared)"
-                aria-label="Default Department"
-                className="text-xs px-2.5 py-1.5 bg-white border border-sky-300 rounded-lg text-slate-800 font-medium w-56 focus:outline-none focus:ring-2 focus:ring-sky-500"
-              />
-              <datalist id="bursariq-bulk-dept-options">
-                {deptSuggestions.map((d) => (
-                  <option key={d} value={d} />
-                ))}
-              </datalist>
+                <select
+                  value={defaultSemesterTag}
+                  onChange={(e) => {
+                    const nextSem = e.target.value as CanonicalSemesterTag;
+                    const prevDefault = defaultSemesterTag;
+                    setDefaultSemesterTag(nextSem);
+                    setRows((prev) =>
+                      prev.map((r) =>
+                        r.semester_tag === prevDefault ? { ...r, semester_tag: nextSem } : r
+                      )
+                    );
+                  }}
+                  className="text-xs px-2.5 py-2 sm:py-1.5 bg-white border border-emerald-300 rounded-lg text-emerald-900 font-semibold w-full sm:w-auto"
+                  aria-label={`Default ${cycleLabel}`}
+                >
+                  {semesterOptions.map((opt) => (
+                    <option key={opt.value || 'ALL'} value={opt.value}>
+                      {cycleLabel}: {opt.label}
+                    </option>
+                  ))}
+                </select>
+
+                <div className="relative flex items-center w-full sm:w-auto">
+                  <input
+                    type="text"
+                    list="bursariq-bulk-dept-options"
+                    value={defaultDepartment}
+                    onChange={(e) => {
+                      const nextDept = e.target.value;
+                      const prevDept = defaultDepartment;
+                      setDefaultDepartment(nextDept);
+                      setRows((prev) =>
+                        prev.map((r) =>
+                          r.department === '' || r.department === prevDept ? { ...r, department: nextDept } : r
+                        )
+                      );
+                    }}
+                    placeholder="Department (blank = General / Shared)"
+                    aria-label="Default Department"
+                    className="text-xs px-2.5 py-2 sm:py-1.5 bg-white border border-sky-300 rounded-lg text-slate-800 font-medium w-full sm:w-56 focus:outline-none focus:ring-2 focus:ring-sky-500"
+                  />
+                  <datalist id="bursariq-bulk-dept-options">
+                    {deptSuggestions.map((d) => (
+                      <option key={d} value={d} />
+                    ))}
+                  </datalist>
+                </div>
+
+                <select
+                  defaultValue=""
+                  onChange={(e) => {
+                    if (e.target.value) applyPreset(e.target.value);
+                    e.target.value = '';
+                  }}
+                  className="text-xs px-2.5 py-2 sm:py-1.5 bg-white border border-slate-200 text-slate-700 font-medium rounded-lg w-full sm:w-auto"
+                  aria-label="Load Curriculum Preset"
+                >
+                  <option value="">Load Quick Preset...</option>
+                  {Object.entries(CURRICULUM_PRESETS)
+                    .sort(([, a], [, b]) => Number(b.tertiary === isTertiary) - Number(a.tertiary === isTertiary))
+                    .map(([key, p]) => (
+                      <option key={key} value={key}>
+                        {p.label}
+                      </option>
+                    ))}
+                </select>
+              </div>
             </div>
 
-            <select
-              defaultValue=""
-              onChange={(e) => {
-                if (e.target.value) applyPreset(e.target.value);
-                e.target.value = '';
-              }}
-              className="text-xs px-2.5 py-1.5 bg-white border border-slate-200 text-slate-700 font-medium rounded-lg"
-              aria-label="Load Curriculum Preset"
-            >
-              <option value="">Load Quick Preset...</option>
-              {Object.entries(CURRICULUM_PRESETS)
-                .sort(([, a], [, b]) => Number(b.tertiary === isTertiary) - Number(a.tertiary === isTertiary))
-                .map(([key, p]) => (
-                  <option key={key} value={key}>
-                    {p.label}
-                  </option>
-                ))}
-            </select>
-          </div>
-        </div>
-
-        {/* Body */}
-        <div className="flex-1 overflow-y-auto p-4 sm:p-5 space-y-4">
           {error && (
             <div className="p-3 rounded-lg bg-red-50 border border-red-200 text-xs text-red-700 flex items-center gap-2">
               <AlertCircle className="w-4 h-4 shrink-0" />
@@ -1129,105 +1136,105 @@ export const BulkCoursesModal: React.FC<BulkCoursesModalProps> = ({
               </div>
             </div>
           )}
-        </div>
-
-        {/* Optional: Also Register Uploaded Courses Directly Into an Academic Session */}
-        <div className="px-4 sm:px-5 py-3 bg-emerald-50/60 border-t border-emerald-200/80 space-y-2.5">
-          <label className="flex items-center gap-2 text-xs font-semibold text-emerald-950 cursor-pointer">
-            <input
-              type="checkbox"
-              checked={enrollIntoSession}
-              onChange={(e) => setEnrollIntoSession(e.target.checked)}
-              className="rounded border-emerald-400 text-emerald-600 focus:ring-emerald-500"
-            />
-            <CalendarPlus className="w-3.5 h-3.5 text-emerald-700" />
-            <span>
-              Also enroll {defaultDepartment.trim() || selectedClassName || 'cohort'} into an Academic Session immediately (e.g. 2024/2025 · 1st &amp; 2nd {cycleLabel})
-            </span>
-          </label>
-          {enrollIntoSession && (
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 pt-0.5">
-              <select
-                value={targetSessionId}
-                onChange={(e) => {
-                  setTargetSessionId(e.target.value);
-                  setTargetCycleMode('AUTO_BOTH');
-                }}
-                aria-label="Target Academic Session"
-                className="text-xs px-2.5 py-1.5 bg-white border border-emerald-300 rounded-lg text-slate-800 font-medium"
-              >
-                {sessions.map((s) => (
-                  <option key={s.id} value={s.id}>
-                    Session: {s.name} ({s.status === 'ACTIVE' ? 'Active' : s.status === 'UPCOMING' ? 'Upcoming' : 'Historical'})
-                  </option>
-                ))}
-                <option value="__NEW__">+ Create New / Past Session (e.g. 2024/2025)...</option>
-              </select>
-
-              {targetSessionId === '__NEW__' && (
+            {/* Optional: Also Register Uploaded Courses Directly Into an Academic Session */}
+            <div className="p-3.5 rounded-xl bg-emerald-50/70 border border-emerald-200/80 space-y-2.5">
+              <label className="flex items-start gap-2 text-xs font-semibold text-emerald-950 cursor-pointer">
                 <input
-                  type="text"
-                  value={customSessionName}
-                  onChange={(e) => setCustomSessionName(e.target.value)}
-                  placeholder="Enter session e.g. 2024/2025"
-                  aria-label="Custom Session Name"
-                  className="text-xs px-2.5 py-1.5 bg-white border border-emerald-300 rounded-lg text-slate-800 font-medium"
+                  type="checkbox"
+                  checked={enrollIntoSession}
+                  onChange={(e) => setEnrollIntoSession(e.target.checked)}
+                  className="mt-0.5 rounded border-emerald-400 text-emerald-600 focus:ring-emerald-500"
                 />
+                <CalendarPlus className="w-3.5 h-3.5 text-emerald-700 shrink-0 mt-0.5" />
+                <span>
+                  Also enroll {defaultDepartment.trim() || selectedClassName || 'cohort'} into an Academic Session immediately (e.g. 2024/2025 · 1st &amp; 2nd {cycleLabel})
+                </span>
+              </label>
+              {enrollIntoSession && (
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 pt-0.5">
+                  <select
+                    value={targetSessionId}
+                    onChange={(e) => {
+                      setTargetSessionId(e.target.value);
+                      setTargetCycleMode('AUTO_BOTH');
+                    }}
+                    aria-label="Target Academic Session"
+                    className="text-xs px-2.5 py-2 sm:py-1.5 bg-white border border-emerald-300 rounded-lg text-slate-800 font-medium"
+                  >
+                    {sessions.map((s) => (
+                      <option key={s.id} value={s.id}>
+                        Session: {s.name} ({s.status === 'ACTIVE' ? 'Active' : s.status === 'UPCOMING' ? 'Upcoming' : 'Historical'})
+                      </option>
+                    ))}
+                    <option value="__NEW__">+ Create New / Past Session (e.g. 2024/2025)...</option>
+                  </select>
+
+                  {targetSessionId === '__NEW__' && (
+                    <input
+                      type="text"
+                      value={customSessionName}
+                      onChange={(e) => setCustomSessionName(e.target.value)}
+                      placeholder="Enter session e.g. 2024/2025"
+                      aria-label="Custom Session Name"
+                      className="text-xs px-2.5 py-2 sm:py-1.5 bg-white border border-emerald-300 rounded-lg text-slate-800 font-medium"
+                    />
+                  )}
+
+                  <select
+                    value={targetCycleMode}
+                    onChange={(e) => setTargetCycleMode(e.target.value)}
+                    aria-label={`Target ${cycleLabel}s`}
+                    className="text-xs px-2.5 py-2 sm:py-1.5 bg-white border border-emerald-300 rounded-lg text-slate-800 font-medium"
+                  >
+                    <option value="AUTO_BOTH">
+                      {isTertiary ? '1st & 2nd Semester (Auto-match rows)' : `All ${cycleLabel}s (Auto-match rows)`}
+                    </option>
+                    {(selectedTargetSession?.terms || []).map((t) => (
+                      <option key={t.id} value={t.id}>
+                        Only {t.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
               )}
-
-              <select
-                value={targetCycleMode}
-                onChange={(e) => setTargetCycleMode(e.target.value)}
-                aria-label={`Target ${cycleLabel}s`}
-                className="text-xs px-2.5 py-1.5 bg-white border border-emerald-300 rounded-lg text-slate-800 font-medium"
-              >
-                <option value="AUTO_BOTH">
-                  {isTertiary ? '1st & 2nd Semester (Auto-match rows)' : `All ${cycleLabel}s (Auto-match rows)`}
-                </option>
-                {(selectedTargetSession?.terms || []).map((t) => (
-                  <option key={t.id} value={t.id}>
-                    Only {t.name}
-                  </option>
-                ))}
-              </select>
             </div>
-          )}
-        </div>
-
-        {/* Footer */}
-        <div className="px-4 sm:px-5 py-3.5 bg-slate-50 border-t border-slate-200 flex flex-wrap items-center justify-between gap-3">
-          <div className="text-xs text-slate-600 tabular-nums">
-            <span className="font-semibold text-slate-900">{validRows.length}</span> ready{' '}
-            {subjectPlural.toLowerCase()} ·{' '}
-            <span className="font-semibold text-slate-900">{totalUnits}</span> total credit units ·{' '}
-            <span className="font-medium text-emerald-800">
-              {defaultDepartment.trim() ? `${defaultDepartment.trim()} · ` : 'General · '}
-              {selectedClassName ? `${selectedClassName} · ` : ''}
-              {selectedSemesterLabel}
-            </span>
           </div>
-          <div className="flex items-center gap-2">
-            <button
-              type="button"
-              onClick={onClose}
-              className="px-4 py-2 text-xs font-semibold text-slate-700 bg-white border border-slate-200 rounded-lg hover:bg-slate-100"
-            >
-              Cancel
-            </button>
-            <button
-              type="button"
-              disabled={submitting || validRows.length === 0}
-              onClick={handleSubmit}
-              className="px-4 py-2 text-xs font-semibold text-white bg-emerald-600 rounded-lg hover:bg-emerald-700 disabled:opacity-50 flex items-center gap-1.5"
-            >
-              <CheckCircle2 className="w-3.5 h-3.5" />
-              {submitting
-                ? 'Registering...'
-                : `Save ${validRows.length} ${validRows.length === 1 ? subjectLabel : subjectPlural}`}
-            </button>
+
+          {/* Compact Sticky Footer */}
+          <div className="shrink-0 px-4 sm:px-5 py-3 bg-slate-50 border-t border-slate-200 flex flex-wrap items-center justify-between gap-2.5">
+            <div className="text-xs text-slate-600 tabular-nums">
+              <span className="font-semibold text-slate-900">{validRows.length}</span> ready{' '}
+              {subjectPlural.toLowerCase()} ·{' '}
+              <span className="font-semibold text-slate-900">{totalUnits}</span> units
+              <span className="hidden sm:inline font-medium text-emerald-800">
+                {' '}· {defaultDepartment.trim() ? `${defaultDepartment.trim()} · ` : 'General · '}
+                {selectedClassName ? `${selectedClassName} · ` : ''}
+                {selectedSemesterLabel}
+              </span>
+            </div>
+            <div className="flex items-center gap-2 ml-auto">
+              <button
+                type="button"
+                onClick={onClose}
+                className="px-4 py-2 text-xs font-semibold text-slate-700 bg-white border border-slate-200 rounded-lg hover:bg-slate-100 cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                disabled={submitting || validRows.length === 0}
+                onClick={handleSubmit}
+                className="px-4 py-2 text-xs font-semibold text-white bg-emerald-600 rounded-lg hover:bg-emerald-700 disabled:opacity-50 flex items-center gap-1.5 cursor-pointer"
+              >
+                <CheckCircle2 className="w-3.5 h-3.5" />
+                {submitting
+                  ? 'Registering...'
+                  : `Save ${validRows.length} ${validRows.length === 1 ? subjectLabel : subjectPlural}`}
+              </button>
+            </div>
           </div>
         </div>
       </div>
-    </div>
+    </ModalPortal>
   );
 };

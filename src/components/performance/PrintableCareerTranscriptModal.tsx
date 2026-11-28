@@ -10,6 +10,7 @@ import {
   FileCheck2,
   Loader2,
 } from 'lucide-react';
+import { ModalPortal } from '../common/ModalPortal';
 
 interface PrintableCareerTranscriptModalProps {
   transcript: any;
@@ -72,8 +73,14 @@ export const PrintableCareerTranscriptModal: React.FC<PrintableCareerTranscriptM
   };
 
   return (
-    <div className="fixed inset-0 z-50 bg-slate-950/75 backdrop-blur-xs flex items-start justify-center overflow-y-auto p-3 sm:p-6 print:p-0 print:bg-white print:static">
-      <div className="bg-white w-full max-w-5xl rounded-2xl border border-slate-200 shadow-2xl overflow-hidden my-2 print:my-0 print:border-0 print:shadow-none print:rounded-none print:max-w-none">
+    <ModalPortal onEscape={onClose}>
+      <div
+        className="fixed inset-0 z-[9999] bg-slate-950/75 backdrop-blur-xs flex items-start justify-center overflow-y-auto p-2 sm:p-6 print:p-0 print:bg-white print:static"
+        role="dialog"
+        aria-modal="true"
+        aria-label={isTertiary ? 'Cumulative Academic Career Transcript' : 'Cumulative Multi-Year Academic Record'}
+      >
+        <div className="bg-white w-full max-w-5xl rounded-2xl border border-slate-200 shadow-2xl overflow-hidden my-2 print:my-0 print:border-0 print:shadow-none print:rounded-none print:max-w-none">
         {/* Non-printing Toolbar */}
         <div className="px-5 py-3.5 bg-slate-900 text-white flex flex-wrap items-center justify-between gap-3 print:hidden">
           <div className="flex items-center gap-2.5">
@@ -529,5 +536,6 @@ export const PrintableCareerTranscriptModal: React.FC<PrintableCareerTranscriptM
         </div>
       </div>
     </div>
+    </ModalPortal>
   );
 };

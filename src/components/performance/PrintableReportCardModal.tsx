@@ -2,6 +2,7 @@ import React from 'react';
 import { Printer, X, FileText, ShieldCheck, Award } from 'lucide-react';
 import { ReportCardItem, ReportCardBreakdown } from '../../types/index.js';
 import { WorkflowStatusBadge } from '../common/StatusBadge.js';
+import { ModalPortal } from '../common/ModalPortal';
 
 interface PrintableReportCardModalProps {
   reportCard: ReportCardItem | null;
@@ -90,8 +91,14 @@ export const PrintableReportCardModal: React.FC<PrintableReportCardModalProps> =
       : `Official End-of-${labelCycle} Report Card`;
 
   return (
-    <div className="fixed inset-0 z-50 overflow-y-auto bg-slate-900/65 backdrop-blur-xs flex items-start sm:items-center justify-center p-4 print:p-0 print:bg-white print:static print:block print:overflow-visible">
-      <div className="relative w-full max-w-5xl bg-white rounded-2xl shadow-2xl border border-slate-200 overflow-hidden my-6 print:my-0 print:border-none print:shadow-none print:w-full print:max-w-none print:rounded-none">
+    <ModalPortal onEscape={onClose}>
+      <div
+        className="fixed inset-0 z-[9999] overflow-y-auto bg-slate-900/65 backdrop-blur-xs flex items-start sm:items-center justify-center p-2 sm:p-4 print:p-0 print:bg-white print:static print:block print:overflow-visible"
+        role="dialog"
+        aria-modal="true"
+        aria-label={docHeading}
+      >
+        <div className="relative w-full max-w-5xl bg-white rounded-2xl shadow-2xl border border-slate-200 overflow-hidden my-2 sm:my-6 print:my-0 print:border-none print:shadow-none print:w-full print:max-w-none print:rounded-none">
         {/* Toolbar - hidden when printing */}
         <div className="flex items-center justify-between px-6 py-4 bg-slate-900 text-white print:hidden">
           <div className="flex items-center gap-2.5 flex-wrap">
@@ -627,5 +634,6 @@ export const PrintableReportCardModal: React.FC<PrintableReportCardModalProps> =
         </div>
       </div>
     </div>
+    </ModalPortal>
   );
 };

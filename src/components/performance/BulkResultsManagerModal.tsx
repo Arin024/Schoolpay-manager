@@ -14,6 +14,7 @@ import {
   X,
 } from 'lucide-react';
 import { api } from '../../services/api';
+import { ModalPortal } from '../common/ModalPortal';
 import type {
   AcademicSessionItem,
   ClassItem,
@@ -436,12 +437,13 @@ export const BulkResultsManagerModal: React.FC<BulkResultsManagerModalProps> = (
   const selectedBatchScoreTotal = selectedBatchSummaries.reduce((sum, b) => sum + b.scores_count, 0);
 
   return (
-    <div
-      className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-[1px] flex items-end sm:items-center justify-center p-0 sm:p-4"
-      role="dialog"
-      aria-modal="true"
-      aria-label="Manage, Fix and Bulk Delete Results"
-    >
+    <ModalPortal onEscape={onClose}>
+      <div
+        className="fixed inset-0 z-[9999] bg-slate-900/60 backdrop-blur-[1px] flex items-end sm:items-center justify-center p-0 sm:p-4"
+        role="dialog"
+        aria-modal="true"
+        aria-label="Manage, Fix and Bulk Delete Results"
+      >
       <div className="bg-white w-full max-w-6xl h-[94dvh] sm:h-auto sm:max-h-[92vh] rounded-t-2xl sm:rounded-2xl border border-slate-200 shadow-2xl flex flex-col overflow-hidden">
         {/* Compact Sticky Header */}
         <div className="shrink-0 px-4 sm:px-5 py-3.5 border-b border-slate-200 flex items-center justify-between gap-3">
@@ -1463,5 +1465,6 @@ export const BulkResultsManagerModal: React.FC<BulkResultsManagerModalProps> = (
         </div>
       </div>
     </div>
+    </ModalPortal>
   );
 };

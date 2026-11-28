@@ -3559,39 +3559,43 @@ apiRouter.get('/v1/school/parents', requireAuth, requireTenant, requireRole(DIRE
 
     if (pgRes) {
       parents = pgRes.rows;
-      // Sync into cacheDb
+      // Sync into cacheDb (non-fatal when Neon PG is authoritative)
       for (const p of parents) {
-        cacheDb.prepare(`
-          INSERT INTO parents (id, school_id, user_id, first_name, last_name, phone, email, address, occupation, relationship, emergency_contact, is_deleted, created_at, updated_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-          ON CONFLICT(id) DO UPDATE SET
-            user_id = COALESCE(excluded.user_id, parents.user_id),
-            first_name = excluded.first_name,
-            last_name = excluded.last_name,
-            phone = excluded.phone,
-            email = excluded.email,
-            address = excluded.address,
-            occupation = excluded.occupation,
-            relationship = excluded.relationship,
-            emergency_contact = excluded.emergency_contact,
-            is_deleted = excluded.is_deleted,
-            updated_at = excluded.updated_at
-        `).run(
-          p.id,
-          p.school_id,
-          p.user_id || null,
-          p.first_name,
-          p.last_name,
-          p.phone || null,
-          p.email || null,
-          p.address || null,
-          p.occupation || null,
-          p.relationship || 'Parent',
-          p.emergency_contact || null,
-          p.is_deleted ? 1 : 0,
-          p.created_at || new Date().toISOString(),
-          p.updated_at || new Date().toISOString()
-        );
+        try {
+          const createdIso = p.created_at instanceof Date ? p.created_at.toISOString() : (p.created_at || new Date().toISOString());
+          const updatedIso = p.updated_at instanceof Date ? p.updated_at.toISOString() : (p.updated_at || new Date().toISOString());
+          cacheDb.prepare(`
+            INSERT INTO parents (id, school_id, user_id, first_name, last_name, phone, email, address, occupation, relationship, emergency_contact, is_deleted, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+              user_id = COALESCE(excluded.user_id, parents.user_id),
+              first_name = excluded.first_name,
+              last_name = excluded.last_name,
+              phone = excluded.phone,
+              email = excluded.email,
+              address = excluded.address,
+              occupation = excluded.occupation,
+              relationship = excluded.relationship,
+              emergency_contact = excluded.emergency_contact,
+              is_deleted = excluded.is_deleted,
+              updated_at = excluded.updated_at
+          `).run(
+            p.id,
+            p.school_id,
+            p.user_id || null,
+            p.first_name,
+            p.last_name,
+            p.phone || null,
+            p.email || null,
+            p.address || null,
+            p.occupation || null,
+            p.relationship || 'Parent',
+            p.emergency_contact || null,
+            p.is_deleted ? 1 : 0,
+            createdIso,
+            updatedIso
+          );
+        } catch {}
       }
     } else {
       parents = cacheDb.prepare(`
@@ -4730,47 +4734,52 @@ apiRouter.get('/v1/school/staff', requireAuth, requireTenant, requireRole(DIRECT
     if (pgRes) {
       staff = pgRes.rows;
       for (const st of staff) {
-        cacheDb.prepare(`
-          INSERT INTO staff (
-            id, school_id, user_id, staff_number, first_name, middle_name, last_name, email, phone,
-            gender, address, job_title, department, employment_status, date_joined, is_deleted, created_at, updated_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-          ON CONFLICT(id) DO UPDATE SET
-            user_id = COALESCE(excluded.user_id, staff.user_id),
-            staff_number = excluded.staff_number,
-            first_name = excluded.first_name,
-            middle_name = excluded.middle_name,
-            last_name = excluded.last_name,
-            email = excluded.email,
-            phone = excluded.phone,
-            gender = excluded.gender,
-            address = excluded.address,
-            job_title = excluded.job_title,
-            department = excluded.department,
-            employment_status = excluded.employment_status,
-            date_joined = excluded.date_joined,
-            is_deleted = excluded.is_deleted,
-            updated_at = excluded.updated_at
-        `).run(
-          st.id,
-          st.school_id,
-          st.user_id || null,
-          st.staff_number || null,
-          st.first_name,
-          st.middle_name || null,
-          st.last_name,
-          st.email || null,
-          st.phone || null,
-          st.gender || null,
-          st.address || null,
-          st.job_title || null,
-          st.department || null,
-          st.employment_status || 'ACTIVE',
-          st.date_joined || null,
-          st.is_deleted ? 1 : 0,
-          st.created_at || new Date().toISOString(),
-          st.updated_at || new Date().toISOString()
-        );
+        try {
+          const joinedIso = st.date_joined instanceof Date ? st.date_joined.toISOString().slice(0, 10) : (st.date_joined || null);
+          const createdIso = st.created_at instanceof Date ? st.created_at.toISOString() : (st.created_at || new Date().toISOString());
+          const updatedIso = st.updated_at instanceof Date ? st.updated_at.toISOString() : (st.updated_at || new Date().toISOString());
+          cacheDb.prepare(`
+            INSERT INTO staff (
+              id, school_id, user_id, staff_number, first_name, middle_name, last_name, email, phone,
+              gender, address, job_title, department, employment_status, date_joined, is_deleted, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+              user_id = COALESCE(excluded.user_id, staff.user_id),
+              staff_number = excluded.staff_number,
+              first_name = excluded.first_name,
+              middle_name = excluded.middle_name,
+              last_name = excluded.last_name,
+              email = excluded.email,
+              phone = excluded.phone,
+              gender = excluded.gender,
+              address = excluded.address,
+              job_title = excluded.job_title,
+              department = excluded.department,
+              employment_status = excluded.employment_status,
+              date_joined = excluded.date_joined,
+              is_deleted = excluded.is_deleted,
+              updated_at = excluded.updated_at
+          `).run(
+            st.id,
+            st.school_id,
+            st.user_id || null,
+            st.staff_number || null,
+            st.first_name,
+            st.middle_name || null,
+            st.last_name,
+            st.email || null,
+            st.phone || null,
+            st.gender || null,
+            st.address || null,
+            st.job_title || null,
+            st.department || null,
+            st.employment_status || 'ACTIVE',
+            joinedIso,
+            st.is_deleted ? 1 : 0,
+            createdIso,
+            updatedIso
+          );
+        } catch {}
       }
     } else {
       staff = cacheDb.prepare(`
@@ -5181,28 +5190,46 @@ apiRouter.get('/v1/school/academic-sessions', requireAuth, requireTenant, requir
     `, [schoolId])
       : null;
 
+    const toSqlDate = (v: unknown): string | null => {
+      if (v === null || v === undefined || v === '') return null;
+      if (v instanceof Date) return Number.isNaN(v.getTime()) ? null : v.toISOString();
+      return String(v);
+    };
+    const toSqliteCycleStatus = (status: unknown, isCurrent?: unknown): 'ACTIVE' | 'UPCOMING' | 'COMPLETED' => {
+      const up = String(status || '').toUpperCase();
+      if (up === 'ACTIVE') return 'ACTIVE';
+      if (up === 'COMPLETED' || up === 'ARCHIVED') return 'COMPLETED';
+      if (up === 'UPCOMING') return 'UPCOMING';
+      return isCurrent ? 'ACTIVE' : 'UPCOMING';
+    };
+
     if (pgSessions) {
-      sessions = pgSessions.rows;
+      sessions = pgSessions.rows.map((s: any) => ({
+        ...s,
+        status: s.status || (s.is_current ? 'ACTIVE' : 'UPCOMING'),
+      }));
       for (const s of sessions) {
-        cacheDb.prepare(`
-          INSERT INTO academic_sessions (id, school_id, name, start_date, end_date, status, created_at, updated_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-          ON CONFLICT(id) DO UPDATE SET
-            name = excluded.name,
-            start_date = excluded.start_date,
-            end_date = excluded.end_date,
-            status = excluded.status,
-            updated_at = excluded.updated_at
-        `).run(
-          s.id,
-          s.school_id,
-          s.name,
-          s.start_date || null,
-          s.end_date || null,
-          s.status || 'UPCOMING',
-          s.created_at || new Date().toISOString(),
-          s.updated_at || new Date().toISOString()
-        );
+        try {
+          cacheDb.prepare(`
+            INSERT INTO academic_sessions (id, school_id, name, start_date, end_date, status, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+              name = excluded.name,
+              start_date = excluded.start_date,
+              end_date = excluded.end_date,
+              status = excluded.status,
+              updated_at = excluded.updated_at
+          `).run(
+            s.id,
+            s.school_id,
+            s.name,
+            toSqlDate(s.start_date),
+            toSqlDate(s.end_date),
+            toSqliteCycleStatus(s.status, s.is_current),
+            toSqlDate(s.created_at) || new Date().toISOString(),
+            toSqlDate(s.updated_at) || new Date().toISOString()
+          );
+        } catch {}
       }
     } else {
       sessions = cacheDb.prepare(`
@@ -5219,28 +5246,33 @@ apiRouter.get('/v1/school/academic-sessions', requireAuth, requireTenant, requir
         : null;
 
       if (pgTerms) {
-        terms = pgTerms.rows;
+        terms = pgTerms.rows.map((t: any) => ({
+          ...t,
+          status: t.status || (t.is_current ? 'ACTIVE' : 'UPCOMING'),
+        }));
         for (const t of terms) {
-          cacheDb.prepare(`
-            INSERT INTO terms (id, school_id, academic_session_id, name, start_date, end_date, status, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(id) DO UPDATE SET
-              name = excluded.name,
-              start_date = excluded.start_date,
-              end_date = excluded.end_date,
-              status = excluded.status,
-              updated_at = excluded.updated_at
-          `).run(
-            t.id,
-            t.school_id,
-            t.academic_session_id,
-            t.name,
-            t.start_date || null,
-            t.end_date || null,
-            t.status || 'UPCOMING',
-            t.created_at || new Date().toISOString(),
-            t.updated_at || new Date().toISOString()
-          );
+          try {
+            cacheDb.prepare(`
+              INSERT INTO terms (id, school_id, academic_session_id, name, start_date, end_date, status, created_at, updated_at)
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+              ON CONFLICT(id) DO UPDATE SET
+                name = excluded.name,
+                start_date = excluded.start_date,
+                end_date = excluded.end_date,
+                status = excluded.status,
+                updated_at = excluded.updated_at
+            `).run(
+              t.id,
+              t.school_id,
+              t.academic_session_id,
+              t.name,
+              toSqlDate(t.start_date),
+              toSqlDate(t.end_date),
+              toSqliteCycleStatus(t.status, t.is_current),
+              toSqlDate(t.created_at) || new Date().toISOString(),
+              toSqlDate(t.updated_at) || new Date().toISOString()
+            );
+          } catch {}
         }
       } else {
         terms = cacheDb.prepare(`
@@ -5316,34 +5348,47 @@ apiRouter.post(
           await queryPg("UPDATE academic_sessions SET status = 'COMPLETED' WHERE school_id = $1 AND status = 'ACTIVE'", [schoolId]);
           await queryPg("UPDATE academic_sessions SET status = 'ACTIVE', updated_at = CURRENT_TIMESTAMP WHERE id = $1", [sessionId]);
         }
-        cacheDb.prepare("UPDATE academic_sessions SET status = 'COMPLETED' WHERE school_id = ? AND status = 'ACTIVE'").run(schoolId);
-        cacheDb.prepare("UPDATE academic_sessions SET status = 'ACTIVE', updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(sessionId);
+        try {
+          cacheDb.prepare("UPDATE academic_sessions SET status = 'COMPLETED' WHERE school_id = ? AND status = 'ACTIVE'").run(schoolId);
+          cacheDb.prepare("UPDATE academic_sessions SET status = 'ACTIVE', updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(sessionId);
+        } catch (e) {
+          if (!pool) throw e;
+        }
       }
     } else {
       if (validStatus === 'ACTIVE') {
         if (pool) await queryPg("UPDATE academic_sessions SET status = 'COMPLETED' WHERE school_id = $1 AND status = 'ACTIVE'", [schoolId]);
-        cacheDb.prepare("UPDATE academic_sessions SET status = 'COMPLETED' WHERE school_id = ? AND status = 'ACTIVE'").run(schoolId);
+        try {
+          cacheDb.prepare("UPDATE academic_sessions SET status = 'COMPLETED' WHERE school_id = ? AND status = 'ACTIVE'").run(schoolId);
+        } catch (e) {
+          if (!pool) throw e;
+        }
       }
 
+      const sqliteStatus = validStatus === 'ARCHIVED' ? 'COMPLETED' : validStatus;
       sessionId = 'ses_' + crypto.randomUUID().slice(0, 8);
       if (pool) {
         await queryPg(
           `INSERT INTO academic_sessions (id, school_id, name, start_date, end_date, status, created_at, updated_at)
            VALUES ($1, $2, $3, $4, $5, $6, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
-          [sessionId, schoolId, safeName, start_date || null, end_date || null, validStatus]
+          [sessionId, schoolId, safeName, start_date || null, end_date || null, sqliteStatus]
         );
       }
 
-      cacheDb.prepare(`
-        INSERT INTO academic_sessions (id, school_id, name, start_date, end_date, status, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-        ON CONFLICT(id) DO UPDATE SET
-          name = excluded.name,
-          start_date = excluded.start_date,
-          end_date = excluded.end_date,
-          status = excluded.status,
-          updated_at = CURRENT_TIMESTAMP
-      `).run(sessionId, schoolId, safeName, start_date || null, end_date || null, validStatus);
+      try {
+        cacheDb.prepare(`
+          INSERT INTO academic_sessions (id, school_id, name, start_date, end_date, status, created_at, updated_at)
+          VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+          ON CONFLICT(id) DO UPDATE SET
+            name = excluded.name,
+            start_date = excluded.start_date,
+            end_date = excluded.end_date,
+            status = excluded.status,
+            updated_at = CURRENT_TIMESTAMP
+        `).run(sessionId, schoolId, safeName, start_date || null, end_date || null, sqliteStatus);
+      } catch (e) {
+        if (!pool) throw e;
+      }
       created = true;
     }
 
@@ -5403,7 +5448,11 @@ apiRouter.post(
 
         if (termStatus === 'ACTIVE') {
           if (pool) await queryPg("UPDATE terms SET status = 'COMPLETED' WHERE school_id = $1 AND status = 'ACTIVE'", [schoolId]);
-          cacheDb.prepare("UPDATE terms SET status = 'COMPLETED' WHERE school_id = ? AND status = 'ACTIVE'").run(schoolId);
+          try {
+            cacheDb.prepare("UPDATE terms SET status = 'COMPLETED' WHERE school_id = ? AND status = 'ACTIVE'").run(schoolId);
+          } catch (e) {
+            if (!pool) throw e;
+          }
         }
 
         if (pool) {
@@ -5413,11 +5462,15 @@ apiRouter.post(
             [termId, schoolId, sessionId, label, termStatus]
           );
         }
-        cacheDb.prepare(`
-          INSERT INTO terms (id, school_id, academic_session_id, name, start_date, end_date, status, created_at, updated_at)
-          VALUES (?, ?, ?, ?, NULL, NULL, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-          ON CONFLICT(id) DO UPDATE SET name = excluded.name, status = excluded.status, updated_at = CURRENT_TIMESTAMP
-        `).run(termId, schoolId, sessionId, label, termStatus);
+        try {
+          cacheDb.prepare(`
+            INSERT INTO terms (id, school_id, academic_session_id, name, start_date, end_date, status, created_at, updated_at)
+            VALUES (?, ?, ?, ?, NULL, NULL, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+            ON CONFLICT(id) DO UPDATE SET name = excluded.name, status = excluded.status, updated_at = CURRENT_TIMESTAMP
+          `).run(termId, schoolId, sessionId, label, termStatus);
+        } catch (e) {
+          if (!pool) throw e;
+        }
         existingTermKeys.add(normTermKey(label));
       }
     }
@@ -5467,9 +5520,19 @@ apiRouter.post(
       return res.status(400).json({ error: 'MISSING_FIELDS', message: 'Term name is required (e.g. 1st Term).' });
     }
 
-    if (status === 'ACTIVE') {
+    const safeTermStatus = ['ACTIVE', 'UPCOMING', 'COMPLETED'].includes(String(status || '').toUpperCase())
+      ? String(status).toUpperCase()
+      : String(status || '').toUpperCase() === 'ARCHIVED'
+      ? 'COMPLETED'
+      : 'UPCOMING';
+
+    if (safeTermStatus === 'ACTIVE') {
       if (pool) await queryPg("UPDATE terms SET status = 'COMPLETED' WHERE school_id = $1 AND status = 'ACTIVE'", [schoolId]);
-      cacheDb.prepare("UPDATE terms SET status = 'COMPLETED' WHERE school_id = ? AND status = 'ACTIVE'").run(schoolId);
+      try {
+        cacheDb.prepare("UPDATE terms SET status = 'COMPLETED' WHERE school_id = ? AND status = 'ACTIVE'").run(schoolId);
+      } catch (e) {
+        if (!pool) throw e;
+      }
     }
 
     const termId = 'trm_' + crypto.randomUUID().slice(0, 8);
@@ -5479,19 +5542,23 @@ apiRouter.post(
       await queryPg(`
         INSERT INTO terms (id, school_id, academic_session_id, name, start_date, end_date, status, created_at, updated_at)
         VALUES ($1, $2, $3, $4, $5, $6, $7, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-      `, [termId, schoolId, sessionId, safeName, start_date || null, end_date || null, status]);
+      `, [termId, schoolId, sessionId, safeName, start_date || null, end_date || null, safeTermStatus]);
     }
 
-    cacheDb.prepare(`
-      INSERT INTO terms (id, school_id, academic_session_id, name, start_date, end_date, status, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-      ON CONFLICT(id) DO UPDATE SET
-        name = excluded.name,
-        start_date = excluded.start_date,
-        end_date = excluded.end_date,
-        status = excluded.status,
-        updated_at = CURRENT_TIMESTAMP
-    `).run(termId, schoolId, sessionId, safeName, start_date || null, end_date || null, status);
+    try {
+      cacheDb.prepare(`
+        INSERT INTO terms (id, school_id, academic_session_id, name, start_date, end_date, status, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+        ON CONFLICT(id) DO UPDATE SET
+          name = excluded.name,
+          start_date = excluded.start_date,
+          end_date = excluded.end_date,
+          status = excluded.status,
+          updated_at = CURRENT_TIMESTAMP
+      `).run(termId, schoolId, sessionId, safeName, start_date || null, end_date || null, safeTermStatus);
+    } catch (e) {
+      if (!pool) throw e;
+    }
 
     const pgTerm = pool ? await queryPg('SELECT * FROM terms WHERE id = $1', [termId]) : null;
     const term = pgTerm?.rows[0] || cacheDb.prepare('SELECT * FROM terms WHERE id = ?').get(termId);

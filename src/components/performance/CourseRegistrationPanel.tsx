@@ -21,6 +21,7 @@ import {
   X,
 } from 'lucide-react';
 import { api } from '../../services/api';
+import { ModalPortal } from '../common/ModalPortal';
 import {
   AcademicSessionItem,
   ClassItem,
@@ -1575,8 +1576,14 @@ export const CourseRegistrationPanel: React.FC<CourseRegistrationPanelProps> = (
 
       {/* Printable Course Registration Slip Modal */}
       {printingStudent && (
-        <div className="fixed inset-0 z-50 bg-slate-900/50 flex items-center justify-center p-4">
-          <div className="bg-white rounded-xl border border-slate-200 w-full max-w-2xl overflow-hidden max-h-[90vh] flex flex-col">
+        <ModalPortal onEscape={() => setPrintingStudentId(null)}>
+          <div
+            className="fixed inset-0 z-[9999] bg-slate-900/60 backdrop-blur-[1px] flex items-end sm:items-center justify-center p-0 sm:p-4"
+            role="dialog"
+            aria-modal="true"
+            aria-label={`Official ${subjectLabel} Registration Form`}
+          >
+            <div className="bg-white rounded-t-2xl sm:rounded-2xl border border-slate-200 shadow-2xl w-full max-w-2xl overflow-hidden h-[92dvh] sm:h-auto sm:max-h-[90vh] flex flex-col">
             <div className="px-5 py-3.5 border-b border-slate-200 flex items-center justify-between print:hidden">
               <h4 className="text-sm font-bold text-slate-900">
                 Official {subjectLabel} Registration Form
@@ -1664,6 +1671,7 @@ export const CourseRegistrationPanel: React.FC<CourseRegistrationPanelProps> = (
             </div>
           </div>
         </div>
+        </ModalPortal>
       )}
     </div>
   );

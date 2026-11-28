@@ -619,7 +619,7 @@ async function run() {
     await cdp.clickButton('Examinations & Scores');
     await cdp.waitForText('Bulk Upload Results');
     await cdp.clickButton('Bulk Upload Results');
-    await cdp.waitForText('Bulk Upload Term, Session & Past-Year Results');
+    await cdp.waitForText('Award Scores & Bulk Upload Results');
 
     // Paste a Class Broadsheet Matrix for JSS 2 (2nd Term, current active session) straight from Excel!
     const broadsheetPaste = [
@@ -678,7 +678,7 @@ async function run() {
     await cdp.clickButton('Report Cards');
     await cdp.waitForText('Chidi Okafor');
     await cdp.clickButton('Bulk Upload Results');
-    await cdp.waitForText('Bulk Upload Term, Session & Past-Year Results');
+    await cdp.waitForText('Award Scores & Bulk Upload Results');
     await cdp.clickButton('Review Table');
     const priModalText = await cdp.bodyText();
     assert.ok(priModalText.includes('Term *') && priModalText.includes('Class *'), 'Primary modal must show Term & Class labels');

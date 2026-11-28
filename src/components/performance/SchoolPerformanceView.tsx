@@ -27,6 +27,7 @@ import {
   ArrowRight,
   ArrowRightLeft,
   Tags,
+  Zap,
 } from 'lucide-react';
 import { api } from '../../services/api.js';
 import { useAuth } from '../../context/AuthContext.js';
@@ -46,6 +47,7 @@ import {
   SubjectItem,
 } from '../../types/index.js';
 import { WorkflowStatusBadge } from '../common/StatusBadge.js';
+import { ModalPortal } from '../common/ModalPortal.js';
 import { PrintableReportCardModal } from './PrintableReportCardModal.js';
 import { BulkCoursesModal } from './BulkCoursesModal.js';
 import { CourseRegistrationPanel } from './CourseRegistrationPanel.js';
@@ -108,12 +110,23 @@ export const SchoolPerformanceView: React.FC<SchoolPerformanceViewProps> = ({ re
     sessionId?: string;
   }>({});
   const [historicalBacklogOpen, setHistoricalBacklogOpen] = useState(false);
+  const [historicalBacklogMode, setHistoricalBacklogMode] = useState<'QUICK' | 'MATRIX' | 'CSV' | 'BUILDER'>('MATRIX');
   const [resultsManagerOpen, setResultsManagerOpen] = useState(false);
   const [resultsManagerTab, setResultsManagerTab] = useState<'BATCHES' | 'SCORES'>('BATCHES');
   const [resultsManagerExamIds, setResultsManagerExamIds] = useState<string[]>([]);
   const [resultsManagerAction, setResultsManagerAction] = useState<'REASSIGN' | 'DELETE' | null>(null);
   const [selectedExamsForBulk, setSelectedExamsForBulk] = useState<string[]>([]);
   const [broadsheetExamId, setBroadsheetExamId] = useState<string | null>(null);
+
+  const openQuickAwardModal = () => {
+    setHistoricalBacklogMode('QUICK');
+    setHistoricalBacklogOpen(true);
+  };
+
+  const openBulkUploadModal = () => {
+    setHistoricalBacklogMode('MATRIX');
+    setHistoricalBacklogOpen(true);
+  };
 
   const openResultsManager = (opts?: {
     tab?: 'BATCHES' | 'SCORES';
@@ -385,19 +398,16 @@ export const SchoolPerformanceView: React.FC<SchoolPerformanceViewProps> = ({ re
         }
       }
 
-      // If registered_only was requested for a course with 0 registrations yet, gracefully show all cohort students
+      // If registered_only returned 0 students, automatically fall back to all cohort students so admins can award scores immediately
       let resolvedRegOnly = wantRegOnly;
-      if (wantRegOnly && (res.roster || []).length === 0 && targetSubjectId) {
-        const hasRegsForCourse = queue.some((q) => q.subject_id === targetSubjectId && q.registered_count > 0);
-        if (!hasRegsForCourse) {
-          resolvedRegOnly = false;
-          res = await api.getExaminationScores(exam.id, {
-            subject_id: targetSubjectId,
-            class_id: exam.class_id || undefined,
-            department: effectiveDept || undefined,
-            registered_only: false,
-          });
-        }
+      if (wantRegOnly && (res.roster || []).length === 0) {
+        resolvedRegOnly = false;
+        res = await api.getExaminationScores(exam.id, {
+          subject_id: targetSubjectId || undefined,
+          class_id: exam.class_id || undefined,
+          department: effectiveDept || undefined,
+          registered_only: false,
+        });
       }
 
       setScoreRegisteredOnly(resolvedRegOnly);
@@ -1036,11 +1046,30 @@ export const SchoolPerformanceView: React.FC<SchoolPerformanceViewProps> = ({ re
                   : 'Manage subjects, examinations, score workflows, audited post-publish corrections, and digital report cards.'}
             </p>
           </div>
-          {readOnly && (
+          {readOnly ? (
             <span className="inline-flex items-center gap-1.5 text-xs font-medium text-slate-600">
               <Lock className="w-3.5 h-3.5 text-slate-400" />
               <span>Read-Only Educator View</span>
             </span>
+          ) : (
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                onClick={openQuickAwardModal}
+                className="px-3.5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold inline-flex items-center gap-1.5 cursor-pointer whitespace-nowrap shadow-xs"
+              >
+                <Zap className="w-3.5 h-3.5" />
+                <span>Quick Award Scores</span>
+              </button>
+              <button
+                type="button"
+                onClick={openBulkUploadModal}
+                className="px-3.5 py-2 bg-slate-900 hover:bg-slate-800 text-white rounded-xl text-xs font-bold inline-flex items-center gap-1.5 cursor-pointer whitespace-nowrap"
+              >
+                <Upload className="w-3.5 h-3.5 text-emerald-400" />
+                <span>Bulk Upload Results</span>
+              </button>
+            </div>
           )}
         </div>
 
@@ -1134,7 +1163,7 @@ export const SchoolPerformanceView: React.FC<SchoolPerformanceViewProps> = ({ re
                 }}
                 className="px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl"
               >
-                <option value="">All Terms</option>
+                <option value="">All {instLabels.cyclePlural}</option>
                 {(selectedSessionObj?.terms || sessions.flatMap((s) => s.terms || [])).map((t) => (
                   <option key={t.id} value={t.id}>
                     {t.name}
@@ -2096,7 +2125,15 @@ export const SchoolPerformanceView: React.FC<SchoolPerformanceViewProps> = ({ re
                   <>
                     <button
                       type="button"
-                      onClick={() => setHistoricalBacklogOpen(true)}
+                      onClick={openQuickAwardModal}
+                      className="px-3.5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold inline-flex items-center gap-1.5 cursor-pointer whitespace-nowrap"
+                    >
+                      <Zap className="w-3.5 h-3.5" />
+                      <span>Quick Award Scores</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={openBulkUploadModal}
                       className="px-3.5 py-2 bg-emerald-50 hover:bg-emerald-100 text-emerald-900 border border-emerald-200 rounded-xl text-xs font-bold inline-flex items-center gap-1.5 cursor-pointer whitespace-nowrap"
                     >
                       <Upload className="w-3.5 h-3.5 text-emerald-700" />
@@ -2924,30 +2961,30 @@ export const SchoolPerformanceView: React.FC<SchoolPerformanceViewProps> = ({ re
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-slate-100">
               <div>
                 <h3 className="text-sm font-bold text-slate-900">
-                  Instant End-of-Term &amp; Full-Session Report Card Generator
+                  Instant End-of-{instLabels.cycle} &amp; Full-Session {isTertiary ? 'Result' : 'Report Card'} Generator
                 </h3>
                 <p className="text-slate-500 mt-0.5">
                   {readOnly
-                    ? 'Compile and print End-of-Term or Full-Session Cumulative results for any student without altering official school records.'
-                    : 'Preview and print any student’s End-of-Term or Full-Session Cumulative performance result on demand.'}
+                    ? `Compile and print End-of-${instLabels.cycle} or Full-Session Cumulative results for any student without altering official school records.`
+                    : `Preview and print any student’s End-of-${instLabels.cycle} or Full-Session Cumulative performance result on demand.`}
                 </p>
               </div>
-              <div className="inline-flex p-1 bg-slate-100 rounded-xl shrink-0">
+              <div className="grid grid-cols-2 sm:inline-flex p-1 bg-slate-100 rounded-xl w-full sm:w-auto gap-1 shrink-0">
                 <button
                   type="button"
                   onClick={() => setOnDemandType('TERM')}
-                  className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition cursor-pointer whitespace-nowrap ${
+                  className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition cursor-pointer truncate text-center ${
                     onDemandType === 'TERM'
                       ? 'bg-white text-slate-900 shadow-xs'
                       : 'text-slate-600 hover:text-slate-900'
                   }`}
                 >
-                  End-of-Term Report
+                  End-of-{instLabels.cycle} Report
                 </button>
                 <button
                   type="button"
                   onClick={() => setOnDemandType('SESSION')}
-                  className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition cursor-pointer whitespace-nowrap ${
+                  className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition cursor-pointer truncate text-center ${
                     onDemandType === 'SESSION'
                       ? 'bg-white text-slate-900 shadow-xs'
                       : 'text-slate-600 hover:text-slate-900'
@@ -2998,13 +3035,13 @@ export const SchoolPerformanceView: React.FC<SchoolPerformanceViewProps> = ({ re
 
               {onDemandType === 'TERM' && (
                 <div>
-                  <label className="block font-semibold text-slate-700 mb-1">Term</label>
+                  <label className="block font-semibold text-slate-700 mb-1">{instLabels.cycle}</label>
                   <select
                     value={onDemandTermId}
                     onChange={(e) => setOnDemandTermId(e.target.value)}
                     className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl"
                   >
-                    <option value="">Select Term...</option>
+                    <option value="">Select {instLabels.cycle}...</option>
                     {(sessions.find((s) => s.id === onDemandSessionId)?.terms || []).map((t) => (
                       <option key={t.id} value={t.id}>
                         {t.name}
@@ -3028,34 +3065,34 @@ export const SchoolPerformanceView: React.FC<SchoolPerformanceViewProps> = ({ re
           </form>
 
           {/* Official Report Cards Archive & Batch Publishing */}
-          <div className="bg-white rounded-2xl border border-slate-200 p-6 space-y-5">
+          <div className="bg-white rounded-2xl border border-slate-200 p-5 sm:p-6 space-y-5">
             <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4 pb-4 border-b border-slate-200">
-              <div className="space-y-2">
+              <div className="space-y-2 min-w-0">
                 <h3 className="text-sm font-bold text-slate-900">
                   Official Digital {isTertiary ? 'Results & Transcripts' : 'Report Cards'} Registry
                 </h3>
-                <div className="inline-flex p-1 bg-slate-100 rounded-xl">
+                <div className="grid grid-cols-2 sm:inline-flex p-1 bg-slate-100 rounded-xl w-full sm:w-auto gap-1">
                   <button
                     type="button"
                     onClick={() => setReportMode('TERM')}
-                    className={`px-3.5 py-1.5 rounded-lg text-xs font-semibold transition cursor-pointer whitespace-nowrap ${
+                    className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition cursor-pointer truncate text-center ${
                       reportMode === 'TERM'
                         ? 'bg-white text-slate-900 shadow-xs'
                         : 'text-slate-600 hover:text-slate-900'
                     }`}
                   >
-                    End-of-{instLabels.cycle} {isTertiary ? 'Results' : 'Report Cards'}
+                    End-of-{instLabels.cycle} {isTertiary ? 'Results' : 'Reports'}
                   </button>
                   <button
                     type="button"
                     onClick={() => setReportMode('SESSION')}
-                    className={`px-3.5 py-1.5 rounded-lg text-xs font-semibold transition cursor-pointer whitespace-nowrap ${
+                    className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition cursor-pointer truncate text-center ${
                       reportMode === 'SESSION'
                         ? 'bg-white text-slate-900 shadow-xs'
                         : 'text-slate-600 hover:text-slate-900'
                     }`}
                   >
-                    Full-Session Cumulative Reports
+                    Full-Session Cumulative
                   </button>
                 </div>
               </div>
@@ -3064,7 +3101,15 @@ export const SchoolPerformanceView: React.FC<SchoolPerformanceViewProps> = ({ re
                 <div className="flex flex-wrap items-center gap-2">
                   <button
                     type="button"
-                    onClick={() => setHistoricalBacklogOpen(true)}
+                    onClick={openQuickAwardModal}
+                    className="px-3.5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold inline-flex items-center gap-1.5 cursor-pointer whitespace-nowrap"
+                  >
+                    <Zap className="w-3.5 h-3.5" />
+                    <span>Quick Award Scores</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={openBulkUploadModal}
                     className="px-3.5 py-2 bg-emerald-50 hover:bg-emerald-100 text-emerald-900 border border-emerald-200 rounded-xl text-xs font-bold inline-flex items-center gap-1.5 cursor-pointer whitespace-nowrap"
                   >
                     <Upload className="w-3.5 h-3.5 text-emerald-700" />
@@ -3101,7 +3146,15 @@ export const SchoolPerformanceView: React.FC<SchoolPerformanceViewProps> = ({ re
                 <div className="flex flex-wrap items-center gap-2">
                   <button
                     type="button"
-                    onClick={() => setHistoricalBacklogOpen(true)}
+                    onClick={openQuickAwardModal}
+                    className="px-3.5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold inline-flex items-center gap-1.5 cursor-pointer whitespace-nowrap"
+                  >
+                    <Zap className="w-3.5 h-3.5" />
+                    <span>Quick Award Scores</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={openBulkUploadModal}
                     className="px-3.5 py-2 bg-emerald-50 hover:bg-emerald-100 text-emerald-900 border border-emerald-200 rounded-xl text-xs font-bold inline-flex items-center gap-1.5 cursor-pointer whitespace-nowrap"
                   >
                     <Upload className="w-3.5 h-3.5 text-emerald-700" />
@@ -3574,466 +3627,434 @@ export const SchoolPerformanceView: React.FC<SchoolPerformanceViewProps> = ({ re
 
       {/* SUBJECT / COURSE MODAL */}
       {subjectModalOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-xs p-4">
-          <div className="bg-white rounded-2xl max-w-md w-full shadow-2xl border border-slate-200 overflow-hidden">
-            <div className="bg-slate-900 px-5 py-4 text-white flex items-center justify-between">
-              <h3 className="font-bold text-sm">
-                {editingSubject ? `Edit ${instLabels.subject}` : `Add ${instLabels.subject}`}
-              </h3>
-              <button type="button" onClick={() => setSubjectModalOpen(false)} className="text-slate-400 hover:text-white">
-                <X className="w-4 h-4" />
-              </button>
-            </div>
-            <form onSubmit={handleSaveSubject} className="p-5 space-y-3 text-xs">
-              <div>
-                <label className="block font-semibold text-slate-700 mb-1">{instLabels.subject} Title *</label>
-                <input
-                  type="text"
-                  required
-                  value={subjectForm.name}
-                  onChange={(e) => setSubjectForm({ ...subjectForm, name: e.target.value })}
-                  placeholder={isTertiary ? 'e.g. Introduction to Computer Science' : 'e.g. Mathematics'}
-                  className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl"
-                />
-              </div>
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="block font-semibold text-slate-700 mb-1">{instLabels.subject} Code</label>
-                  <input
-                    type="text"
-                    value={subjectForm.code}
-                    onChange={(e) => setSubjectForm({ ...subjectForm, code: e.target.value })}
-                    placeholder={isTertiary ? 'e.g. CSC 101' : 'e.g. MTH101'}
-                    className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl font-mono"
-                  />
-                </div>
-                <div>
-                  <label className="block font-semibold text-slate-700 mb-1">Credit Units (0–12) *</label>
-                  <input
-                    type="number"
-                    min={0}
-                    max={12}
-                    step={1}
-                    value={subjectForm.credit_units}
-                    onChange={(e) => setSubjectForm({ ...subjectForm, credit_units: e.target.value })}
-                    placeholder="e.g. 1, 2, 3, 4"
-                    className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl font-bold tabular-nums"
-                  />
-                  <div className="flex items-center gap-1 mt-1.5">
-                    {[1, 2, 3, 4, 6].map((u) => (
-                      <button
-                        key={u}
-                        type="button"
-                        onClick={() => setSubjectForm({ ...subjectForm, credit_units: String(u) })}
-                        className={`px-2 py-0.5 rounded-md text-[11px] font-bold tabular-nums cursor-pointer ${
-                          subjectForm.credit_units === String(u)
-                            ? 'bg-emerald-600 text-white'
-                            : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
-                        }`}
-                      >
-                        {u}u
-                      </button>
-                    ))}
-                  </div>
-                </div>
-              </div>
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="block font-semibold text-slate-700 mb-1">
-                    {isTertiary ? 'Department / Programme' : 'Department'}
-                  </label>
-                  <input
-                    type="text"
-                    list="school-departments-datalist"
-                    value={subjectForm.department}
-                    onChange={(e) => setSubjectForm({ ...subjectForm, department: e.target.value })}
-                    placeholder={isTertiary ? 'e.g. Family Healthcare, CHEW (blank = General)' : 'Sciences, Arts...'}
-                    className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl"
-                  />
-                </div>
-                <div>
-                  <label className="block font-semibold text-slate-700 mb-1">
-                    {isTertiary ? 'Course Category' : 'Subject Type'}
-                  </label>
-                  <select
-                    value={subjectForm.course_type}
-                    onChange={(e) =>
-                      setSubjectForm({
-                        ...subjectForm,
-                        course_type: e.target.value as 'CORE' | 'ELECTIVE' | 'GENERAL',
-                      })
-                    }
-                    className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl"
-                  >
-                    <option value="CORE">Core / Compulsory</option>
-                    <option value="ELECTIVE">Elective / Optional</option>
-                    <option value="GENERAL">General Studies (GST/GNS)</option>
-                  </select>
-                </div>
-              </div>
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="block font-semibold text-slate-700 mb-1">
-                    Target {instLabels.classLabel} (Optional)
-                  </label>
-                  <select
-                    value={subjectForm.class_id}
-                    onChange={(e) => setSubjectForm({ ...subjectForm, class_id: e.target.value })}
-                    className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl"
-                  >
-                    <option value="">All {instLabels.classPlural}</option>
-                    {classes.map((c) => (
-                      <option key={c.id} value={c.id}>
-                        {c.name}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-                <div>
-                  <label className="block font-semibold text-slate-700 mb-1">
-                    {instLabels.cycle} Offering
-                  </label>
-                  <select
-                    value={subjectForm.semester_tag}
-                    onChange={(e) =>
-                      setSubjectForm({ ...subjectForm, semester_tag: e.target.value as CanonicalSemesterTag })
-                    }
-                    className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl"
-                  >
-                    {getSemesterTagOptions(instLabels.cycle, isTertiary, instProfile.cycleLabels).map((opt) => (
-                      <option key={opt.value || 'ALL'} value={opt.value}>
-                        {opt.label}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-              </div>
-              <div className="pt-3 border-t border-slate-200 flex justify-end gap-2">
+        <ModalPortal onEscape={() => setSubjectModalOpen(false)}>
+          <div
+            className="fixed inset-0 z-[9999] flex items-end sm:items-center justify-center bg-slate-900/60 backdrop-blur-[1px] p-0 sm:p-4"
+            role="dialog"
+            aria-modal="true"
+            aria-label={editingSubject ? `Edit ${instLabels.subject}` : `Add ${instLabels.subject}`}
+          >
+            <div className="bg-white rounded-t-2xl sm:rounded-2xl max-w-md w-full max-h-[92dvh] flex flex-col shadow-2xl border border-slate-200 overflow-hidden">
+              <div className="shrink-0 bg-slate-900 px-5 py-4 text-white flex items-center justify-between">
+                <h3 className="font-bold text-sm">
+                  {editingSubject ? `Edit ${instLabels.subject}` : `Add ${instLabels.subject}`}
+                </h3>
                 <button
                   type="button"
                   onClick={() => setSubjectModalOpen(false)}
-                  className="px-4 py-2 border border-slate-300 rounded-xl text-slate-700"
+                  aria-label="Close course modal"
+                  className="p-1 text-slate-300 hover:text-white cursor-pointer"
                 >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  disabled={subjectSaving}
-                  className="px-5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl font-bold"
-                >
-                  {subjectSaving ? 'Saving...' : `Save ${instLabels.subject}`}
+                  <X className="w-4 h-4" />
                 </button>
               </div>
-            </form>
+              <form onSubmit={handleSaveSubject} className="flex-1 min-h-0 overflow-y-auto overscroll-contain p-5 space-y-3 text-xs">
+                <div>
+                  <label className="block font-semibold text-slate-700 mb-1">{instLabels.subject} Title *</label>
+                  <input
+                    type="text"
+                    required
+                    value={subjectForm.name}
+                    onChange={(e) => setSubjectForm({ ...subjectForm, name: e.target.value })}
+                    placeholder={isTertiary ? 'e.g. Introduction to Computer Science' : 'e.g. Mathematics'}
+                    className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl"
+                  />
+                </div>
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="block font-semibold text-slate-700 mb-1">{instLabels.subject} Code</label>
+                    <input
+                      type="text"
+                      value={subjectForm.code}
+                      onChange={(e) => setSubjectForm({ ...subjectForm, code: e.target.value })}
+                      placeholder={isTertiary ? 'e.g. CSC 101' : 'e.g. MTH101'}
+                      className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl font-mono"
+                    />
+                  </div>
+                  <div>
+                    <label className="block font-semibold text-slate-700 mb-1">Credit Units (0–12) *</label>
+                    <input
+                      type="number"
+                      min={0}
+                      max={12}
+                      step={1}
+                      value={subjectForm.credit_units}
+                      onChange={(e) => setSubjectForm({ ...subjectForm, credit_units: e.target.value })}
+                      placeholder="e.g. 1, 2, 3, 4"
+                      className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl font-bold tabular-nums"
+                    />
+                    <div className="flex items-center gap-1 mt-1.5">
+                      {[1, 2, 3, 4, 6].map((u) => (
+                        <button
+                          key={u}
+                          type="button"
+                          onClick={() => setSubjectForm({ ...subjectForm, credit_units: String(u) })}
+                          className={`px-2 py-0.5 rounded-md text-[11px] font-bold tabular-nums cursor-pointer ${
+                            subjectForm.credit_units === String(u)
+                              ? 'bg-emerald-600 text-white'
+                              : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+                          }`}
+                        >
+                          {u}u
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="block font-semibold text-slate-700 mb-1">
+                      {isTertiary ? 'Department / Programme' : 'Department'}
+                    </label>
+                    <input
+                      type="text"
+                      list="school-departments-datalist"
+                      value={subjectForm.department}
+                      onChange={(e) => setSubjectForm({ ...subjectForm, department: e.target.value })}
+                      placeholder={isTertiary ? 'e.g. Family Healthcare, CHEW (blank = General)' : 'Sciences, Arts...'}
+                      className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl"
+                    />
+                  </div>
+                  <div>
+                    <label className="block font-semibold text-slate-700 mb-1">
+                      {isTertiary ? 'Course Category' : 'Subject Type'}
+                    </label>
+                    <select
+                      value={subjectForm.course_type}
+                      onChange={(e) =>
+                        setSubjectForm({
+                          ...subjectForm,
+                          course_type: e.target.value as 'CORE' | 'ELECTIVE' | 'GENERAL',
+                        })
+                      }
+                      className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl"
+                    >
+                      <option value="CORE">Core / Compulsory</option>
+                      <option value="ELECTIVE">Elective / Optional</option>
+                      <option value="GENERAL">General Studies (GST/GNS)</option>
+                    </select>
+                  </div>
+                </div>
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="block font-semibold text-slate-700 mb-1">
+                      Target {instLabels.classLabel} (Optional)
+                    </label>
+                    <select
+                      value={subjectForm.class_id}
+                      onChange={(e) => setSubjectForm({ ...subjectForm, class_id: e.target.value })}
+                      className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl"
+                    >
+                      <option value="">All {instLabels.classPlural}</option>
+                      {classes.map((c) => (
+                        <option key={c.id} value={c.id}>
+                          {c.name}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block font-semibold text-slate-700 mb-1">
+                      {instLabels.cycle} Offering
+                    </label>
+                    <select
+                      value={subjectForm.semester_tag}
+                      onChange={(e) =>
+                        setSubjectForm({ ...subjectForm, semester_tag: e.target.value as CanonicalSemesterTag })
+                      }
+                      className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl"
+                    >
+                      {getSemesterTagOptions(instLabels.cycle, isTertiary, instProfile.cycleLabels).map((opt) => (
+                        <option key={opt.value || 'ALL'} value={opt.value}>
+                          {opt.label}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                </div>
+                <div className="pt-3 border-t border-slate-200 flex justify-end gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setSubjectModalOpen(false)}
+                    className="px-4 py-2 border border-slate-300 rounded-xl text-slate-700 cursor-pointer"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={subjectSaving}
+                    className="px-5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl font-bold cursor-pointer disabled:opacity-60"
+                  >
+                    {subjectSaving ? 'Saving...' : `Save ${instLabels.subject}`}
+                  </button>
+                </div>
+              </form>
+            </div>
           </div>
-        </div>
+        </ModalPortal>
       )}
 
       {/* CREATE EXAMINATION MODAL */}
       {examModalOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-xs p-4">
-          <div className="bg-white rounded-2xl max-w-lg w-full shadow-2xl border border-slate-200 overflow-hidden">
-            <div className="bg-slate-900 px-5 py-4 text-white flex items-center justify-between">
-              <h3 className="font-bold text-sm">Create Examination Assessment</h3>
-              <button type="button" onClick={() => setExamModalOpen(false)} className="text-slate-400 hover:text-white">
-                <X className="w-4 h-4" />
-              </button>
-            </div>
-            <form onSubmit={handleCreateExam} className="p-5 space-y-3 text-xs">
-              <div>
-                <label className="block font-semibold text-slate-700 mb-1">Examination Title *</label>
-                <input
-                  type="text"
-                  required
-                  value={examForm.title}
-                  onChange={(e) => setExamForm({ ...examForm, title: e.target.value })}
-                  placeholder="e.g. First Term Terminal Examination"
-                  className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl"
-                />
-              </div>
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="block font-semibold text-slate-700 mb-1">Academic Session</label>
-                  <select
-                    value={examForm.academic_session_id}
-                    onChange={(e) => setExamForm({ ...examForm, academic_session_id: e.target.value, term_id: '' })}
-                    className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl"
-                  >
-                    <option value="">Select Session...</option>
-                    {sessions.map((s) => (
-                      <option key={s.id} value={s.id}>
-                        {s.name}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-                <div>
-                  <label className="block font-semibold text-slate-700 mb-1">Term</label>
-                  <select
-                    value={examForm.term_id}
-                    onChange={(e) => setExamForm({ ...examForm, term_id: e.target.value })}
-                    className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl"
-                  >
-                    <option value="">Select Term...</option>
-                    {(examFormSessionObj?.terms || []).map((t) => (
-                      <option key={t.id} value={t.id}>
-                        {t.name}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-              </div>
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="block font-semibold text-slate-700 mb-1">{instLabels.classLabel} Scope</label>
-                  <select
-                    value={examForm.class_id}
-                    onChange={(e) => setExamForm({ ...examForm, class_id: e.target.value })}
-                    className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl"
-                  >
-                    <option value="">All {instLabels.classPlural}</option>
-                    {classes.map((c) => (
-                      <option key={c.id} value={c.id}>
-                        {c.name}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-                <div>
-                  <label className="block font-semibold text-slate-700 mb-1">
-                    {isTertiary ? 'Department / Programme (Optional)' : 'Department / Arm (Optional)'}
-                  </label>
-                  <input
-                    type="text"
-                    list="school-departments-datalist"
-                    value={examForm.department}
-                    onChange={(e) => setExamForm({ ...examForm, department: e.target.value })}
-                    placeholder="All Departments (or e.g. Family Healthcare)"
-                    className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl"
-                  />
-                </div>
-              </div>
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="block font-semibold text-slate-700 mb-1">CA Max</label>
-                  <input
-                    type="number"
-                    min={0}
-                    max={100}
-                    value={examForm.ca_max_score}
-                    onChange={(e) => setExamForm({ ...examForm, ca_max_score: Number(e.target.value) })}
-                    className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl tabular-nums"
-                  />
-                </div>
-                <div>
-                  <label className="block font-semibold text-slate-700 mb-1">Exam Max</label>
-                  <input
-                    type="number"
-                    min={0}
-                    max={100}
-                    value={examForm.exam_max_score}
-                    onChange={(e) => setExamForm({ ...examForm, exam_max_score: Number(e.target.value) })}
-                    className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl tabular-nums"
-                  />
-                </div>
-              </div>
-              <div className="pt-3 border-t border-slate-200 flex justify-end gap-2">
+        <ModalPortal onEscape={() => setExamModalOpen(false)}>
+          <div
+            className="fixed inset-0 z-[9999] flex items-end sm:items-center justify-center bg-slate-900/60 backdrop-blur-[1px] p-0 sm:p-4"
+            role="dialog"
+            aria-modal="true"
+            aria-label="Create Examination Assessment"
+          >
+            <div className="bg-white rounded-t-2xl sm:rounded-2xl max-w-lg w-full max-h-[92dvh] flex flex-col shadow-2xl border border-slate-200 overflow-hidden">
+              <div className="shrink-0 bg-slate-900 px-5 py-4 text-white flex items-center justify-between">
+                <h3 className="font-bold text-sm">Create Examination Assessment</h3>
                 <button
                   type="button"
                   onClick={() => setExamModalOpen(false)}
-                  className="px-4 py-2 border border-slate-300 rounded-xl text-slate-700"
+                  aria-label="Close examination modal"
+                  className="p-1 text-slate-300 hover:text-white cursor-pointer"
                 >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  disabled={examSaving}
-                  className="px-5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl font-bold"
-                >
-                  {examSaving ? 'Creating...' : 'Create Examination'}
+                  <X className="w-4 h-4" />
                 </button>
               </div>
-            </form>
+              <form onSubmit={handleCreateExam} className="flex-1 min-h-0 overflow-y-auto overscroll-contain p-5 space-y-3 text-xs">
+                <div>
+                  <label className="block font-semibold text-slate-700 mb-1">Examination Title *</label>
+                  <input
+                    type="text"
+                    required
+                    value={examForm.title}
+                    onChange={(e) => setExamForm({ ...examForm, title: e.target.value })}
+                    placeholder={isTertiary ? 'e.g. 1st Semester Examination' : 'e.g. First Term Terminal Examination'}
+                    className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl"
+                  />
+                </div>
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="block font-semibold text-slate-700 mb-1">Academic Session</label>
+                    <select
+                      value={examForm.academic_session_id}
+                      onChange={(e) => {
+                        const nextId = e.target.value;
+                        const matched = sessions.find((s) => s.id === nextId);
+                        setExamForm({
+                          ...examForm,
+                          academic_session_id: nextId,
+                          term_id: matched?.terms?.[0]?.id || '',
+                        });
+                      }}
+                      className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl"
+                    >
+                      <option value="">Select Session...</option>
+                      {sessions.map((s) => (
+                        <option key={s.id} value={s.id}>
+                          {s.name}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block font-semibold text-slate-700 mb-1">{instLabels.cycle}</label>
+                    <select
+                      value={examForm.term_id}
+                      onChange={(e) => setExamForm({ ...examForm, term_id: e.target.value })}
+                      className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl"
+                    >
+                      <option value="">Select {instLabels.cycle}...</option>
+                      {(examFormSessionObj?.terms || []).map((t) => (
+                        <option key={t.id} value={t.id}>
+                          {t.name}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                </div>
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="block font-semibold text-slate-700 mb-1">{instLabels.classLabel} Scope</label>
+                    <select
+                      value={examForm.class_id}
+                      onChange={(e) => setExamForm({ ...examForm, class_id: e.target.value })}
+                      className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl"
+                    >
+                      <option value="">All {instLabels.classPlural}</option>
+                      {classes.map((c) => (
+                        <option key={c.id} value={c.id}>
+                          {c.name}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block font-semibold text-slate-700 mb-1">
+                      {isTertiary ? 'Department / Programme (Optional)' : 'Department / Arm (Optional)'}
+                    </label>
+                    <input
+                      type="text"
+                      list="school-departments-datalist"
+                      value={examForm.department}
+                      onChange={(e) => setExamForm({ ...examForm, department: e.target.value })}
+                      placeholder="All Departments (or e.g. Family Healthcare)"
+                      className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl"
+                    />
+                  </div>
+                </div>
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="block font-semibold text-slate-700 mb-1">CA Max</label>
+                    <input
+                      type="number"
+                      min={0}
+                      max={100}
+                      value={examForm.ca_max_score}
+                      onChange={(e) => setExamForm({ ...examForm, ca_max_score: Number(e.target.value) })}
+                      className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl tabular-nums"
+                    />
+                  </div>
+                  <div>
+                    <label className="block font-semibold text-slate-700 mb-1">Exam Max</label>
+                    <input
+                      type="number"
+                      min={0}
+                      max={100}
+                      value={examForm.exam_max_score}
+                      onChange={(e) => setExamForm({ ...examForm, exam_max_score: Number(e.target.value) })}
+                      className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl tabular-nums"
+                    />
+                  </div>
+                </div>
+                <div className="pt-3 border-t border-slate-200 flex justify-end gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setExamModalOpen(false)}
+                    className="px-4 py-2 border border-slate-300 rounded-xl text-slate-700 cursor-pointer"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={examSaving}
+                    className="px-5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl font-bold cursor-pointer disabled:opacity-60"
+                  >
+                    {examSaving ? 'Creating...' : 'Create Examination'}
+                  </button>
+                </div>
+              </form>
+            </div>
           </div>
-        </div>
+        </ModalPortal>
       )}
 
       {/* AUDITED SCORE CORRECTION MODAL */}
       {correctingScore && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-xs p-4">
-          <div className="bg-white rounded-2xl max-w-md w-full shadow-2xl border border-slate-200 overflow-hidden">
-            <div className="bg-slate-900 px-5 py-4 text-white flex items-center justify-between">
-              <h3 className="font-bold text-sm">Audited Published Score Correction</h3>
-              <button type="button" onClick={() => setCorrectingScore(null)} className="text-slate-400 hover:text-white">
-                <X className="w-4 h-4" />
-              </button>
-            </div>
-            <form onSubmit={handleCorrectScoreSubmit} className="p-5 space-y-3 text-xs">
-              <p className="text-slate-600">
-                Correcting published result for <strong>{correctingScore.student_name}</strong> ({correctingScore.subject_name}). This writes an immutable entry in the Score Correction Audit Log.
-              </p>
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="block font-semibold text-slate-700 mb-1">New CA Score</label>
-                  <input
-                    type="number"
-                    min={0}
-                    max={selectedExam?.ca_max_score ?? 40}
-                    step="0.5"
-                    value={correctionForm.ca_score}
-                    onChange={(e) => setCorrectionForm({ ...correctionForm, ca_score: e.target.value })}
-                    className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl tabular-nums"
-                  />
-                </div>
-                <div>
-                  <label className="block font-semibold text-slate-700 mb-1">New Exam Score</label>
-                  <input
-                    type="number"
-                    min={0}
-                    max={selectedExam?.exam_max_score ?? 60}
-                    step="0.5"
-                    value={correctionForm.exam_score}
-                    onChange={(e) => setCorrectionForm({ ...correctionForm, exam_score: e.target.value })}
-                    className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl tabular-nums"
-                  />
-                </div>
-              </div>
-              <div>
-                <label className="block font-semibold text-slate-700 mb-1">Mandatory Audit Reason * (min 5 chars)</label>
-                <textarea
-                  rows={3}
-                  required
-                  minLength={5}
-                  value={correctionForm.reason}
-                  onChange={(e) => setCorrectionForm({ ...correctionForm, reason: e.target.value })}
-                  placeholder="e.g. Script remarking verified by Exam Committee"
-                  className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl"
-                />
-              </div>
-              <div className="pt-3 border-t border-slate-200 flex justify-end gap-2">
+        <ModalPortal onEscape={() => setCorrectingScore(null)}>
+          <div
+            className="fixed inset-0 z-[9999] flex items-end sm:items-center justify-center bg-slate-900/60 backdrop-blur-[1px] p-0 sm:p-4"
+            role="dialog"
+            aria-modal="true"
+            aria-label="Audited Published Score Correction"
+          >
+            <div className="bg-white rounded-t-2xl sm:rounded-2xl max-w-md w-full max-h-[92dvh] flex flex-col shadow-2xl border border-slate-200 overflow-hidden">
+              <div className="shrink-0 bg-slate-900 px-5 py-4 text-white flex items-center justify-between">
+                <h3 className="font-bold text-sm">Audited Published Score Correction</h3>
                 <button
                   type="button"
                   onClick={() => setCorrectingScore(null)}
-                  className="px-4 py-2 border border-slate-300 rounded-xl text-slate-700"
+                  aria-label="Close score correction modal"
+                  className="p-1 text-slate-300 hover:text-white cursor-pointer"
                 >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  disabled={correctionSaving}
-                  className="px-5 py-2 bg-amber-600 hover:bg-amber-700 text-white rounded-xl font-bold"
-                >
-                  {correctionSaving ? 'Applying...' : 'Apply Audited Correction'}
+                  <X className="w-4 h-4" />
                 </button>
               </div>
-            </form>
+              <form onSubmit={handleCorrectScoreSubmit} className="flex-1 min-h-0 overflow-y-auto overscroll-contain p-5 space-y-3 text-xs">
+                <p className="text-slate-600">
+                  Correcting published result for <strong>{correctingScore.student_name}</strong> ({correctingScore.subject_name}). This writes an immutable entry in the Score Correction Audit Log.
+                </p>
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="block font-semibold text-slate-700 mb-1">New CA Score</label>
+                    <input
+                      type="number"
+                      min={0}
+                      max={selectedExam?.ca_max_score ?? 40}
+                      step="0.5"
+                      value={correctionForm.ca_score}
+                      onChange={(e) => setCorrectionForm({ ...correctionForm, ca_score: e.target.value })}
+                      className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl tabular-nums"
+                    />
+                  </div>
+                  <div>
+                    <label className="block font-semibold text-slate-700 mb-1">New Exam Score</label>
+                    <input
+                      type="number"
+                      min={0}
+                      max={selectedExam?.exam_max_score ?? 60}
+                      step="0.5"
+                      value={correctionForm.exam_score}
+                      onChange={(e) => setCorrectionForm({ ...correctionForm, exam_score: e.target.value })}
+                      className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl tabular-nums"
+                    />
+                  </div>
+                </div>
+                <div>
+                  <label className="block font-semibold text-slate-700 mb-1">Mandatory Audit Reason * (min 5 chars)</label>
+                  <textarea
+                    rows={3}
+                    required
+                    minLength={5}
+                    value={correctionForm.reason}
+                    onChange={(e) => setCorrectionForm({ ...correctionForm, reason: e.target.value })}
+                    placeholder="e.g. Script remarking verified by Exam Committee"
+                    className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl"
+                  />
+                </div>
+                <div className="pt-3 border-t border-slate-200 flex justify-end gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setCorrectingScore(null)}
+                    className="px-4 py-2 border border-slate-300 rounded-xl text-slate-700 cursor-pointer"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={correctionSaving}
+                    className="px-5 py-2 bg-amber-600 hover:bg-amber-700 text-white rounded-xl font-bold cursor-pointer disabled:opacity-60"
+                  >
+                    {correctionSaving ? 'Applying...' : 'Apply Audited Correction'}
+                  </button>
+                </div>
+              </form>
+            </div>
           </div>
-        </div>
+        </ModalPortal>
       )}
 
       {/* REPORT CARD REMARKS & STATUS MODAL */}
       {remarksModalRc && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-xs p-4">
-          <div className="bg-white rounded-2xl max-w-lg w-full shadow-2xl border border-slate-200 overflow-hidden">
-            <div className="bg-slate-900 px-5 py-4 text-white flex items-center justify-between">
-              <h3 className="font-bold text-sm">Report Card Remarks · {remarksModalRc.student_name}</h3>
-              <button type="button" onClick={() => setRemarksModalRc(null)} className="text-slate-400 hover:text-white">
-                <X className="w-4 h-4" />
-              </button>
-            </div>
-            <form onSubmit={handleSaveRemarks} className="p-5 space-y-3 text-xs">
-              <div>
-                <label className="block font-semibold text-slate-700 mb-1">Workflow Status</label>
-                <select
-                  value={remarksForm.status}
-                  onChange={(e) => setRemarksForm({ ...remarksForm, status: e.target.value as any })}
-                  className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl"
-                >
-                  <option value="DRAFT">Draft</option>
-                  <option value="REVIEW">In Review</option>
-                  <option value="APPROVED">Approved (Ready to Publish)</option>
-                </select>
-              </div>
-              <div>
-                <label className="block font-semibold text-slate-700 mb-1">Class Teacher Remark</label>
-                <textarea
-                  rows={2}
-                  value={remarksForm.teacher_remark}
-                  onChange={(e) => setRemarksForm({ ...remarksForm, teacher_remark: e.target.value })}
-                  className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl"
-                />
-              </div>
-              <div>
-                <label className="block font-semibold text-slate-700 mb-1">Principal Remark</label>
-                <textarea
-                  rows={2}
-                  value={remarksForm.principal_remark}
-                  onChange={(e) => setRemarksForm({ ...remarksForm, principal_remark: e.target.value })}
-                  className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl"
-                />
-              </div>
-              <div className="pt-3 border-t border-slate-200 flex justify-end gap-2">
+        <ModalPortal onEscape={() => setRemarksModalRc(null)}>
+          <div
+            className="fixed inset-0 z-[9999] flex items-end sm:items-center justify-center bg-slate-900/60 backdrop-blur-[1px] p-0 sm:p-4"
+            role="dialog"
+            aria-modal="true"
+            aria-label={`Report Card Remarks for ${remarksModalRc.student_name}`}
+          >
+            <div className="bg-white rounded-t-2xl sm:rounded-2xl max-w-lg w-full max-h-[92dvh] flex flex-col shadow-2xl border border-slate-200 overflow-hidden">
+              <div className="shrink-0 bg-slate-900 px-5 py-4 text-white flex items-center justify-between">
+                <h3 className="font-bold text-sm">Report Card Remarks · {remarksModalRc.student_name}</h3>
                 <button
                   type="button"
                   onClick={() => setRemarksModalRc(null)}
-                  className="px-4 py-2 border border-slate-300 rounded-xl text-slate-700"
+                  aria-label="Close remarks modal"
+                  className="p-1 text-slate-300 hover:text-white cursor-pointer"
                 >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  disabled={remarksSaving}
-                  className="px-5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl font-bold"
-                >
-                  {remarksSaving ? 'Saving...' : 'Save Remarks'}
+                  <X className="w-4 h-4" />
                 </button>
               </div>
-            </form>
-          </div>
-        </div>
-      )}
-
-      {/* SESSION CUMULATIVE REPORT CARD REMARKS & PROMOTION MODAL */}
-      {sessionRemarksModalRc && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-xs p-4">
-          <div className="bg-white rounded-2xl max-w-lg w-full shadow-2xl border border-slate-200 overflow-hidden">
-            <div className="bg-slate-900 px-5 py-4 text-white flex items-center justify-between">
-              <h3 className="font-bold text-sm">
-                Annual Cumulative Remarks &amp; Promotion · {sessionRemarksModalRc.student_name}
-              </h3>
-              <button
-                type="button"
-                onClick={() => setSessionRemarksModalRc(null)}
-                className="text-slate-400 hover:text-white"
-              >
-                <X className="w-4 h-4" />
-              </button>
-            </div>
-            <form onSubmit={handleSaveSessionRemarks} className="p-5 space-y-3 text-xs">
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="block font-semibold text-slate-700 mb-1">Promotion Decision</label>
-                  <select
-                    value={sessionRemarksForm.promotion_status}
-                    onChange={(e) =>
-                      setSessionRemarksForm({ ...sessionRemarksForm, promotion_status: e.target.value })
-                    }
-                    className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl"
-                  >
-                    <option value="PROMOTED">Promoted to Next Class</option>
-                    <option value="PROBATION">Promoted on Trial / Probation</option>
-                    <option value="RETAINED">Retained in Current Class</option>
-                    <option value="GRADUATED">Graduated</option>
-                    <option value="PENDING">Pending Decision</option>
-                  </select>
-                </div>
+              <form onSubmit={handleSaveRemarks} className="flex-1 min-h-0 overflow-y-auto overscroll-contain p-5 space-y-3 text-xs">
                 <div>
                   <label className="block font-semibold text-slate-700 mb-1">Workflow Status</label>
                   <select
-                    value={sessionRemarksForm.status}
-                    onChange={(e) =>
-                      setSessionRemarksForm({ ...sessionRemarksForm, status: e.target.value as any })
-                    }
+                    value={remarksForm.status}
+                    onChange={(e) => setRemarksForm({ ...remarksForm, status: e.target.value as any })}
                     className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl"
                   >
                     <option value="DRAFT">Draft</option>
@@ -4041,48 +4062,144 @@ export const SchoolPerformanceView: React.FC<SchoolPerformanceViewProps> = ({ re
                     <option value="APPROVED">Approved (Ready to Publish)</option>
                   </select>
                 </div>
-              </div>
-              <div>
-                <label className="block font-semibold text-slate-700 mb-1">Annual Class Teacher Remark</label>
-                <textarea
-                  rows={2}
-                  value={sessionRemarksForm.teacher_remark}
-                  onChange={(e) =>
-                    setSessionRemarksForm({ ...sessionRemarksForm, teacher_remark: e.target.value })
-                  }
-                  className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl"
-                />
-              </div>
-              <div>
-                <label className="block font-semibold text-slate-700 mb-1">Principal Annual Remark</label>
-                <textarea
-                  rows={2}
-                  value={sessionRemarksForm.principal_remark}
-                  onChange={(e) =>
-                    setSessionRemarksForm({ ...sessionRemarksForm, principal_remark: e.target.value })
-                  }
-                  className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl"
-                />
-              </div>
-              <div className="pt-3 border-t border-slate-200 flex justify-end gap-2">
+                <div>
+                  <label className="block font-semibold text-slate-700 mb-1">{instLabels.staff} Remark</label>
+                  <textarea
+                    rows={2}
+                    value={remarksForm.teacher_remark}
+                    onChange={(e) => setRemarksForm({ ...remarksForm, teacher_remark: e.target.value })}
+                    className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl"
+                  />
+                </div>
+                <div>
+                  <label className="block font-semibold text-slate-700 mb-1">{instLabels.head} Remark</label>
+                  <textarea
+                    rows={2}
+                    value={remarksForm.principal_remark}
+                    onChange={(e) => setRemarksForm({ ...remarksForm, principal_remark: e.target.value })}
+                    className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl"
+                  />
+                </div>
+                <div className="pt-3 border-t border-slate-200 flex justify-end gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setRemarksModalRc(null)}
+                    className="px-4 py-2 border border-slate-300 rounded-xl text-slate-700 cursor-pointer"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={remarksSaving}
+                    className="px-5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl font-bold cursor-pointer disabled:opacity-60"
+                  >
+                    {remarksSaving ? 'Saving...' : 'Save Remarks'}
+                  </button>
+                </div>
+              </form>
+            </div>
+          </div>
+        </ModalPortal>
+      )}
+
+      {/* SESSION CUMULATIVE REPORT CARD REMARKS & PROMOTION MODAL */}
+      {sessionRemarksModalRc && (
+        <ModalPortal onEscape={() => setSessionRemarksModalRc(null)}>
+          <div
+            className="fixed inset-0 z-[9999] flex items-end sm:items-center justify-center bg-slate-900/60 backdrop-blur-[1px] p-0 sm:p-4"
+            role="dialog"
+            aria-modal="true"
+            aria-label={`Annual Cumulative Remarks for ${sessionRemarksModalRc.student_name}`}
+          >
+            <div className="bg-white rounded-t-2xl sm:rounded-2xl max-w-lg w-full max-h-[92dvh] flex flex-col shadow-2xl border border-slate-200 overflow-hidden">
+              <div className="shrink-0 bg-slate-900 px-5 py-4 text-white flex items-center justify-between">
+                <h3 className="font-bold text-sm">
+                  Annual Cumulative Remarks &amp; Promotion · {sessionRemarksModalRc.student_name}
+                </h3>
                 <button
                   type="button"
                   onClick={() => setSessionRemarksModalRc(null)}
-                  className="px-4 py-2 border border-slate-300 rounded-xl text-slate-700"
+                  aria-label="Close session remarks modal"
+                  className="p-1 text-slate-300 hover:text-white cursor-pointer"
                 >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  disabled={sessionRemarksSaving}
-                  className="px-5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl font-bold"
-                >
-                  {sessionRemarksSaving ? 'Saving...' : 'Save Annual Remarks'}
+                  <X className="w-4 h-4" />
                 </button>
               </div>
-            </form>
+              <form onSubmit={handleSaveSessionRemarks} className="flex-1 min-h-0 overflow-y-auto overscroll-contain p-5 space-y-3 text-xs">
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="block font-semibold text-slate-700 mb-1">Promotion Decision</label>
+                    <select
+                      value={sessionRemarksForm.promotion_status}
+                      onChange={(e) =>
+                        setSessionRemarksForm({ ...sessionRemarksForm, promotion_status: e.target.value })
+                      }
+                      className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl"
+                    >
+                      <option value="PROMOTED">Promoted to Next {instLabels.classLabel}</option>
+                      <option value="PROBATION">Promoted on Trial / Probation</option>
+                      <option value="RETAINED">Retained in Current {instLabels.classLabel}</option>
+                      <option value="GRADUATED">Graduated</option>
+                      <option value="PENDING">Pending Decision</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block font-semibold text-slate-700 mb-1">Workflow Status</label>
+                    <select
+                      value={sessionRemarksForm.status}
+                      onChange={(e) =>
+                        setSessionRemarksForm({ ...sessionRemarksForm, status: e.target.value as any })
+                      }
+                      className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl"
+                    >
+                      <option value="DRAFT">Draft</option>
+                      <option value="REVIEW">In Review</option>
+                      <option value="APPROVED">Approved (Ready to Publish)</option>
+                    </select>
+                  </div>
+                </div>
+                <div>
+                  <label className="block font-semibold text-slate-700 mb-1">Annual {instLabels.staff} Remark</label>
+                  <textarea
+                    rows={2}
+                    value={sessionRemarksForm.teacher_remark}
+                    onChange={(e) =>
+                      setSessionRemarksForm({ ...sessionRemarksForm, teacher_remark: e.target.value })
+                    }
+                    className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl"
+                  />
+                </div>
+                <div>
+                  <label className="block font-semibold text-slate-700 mb-1">{instLabels.head} Annual Remark</label>
+                  <textarea
+                    rows={2}
+                    value={sessionRemarksForm.principal_remark}
+                    onChange={(e) =>
+                      setSessionRemarksForm({ ...sessionRemarksForm, principal_remark: e.target.value })
+                    }
+                    className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl"
+                  />
+                </div>
+                <div className="pt-3 border-t border-slate-200 flex justify-end gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setSessionRemarksModalRc(null)}
+                    className="px-4 py-2 border border-slate-300 rounded-xl text-slate-700 cursor-pointer"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={sessionRemarksSaving}
+                    className="px-5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl font-bold cursor-pointer disabled:opacity-60"
+                  >
+                    {sessionRemarksSaving ? 'Saving...' : 'Save Annual Remarks'}
+                  </button>
+                </div>
+              </form>
+            </div>
           </div>
-        </div>
+        </ModalPortal>
       )}
 
       <PrintableReportCardModal
@@ -4126,6 +4243,7 @@ export const SchoolPerformanceView: React.FC<SchoolPerformanceViewProps> = ({ re
           schoolType={activeSchool?.type || ''}
           cycleLabels={instProfile.cycleLabels}
           showCreditUnits={showCreditUnits}
+          defaultMode={historicalBacklogMode}
           defaultSessionId={subTab === 'reports' ? rcFilters.academic_session_id : examForm.academic_session_id}
           defaultTermId={subTab === 'reports' ? rcFilters.term_id : examForm.term_id}
           defaultClassId={subTab === 'reports' ? rcFilters.class_id : examForm.class_id}
@@ -4145,6 +4263,8 @@ export const SchoolPerformanceView: React.FC<SchoolPerformanceViewProps> = ({ re
             showMsg('ok', msg);
             await Promise.all([
               loadBootstrap(),
+              loadExams(),
+              loadOverview(filters),
               loadReportCards(rcFilters),
               loadSessionReportCards(rcFilters),
             ]);

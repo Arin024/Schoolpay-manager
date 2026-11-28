@@ -12,6 +12,7 @@ import { useAuth } from '../../context/AuthContext.js';
 import { api } from '../../services/api.js';
 import { AcademicSessionItem, SessionStatus } from '../../types/index.js';
 import { resolveInstitutionProfile } from '../../utils/institutionMode.js';
+import { ModalPortal } from '../common/ModalPortal.js';
 
 interface SchoolAcademicSessionsViewProps {
   onNavigateProgression?: () => void;
@@ -394,22 +395,30 @@ export const SchoolAcademicSessionsView: React.FC<SchoolAcademicSessionsViewProp
 
       {/* CREATE SESSION MODAL */}
       {isAddSessionModalOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-xs p-4">
-          <div className="bg-white rounded-2xl max-w-md w-full shadow-2xl border border-slate-200 overflow-hidden text-xs">
-            <div className="bg-slate-900 px-6 py-4 flex items-center justify-between text-white border-b border-slate-800">
-              <div className="flex items-center gap-2">
-                <Calendar className="w-5 h-5 text-emerald-400" />
-                <h3 className="font-bold text-base">New Academic Session</h3>
+        <ModalPortal onEscape={() => setIsAddSessionModalOpen(false)}>
+          <div
+            className="fixed inset-0 z-[9999] flex items-end sm:items-center justify-center bg-slate-900/65 backdrop-blur-[1px] p-0 sm:p-4"
+            role="dialog"
+            aria-modal="true"
+            aria-label="New Academic Session"
+          >
+            <div className="bg-white rounded-t-2xl sm:rounded-2xl max-w-md w-full max-h-[92dvh] flex flex-col shadow-2xl border border-slate-200 overflow-hidden text-xs">
+              <div className="shrink-0 bg-slate-900 px-6 py-4 flex items-center justify-between text-white border-b border-slate-800">
+                <div className="flex items-center gap-2">
+                  <Calendar className="w-5 h-5 text-emerald-400" />
+                  <h3 className="font-bold text-base">New Academic Session</h3>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setIsAddSessionModalOpen(false)}
+                  aria-label="Close session modal"
+                  className="p-1 rounded-lg text-slate-400 hover:text-white cursor-pointer"
+                >
+                  <X className="w-5 h-5" />
+                </button>
               </div>
-              <button
-                onClick={() => setIsAddSessionModalOpen(false)}
-                className="p-1 rounded-lg text-slate-400 hover:text-white cursor-pointer"
-              >
-                <X className="w-5 h-5" />
-              </button>
-            </div>
 
-            <form onSubmit={handleCreateSession} className="p-6 space-y-4">
+              <form onSubmit={handleCreateSession} className="flex-1 min-h-0 overflow-y-auto overscroll-contain p-6 space-y-4">
               {formError && (
                 <div className="p-3 bg-red-50 border border-red-200 text-red-700 rounded-xl flex items-center gap-2">
                   <AlertCircle className="w-4 h-4 flex-shrink-0" />
@@ -494,31 +503,40 @@ export const SchoolAcademicSessionsView: React.FC<SchoolAcademicSessionsViewProp
                   {formSubmitting ? 'Saving...' : 'Create Session'}
                 </button>
               </div>
-            </form>
+              </form>
+            </div>
           </div>
-        </div>
+        </ModalPortal>
       )}
 
       {/* CREATE TERM / SEMESTER MODAL */}
       {isAddTermModalOpen && selectedSessionForTerm && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-xs p-4">
-          <div className="bg-white rounded-2xl max-w-md w-full shadow-2xl border border-slate-200 overflow-hidden text-xs">
-            <div className="bg-slate-900 px-6 py-4 flex items-center justify-between text-white border-b border-slate-800">
-              <div className="flex items-center gap-2">
-                <Clock className="w-5 h-5 text-emerald-400" />
-                <h3 className="font-bold text-base">
-                  Add {labels.cycle} to {selectedSessionForTerm.name}
-                </h3>
+        <ModalPortal onEscape={() => setIsAddTermModalOpen(false)}>
+          <div
+            className="fixed inset-0 z-[9999] flex items-end sm:items-center justify-center bg-slate-900/65 backdrop-blur-[1px] p-0 sm:p-4"
+            role="dialog"
+            aria-modal="true"
+            aria-label={`Add ${labels.cycle} to ${selectedSessionForTerm.name}`}
+          >
+            <div className="bg-white rounded-t-2xl sm:rounded-2xl max-w-md w-full max-h-[92dvh] flex flex-col shadow-2xl border border-slate-200 overflow-hidden text-xs">
+              <div className="shrink-0 bg-slate-900 px-6 py-4 flex items-center justify-between text-white border-b border-slate-800">
+                <div className="flex items-center gap-2">
+                  <Clock className="w-5 h-5 text-emerald-400" />
+                  <h3 className="font-bold text-base">
+                    Add {labels.cycle} to {selectedSessionForTerm.name}
+                  </h3>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setIsAddTermModalOpen(false)}
+                  aria-label="Close term modal"
+                  className="p-1 rounded-lg text-slate-400 hover:text-white cursor-pointer"
+                >
+                  <X className="w-5 h-5" />
+                </button>
               </div>
-              <button
-                onClick={() => setIsAddTermModalOpen(false)}
-                className="p-1 rounded-lg text-slate-400 hover:text-white cursor-pointer"
-              >
-                <X className="w-5 h-5" />
-              </button>
-            </div>
 
-            <form onSubmit={handleCreateTerm} className="p-6 space-y-4">
+              <form onSubmit={handleCreateTerm} className="flex-1 min-h-0 overflow-y-auto overscroll-contain p-6 space-y-4">
               {formError && (
                 <div className="p-3 bg-red-50 border border-red-200 text-red-700 rounded-xl flex items-center gap-2">
                   <AlertCircle className="w-4 h-4 flex-shrink-0" />
@@ -604,9 +622,10 @@ export const SchoolAcademicSessionsView: React.FC<SchoolAcademicSessionsViewProp
                   {formSubmitting ? 'Saving...' : `Add ${labels.cycle}`}
                 </button>
               </div>
-            </form>
+              </form>
+            </div>
           </div>
-        </div>
+        </ModalPortal>
       )}
     </div>
   );
