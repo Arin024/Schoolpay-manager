@@ -176,6 +176,26 @@ class CDPClient {
     await new Promise((r) => setTimeout(r, 350));
   }
 
+  async clickDialogButton(label: string) {
+    const clicked = await this.evaluate(`
+      const dialog = document.querySelector('[role="dialog"]');
+      if (!dialog) return null;
+      const btns = Array.from(dialog.querySelectorAll('button, [role="button"]')).filter((b) => {
+        const rect = b.getBoundingClientRect();
+        return rect.width > 0 && rect.height > 0 && !b.disabled;
+      });
+      const exact = btns.find((b) => (b.innerText || '').trim() === ${JSON.stringify(label)});
+      const partial = btns.find((b) => (b.innerText || '').trim().includes(${JSON.stringify(label)}));
+      const target = exact || partial;
+      if (!target) return null;
+      target.scrollIntoView({ block: 'center' });
+      target.click();
+      return (target.innerText || '').trim();
+    `);
+    if (!clicked) throw new Error(`Dialog button containing "${label}" not found`);
+    await new Promise((r) => setTimeout(r, 350));
+  }
+
   close() {
     try {
       this.ws.close();
@@ -678,15 +698,104 @@ async function run() {
     await cdp.waitForText('Deleted 1 score(s) and 1 examination batch(es)');
     await cdp.waitForText('Uploaded Batches (1)');
 
-    // 4d. Mobile 390px responsiveness check while modal is open
+    // 4d. REAL Mobile 390x844 Interactive Chromium Verification (verifies the exact mobile clipping bug is gone!)
     await cdp.setViewport(390, 844);
-    await new Promise((r) => setTimeout(r, 350));
-    const overflow = await cdp.evaluate(`return document.documentElement.scrollWidth - window.innerWidth;`);
-    assert.ok(overflow <= 24, `Unexpected mobile overflow: ${overflow}px`);
+    await new Promise((r) => setTimeout(r, 400));
+
+    // Verify mode switcher tabs ("Uploaded Batches" and "Individual Scores") do not clip past 390px right edge
+    const mobileTabCheck = await cdp.evaluate(`
+      const dialog = document.querySelector('[role="dialog"]');
+      const tabs = Array.from(dialog.querySelectorAll('button')).filter((b) =>
+        (b.innerText || '').includes('Uploaded Batches') || (b.innerText || '').includes('Individual Scores')
+      );
+      return {
+        count: tabs.length,
+        maxRight: Math.max(...tabs.map((t) => Math.round(t.getBoundingClientRect().right))),
+        innerWidth: window.innerWidth,
+        docOverflow: document.documentElement.scrollWidth - window.innerWidth,
+      };
+    `);
+    assert.strictEqual(mobileTabCheck.count, 2, 'Both mode tabs should be rendered on mobile');
+    assert.ok(mobileTabCheck.maxRight <= mobileTabCheck.innerWidth, `Mode tabs clipped horizontally on mobile: ${JSON.stringify(mobileTabCheck)}`);
+    assert.ok(mobileTabCheck.docOverflow <= 8, `Unexpected mobile overflow: ${mobileTabCheck.docOverflow}px`);
+
+    // Tap "Fix Level" on the mobile batch card inside [role="dialog"] and verify Target Level select & Apply Reassignment are visible & usable!
+    await cdp.clickDialogButton('Fix Level');
+    await cdp.waitForText('Apply Reassignment');
+    const mobileFormMetrics = await cdp.evaluate(`
+      const sel = document.querySelector('[role="dialog"] select[aria-label*="Target"][aria-label*="Reassignment"]');
+      const applyBtn = Array.from(document.querySelectorAll('[role="dialog"] button')).find((b) =>
+        (b.innerText || '').includes('Apply Reassignment')
+      );
+      if (!sel || !applyBtn) return { ok: false, reason: 'missing controls' };
+      const selRect = sel.getBoundingClientRect();
+      applyBtn.scrollIntoView({ block: 'center' });
+      const btnRect = applyBtn.getBoundingClientRect();
+      return {
+        ok: true,
+        selWidth: Math.round(selRect.width),
+        selHeight: Math.round(selRect.height),
+        selTop: Math.round(selRect.top),
+        btnWidth: Math.round(btnRect.width),
+        btnHeight: Math.round(btnRect.height),
+        btnBottom: Math.round(btnRect.bottom),
+        viewportHeight: window.innerHeight,
+      };
+    `);
+    assert.ok(
+      mobileFormMetrics.ok &&
+        mobileFormMetrics.selWidth > 200 &&
+        mobileFormMetrics.selHeight > 30 &&
+        mobileFormMetrics.btnWidth > 200 &&
+        mobileFormMetrics.btnBottom <= mobileFormMetrics.viewportHeight,
+      `Mobile Reassign form was clipped or unreachable: ${JSON.stringify(mobileFormMetrics)}`
+    );
+
+    // Actually execute a mobile reassignment (Year 1 (100L) -> HND 1 -> back to Year 1 (100L)) on 390x844!
+    await cdp.evaluate(`
+      const sel = document.querySelector('[role="dialog"] select[aria-label*="Target"][aria-label*="Reassignment"]');
+      const opt = Array.from(sel.options).find((o) => o.text.includes('HND 1'));
+      if (!opt) throw new Error('HND 1 option not found on mobile');
+      sel.value = opt.value;
+      sel.dispatchEvent(new Event('change', { bubbles: true }));
+    `);
+    await cdp.clickDialogButton('Apply Reassignment');
+    await cdp.waitForText('Reassigned 3 score(s)');
+    await new Promise((r) => setTimeout(r, 400));
+
+    // Reassign back to Year 1 (100L) on mobile
+    await cdp.clickDialogButton('Fix Level');
+    await cdp.waitForText('Apply Reassignment');
+    await cdp.evaluate(`
+      const sel = document.querySelector('[role="dialog"] select[aria-label*="Target"][aria-label*="Reassignment"]');
+      const opt = Array.from(sel.options).find((o) => o.text.includes('Year 1 (100L)'));
+      if (!opt) throw new Error('Year 1 (100L) option not found on mobile');
+      sel.value = opt.value;
+      sel.dispatchEvent(new Event('change', { bubbles: true }));
+    `);
+    await cdp.clickDialogButton('Apply Reassignment');
+    await cdp.waitForText('Reassigned 3 score(s)');
+    await new Promise((r) => setTimeout(r, 400));
+
+    // Also test mobile Individual Scores card editing on 390x844!
+    await cdp.clickDialogButton('Edit Scores');
+    await cdp.waitForText('Ngozi Eze');
+    await cdp.evaluate(`
+      const caInp = document.querySelector('[role="dialog"] input[aria-label="Mobile CA score for Ngozi Eze Anatomy I"]');
+      if (!caInp) throw new Error('Mobile CA score input not found');
+      const rect = caInp.getBoundingClientRect();
+      if (rect.width === 0 || rect.height === 0) throw new Error('Mobile CA score input not visible');
+      const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+      setter.call(caInp, '32');
+      caInp.dispatchEvent(new Event('input', { bubbles: true }));
+    `);
+    await cdp.waitForText('Save 1 Score Edit');
+    await cdp.clickDialogButton('Save 1 Score Edit');
+    await cdp.waitForText('Updated 1 result score(s)');
 
     assert.strictEqual(cdp.pageErrors.length, 0, `Page errors detected: ${JSON.stringify(cdp.pageErrors)}`);
     assert.strictEqual(cdp.apiServerErrors.length, 0, `5xx API errors detected: ${JSON.stringify(cdp.apiServerErrors)}`);
-    console.log('   ✓ UI Bulk Delete & Mobile 390px layout verified (0 page errors, 0 5xx API errors)!');
+    console.log('   ✓ UI Bulk Delete & Full Interactive Mobile 390x844 Reassign + Score Edit verified (0 page errors, 0 5xx API errors)!');
     console.log('\n✅ ALL BULK RESULTS EDIT, REASSIGN & BULK DELETE E2E TESTS PASSED 100%!');
   } catch (err) {
     console.error('\n❌ E2E FAILED:', err);

@@ -3227,9 +3227,11 @@ courseAndBacklogRouter.get(
         batchParams.push(term_id);
       }
       if (class_id) {
-        bPg += ` AND ex.class_id = $${bIdx++}`;
-        bSq += ` AND ex.class_id = ?`;
-        batchParams.push(class_id);
+        const c1 = bIdx++;
+        const c2 = bIdx++;
+        bPg += ` AND (ex.class_id = $${c1} OR EXISTS (SELECT 1 FROM student_scores ss2 WHERE ss2.examination_id = ex.id AND ss2.school_id = ex.school_id AND ss2.class_id = $${c2}))`;
+        bSq += ` AND (ex.class_id = ? OR EXISTS (SELECT 1 FROM student_scores ss2 WHERE ss2.examination_id = ex.id AND ss2.school_id = ex.school_id AND ss2.class_id = ?))`;
+        batchParams.push(class_id, class_id);
       }
       if (examination_id) {
         bPg += ` AND ex.id = $${bIdx++}`;
