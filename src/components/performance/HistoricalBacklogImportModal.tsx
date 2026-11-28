@@ -46,6 +46,7 @@ interface HistoricalBacklogImportModalProps {
   learnerLabel: string;
   onClose: () => void;
   onImported: (message: string) => void;
+  onOpenManageResults?: () => void;
 }
 
 interface EditableBacklogRow {
@@ -84,6 +85,7 @@ export const HistoricalBacklogImportModal: React.FC<HistoricalBacklogImportModal
   learnerLabel,
   onClose,
   onImported,
+  onOpenManageResults,
 }) => {
   const isPrimarySchool = !isTertiary && /primary|nursery|basic|elementary/i.test(schoolType);
   const displayUnitsCol = showCreditUnits !== undefined ? showCreditUnits : isTertiary;
@@ -1037,9 +1039,18 @@ export const HistoricalBacklogImportModal: React.FC<HistoricalBacklogImportModal
 
         {/* Footer */}
         <div className="px-5 py-3.5 bg-slate-50 border-t border-slate-200 flex flex-wrap items-center justify-between gap-3">
-          <p className="text-xs text-slate-500">
-            Supports up to 2,500 score rows per batch across Primary, Secondary &amp; Tertiary portals.
-          </p>
+          <div className="flex flex-wrap items-center gap-3 text-xs text-slate-500">
+            <span>Supports up to 2,500 score rows per batch across Primary, Secondary &amp; Tertiary portals.</span>
+            {onOpenManageResults && (
+              <button
+                type="button"
+                onClick={onOpenManageResults}
+                className="font-semibold text-emerald-700 hover:text-emerald-800 underline underline-offset-2 cursor-pointer whitespace-nowrap"
+              >
+                Need to fix a wrong {classLabel.toLowerCase()} or delete uploaded results?
+              </button>
+            )}
+          </div>
           <div className="flex items-center gap-2">
             <button
               type="button"

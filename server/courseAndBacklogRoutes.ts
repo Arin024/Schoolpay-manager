@@ -2739,3 +2739,1480 @@ courseAndBacklogRouter.get(
     }
   }
 );
+
+// ==============================================================================
+// 6. BULK RESULTS CORRECTION, REASSIGNMENT (FIX WRONG CLASS/LEVEL/SESSION/TERM)
+//    & BULK DELETE WITH CASCADING REPORT CARD SYNC
+// ==============================================================================
+
+async function syncAffectedReportCards(
+  schoolId: string,
+  actorId: string | null,
+  touchedTerms: Map<string, { sessionId: string; termId: string; studentIds: Set<string> }>,
+  touchedSessions: Map<string, Set<string>>
+): Promise<{ termReportsUpdated: number; termReportsDeleted: number; sessionReportsUpdated: number; sessionReportsDeleted: number }> {
+  let termReportsUpdated = 0;
+  let termReportsDeleted = 0;
+  let sessionReportsUpdated = 0;
+  let sessionReportsDeleted = 0;
+
+  // 1. Sync Term / Semester Report Cards
+  for (const [, meta] of touchedTerms) {
+    const { sessionId, termId, studentIds } = meta;
+    if (!sessionId || !termId) continue;
+
+    // Fetch ALL students with active scores in this (sessionId, termId) so class positions stay exact
+    const activeStudents = await dbAll(
+      `SELECT DISTINCT ss.student_id, s.class_id as current_class_id
+       FROM student_scores ss
+       JOIN examinations ex ON ss.examination_id = ex.id
+       JOIN students s ON ss.student_id = s.id
+       WHERE ss.school_id = $1 AND ss.academic_session_id = $2 AND ss.term_id = $3
+         AND (ex.is_deleted = 0 OR ex.is_deleted IS NULL)
+         AND (s.is_deleted = 0 OR s.is_deleted IS NULL)`,
+      `SELECT DISTINCT ss.student_id, s.class_id as current_class_id
+       FROM student_scores ss
+       JOIN examinations ex ON ss.examination_id = ex.id
+       JOIN students s ON ss.student_id = s.id
+       WHERE ss.school_id = ? AND ss.academic_session_id = ? AND ss.term_id = ?
+         AND (ex.is_deleted = 0 OR ex.is_deleted IS NULL)
+         AND (s.is_deleted = 0 OR s.is_deleted IS NULL)`,
+      [schoolId, sessionId, termId]
+    );
+    const activeStudentIdSet = new Set(activeStudents.map((r: any) => r.student_id));
+
+    // Delete stale report_cards for affected students who now have 0 scores in this (sessionId, termId)
+    for (const sid of studentIds) {
+      if (!activeStudentIdSet.has(sid)) {
+        const existingRc = await dbGet(
+          `SELECT id FROM report_cards WHERE school_id = $1 AND student_id = $2 AND academic_session_id = $3 AND term_id = $4 LIMIT 1`,
+          `SELECT id FROM report_cards WHERE school_id = ? AND student_id = ? AND academic_session_id = ? AND term_id = ? LIMIT 1`,
+          [schoolId, sid, sessionId, termId]
+        );
+        if (existingRc) {
+          await dualWrite(
+            `DELETE FROM report_cards WHERE id = $1 AND school_id = $2`,
+            `DELETE FROM report_cards WHERE id = ? AND school_id = ?`,
+            [existingRc.id, schoolId]
+          );
+          termReportsDeleted += 1;
+        }
+      }
+    }
+
+    if (activeStudents.length === 0) continue;
+
+    const computed: Array<{
+      studentId: string;
+      resolvedClassId: string | null;
+      examId: string | null;
+      anyPublished: boolean;
+      totalScore: number;
+      averageScore: number;
+      subjectsCount: number;
+    }> = [];
+
+    for (const row of activeStudents) {
+      const stuScores = await dbAll(
+        `SELECT ss.total_score, ss.class_id, ss.examination_id, ss.status, ex.total_max_score, ex.status as exam_status
+         FROM student_scores ss
+         JOIN examinations ex ON ss.examination_id = ex.id
+         WHERE ss.school_id = $1 AND ss.student_id = $2 AND ss.academic_session_id = $3 AND ss.term_id = $4
+           AND (ex.is_deleted = 0 OR ex.is_deleted IS NULL)`,
+        `SELECT ss.total_score, ss.class_id, ss.examination_id, ss.status, ex.total_max_score, ex.status as exam_status
+         FROM student_scores ss
+         JOIN examinations ex ON ss.examination_id = ex.id
+         WHERE ss.school_id = ? AND ss.student_id = ? AND ss.academic_session_id = ? AND ss.term_id = ?
+           AND (ex.is_deleted = 0 OR ex.is_deleted IS NULL)`,
+        [schoolId, row.student_id, sessionId, termId]
+      );
+      const valid = stuScores.filter((s: any) => s.total_score !== null && s.total_score !== undefined);
+      if (valid.length === 0) continue;
+
+      const scoreClassId = valid.find((s: any) => s.class_id)?.class_id || null;
+      const histCls = scoreClassId
+        ? { class_id: scoreClassId }
+        : await resolveHistoricalStudentClass(schoolId, row.student_id, sessionId, {
+            class_id: row.current_class_id || null,
+          });
+      const resolvedClassId = histCls.class_id || row.current_class_id || null;
+      const totalScore = Math.round(valid.reduce((acc: number, s: any) => acc + Number(s.total_score || 0), 0) * 100) / 100;
+      const pctSum = valid.reduce((acc: number, s: any) => {
+        const max = Number(s.total_max_score) > 0 ? Number(s.total_max_score) : 100;
+        return acc + (Number(s.total_score) / max) * 100;
+      }, 0);
+      const averageScore = Math.round((pctSum / valid.length) * 100) / 100;
+      const anyPublished = valid.some((s: any) => s.status === 'PUBLISHED' || s.exam_status === 'PUBLISHED');
+
+      computed.push({
+        studentId: row.student_id,
+        resolvedClassId,
+        examId: valid[0]?.examination_id || null,
+        anyPublished,
+        totalScore,
+        averageScore,
+        subjectsCount: valid.length,
+      });
+    }
+
+    const byClass = new Map<string, typeof computed>();
+    for (const item of computed) {
+      const key = item.resolvedClassId || 'UNASSIGNED';
+      if (!byClass.has(key)) byClass.set(key, []);
+      byClass.get(key)!.push(item);
+    }
+
+    for (const [, group] of byClass) {
+      const sorted = [...group].sort((a, b) => b.averageScore - a.averageScore);
+      const classSize = sorted.length;
+      for (let idx = 0; idx < sorted.length; idx++) {
+        const item = sorted[idx];
+        const position = idx > 0 && item.averageScore === sorted[idx - 1].averageScore ? idx : idx + 1;
+        const existingRc = await dbGet(
+          `SELECT id, status FROM report_cards WHERE school_id = $1 AND student_id = $2 AND academic_session_id = $3 AND term_id = $4 LIMIT 1`,
+          `SELECT id, status FROM report_cards WHERE school_id = ? AND student_id = ? AND academic_session_id = ? AND term_id = ? LIMIT 1`,
+          [schoolId, item.studentId, sessionId, termId]
+        );
+        // Only update/create if this student was touched OR already had a report card in this class (to keep positions accurate)
+        if (!existingRc && !studentIds.has(item.studentId)) continue;
+
+        const targetStatus = existingRc?.status === 'PUBLISHED' || item.anyPublished ? 'PUBLISHED' : existingRc?.status || 'DRAFT';
+        if (existingRc) {
+          await dualWrite(
+            `UPDATE report_cards
+             SET class_id = $1, examination_id = COALESCE($2, examination_id),
+                 total_score = $3, average_score = $4, subjects_count = $5,
+                 class_position = $6, class_size = $7, updated_at = CURRENT_TIMESTAMP
+             WHERE id = $8 AND school_id = $9`,
+            `UPDATE report_cards
+             SET class_id = ?, examination_id = COALESCE(?, examination_id),
+                 total_score = ?, average_score = ?, subjects_count = ?,
+                 class_position = ?, class_size = ?, updated_at = CURRENT_TIMESTAMP
+             WHERE id = ? AND school_id = ?`,
+            [
+              item.resolvedClassId,
+              item.examId,
+              item.totalScore,
+              item.averageScore,
+              item.subjectsCount,
+              position,
+              classSize,
+              existingRc.id,
+              schoolId,
+            ]
+          );
+        } else {
+          const rcId = newId('rc');
+          const verCode = `RC-${crypto.randomBytes(3).toString('hex').toUpperCase()}`;
+          await dualWrite(
+            `INSERT INTO report_cards (
+               id, school_id, student_id, class_id, academic_session_id, term_id, examination_id,
+               status, total_score, average_score, subjects_count, class_position, class_size,
+               verification_code, created_by, published_by, published_at, created_at, updated_at
+             ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,${targetStatus === 'PUBLISHED' ? 'CURRENT_TIMESTAMP' : 'NULL'},CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)`,
+            `INSERT INTO report_cards (
+               id, school_id, student_id, class_id, academic_session_id, term_id, examination_id,
+               status, total_score, average_score, subjects_count, class_position, class_size,
+               verification_code, created_by, published_by, published_at, created_at, updated_at
+             ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,${targetStatus === 'PUBLISHED' ? 'CURRENT_TIMESTAMP' : 'NULL'},CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)`,
+            [
+              rcId,
+              schoolId,
+              item.studentId,
+              item.resolvedClassId,
+              sessionId,
+              termId,
+              item.examId,
+              targetStatus,
+              item.totalScore,
+              item.averageScore,
+              item.subjectsCount,
+              position,
+              classSize,
+              verCode,
+              actorId,
+              targetStatus === 'PUBLISHED' ? actorId : null,
+            ]
+          );
+        }
+
+        if (targetStatus === 'PUBLISHED') {
+          const compiledTerm = await compileTermReportCard(schoolId, item.studentId, sessionId, termId, {
+            onlyPublished: false,
+            visibilityRole: 'ADMIN',
+            forceLive: true,
+          });
+          if (compiledTerm?.reportCard?.breakdown) {
+            const bd = compiledTerm.reportCard.breakdown;
+            await dualWrite(
+              `UPDATE report_cards
+               SET snapshot_json = $1, attendance_summary_json = $2, behaviour_summary_json = $3, updated_at = CURRENT_TIMESTAMP
+               WHERE school_id = $4 AND student_id = $5 AND academic_session_id = $6 AND term_id = $7`,
+              `UPDATE report_cards
+               SET snapshot_json = ?, attendance_summary_json = ?, behaviour_summary_json = ?, updated_at = CURRENT_TIMESTAMP
+               WHERE school_id = ? AND student_id = ? AND academic_session_id = ? AND term_id = ?`,
+              [
+                JSON.stringify(bd),
+                JSON.stringify(bd.attendance_summary || {}),
+                JSON.stringify(bd.behaviour_summary || {}),
+                schoolId,
+                item.studentId,
+                sessionId,
+                termId,
+              ]
+            );
+          }
+        }
+        termReportsUpdated += 1;
+      }
+    }
+  }
+
+  // 2. Sync Full-Session Cumulative Report Cards
+  for (const [sessionId, studentIdSet] of touchedSessions) {
+    if (!sessionId) continue;
+    for (const studentId of studentIdSet) {
+      const rem = await dbGet(
+        `SELECT COUNT(*) as cnt, MAX(ss.class_id) as sample_class_id
+         FROM student_scores ss
+         JOIN examinations ex ON ss.examination_id = ex.id
+         WHERE ss.school_id = $1 AND ss.student_id = $2 AND ss.academic_session_id = $3
+           AND (ex.is_deleted = 0 OR ex.is_deleted IS NULL)`,
+        `SELECT COUNT(*) as cnt, MAX(ss.class_id) as sample_class_id
+         FROM student_scores ss
+         JOIN examinations ex ON ss.examination_id = ex.id
+         WHERE ss.school_id = ? AND ss.student_id = ? AND ss.academic_session_id = ?
+           AND (ex.is_deleted = 0 OR ex.is_deleted IS NULL)`,
+        [schoolId, studentId, sessionId]
+      );
+      const count = Number(rem?.cnt || 0);
+      const existingSrc = await dbGet(
+        `SELECT id, status FROM session_report_cards WHERE school_id = $1 AND student_id = $2 AND academic_session_id = $3 LIMIT 1`,
+        `SELECT id, status FROM session_report_cards WHERE school_id = ? AND student_id = ? AND academic_session_id = ? LIMIT 1`,
+        [schoolId, studentId, sessionId]
+      );
+
+      if (count === 0) {
+        if (existingSrc) {
+          await dualWrite(
+            `DELETE FROM session_report_cards WHERE id = $1 AND school_id = $2`,
+            `DELETE FROM session_report_cards WHERE id = ? AND school_id = ?`,
+            [existingSrc.id, schoolId]
+          );
+          sessionReportsDeleted += 1;
+        }
+        continue;
+      }
+
+      const compiled = await compileSessionReportCard(schoolId, studentId, sessionId, {
+        onlyPublished: false,
+        visibilityRole: 'ADMIN',
+        forceLive: true,
+      });
+      if (!compiled?.reportCard?.breakdown) continue;
+      const bd = compiled.reportCard.breakdown;
+      const resolvedClassId = rem?.sample_class_id || compiled.reportCard.class_id || null;
+      const isPub = existingSrc?.status === 'PUBLISHED' || Boolean(bd.terms_count > 0);
+
+      if (existingSrc) {
+        await dualWrite(
+          `UPDATE session_report_cards
+           SET class_id = $1, total_score = $2, average_score = $3, subjects_count = $4,
+               terms_count = $5, class_position = $6, class_size = $7, term_averages_json = $8,
+               snapshot_json = CASE WHEN status = 'PUBLISHED' THEN $9 ELSE snapshot_json END,
+               updated_at = CURRENT_TIMESTAMP
+           WHERE id = $10 AND school_id = $11`,
+          `UPDATE session_report_cards
+           SET class_id = ?, total_score = ?, average_score = ?, subjects_count = ?,
+               terms_count = ?, class_position = ?, class_size = ?, term_averages_json = ?,
+               snapshot_json = CASE WHEN status = 'PUBLISHED' THEN ? ELSE snapshot_json END,
+               updated_at = CURRENT_TIMESTAMP
+           WHERE id = ? AND school_id = ?`,
+          [
+            resolvedClassId,
+            bd.total_score,
+            bd.average_score,
+            bd.subjects_count,
+            bd.terms_count,
+            bd.class_position,
+            bd.class_size,
+            JSON.stringify(bd.term_averages || []),
+            JSON.stringify(bd),
+            existingSrc.id,
+            schoolId,
+          ]
+        );
+        sessionReportsUpdated += 1;
+      } else if (isPub) {
+        const srcId = newId('src');
+        const verCode = `SRC-${crypto.randomBytes(3).toString('hex').toUpperCase()}`;
+        await dualWrite(
+          `INSERT INTO session_report_cards (
+             id, school_id, student_id, class_id, academic_session_id,
+             status, total_score, average_score, subjects_count, terms_count,
+             class_position, class_size, promotion_status, term_averages_json,
+             attendance_summary_json, behaviour_summary_json, teacher_remark, verification_code,
+             snapshot_json, created_by, published_by, published_at, created_at, updated_at
+           ) VALUES ($1,$2,$3,$4,$5,'PUBLISHED',$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)`,
+          `INSERT INTO session_report_cards (
+             id, school_id, student_id, class_id, academic_session_id,
+             status, total_score, average_score, subjects_count, terms_count,
+             class_position, class_size, promotion_status, term_averages_json,
+             attendance_summary_json, behaviour_summary_json, teacher_remark, verification_code,
+             snapshot_json, created_by, published_by, published_at, created_at, updated_at
+           ) VALUES (?,?,?,?,?,'PUBLISHED',?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)`,
+          [
+            srcId,
+            schoolId,
+            studentId,
+            resolvedClassId,
+            sessionId,
+            bd.total_score,
+            bd.average_score,
+            bd.subjects_count,
+            bd.terms_count,
+            bd.class_position,
+            bd.class_size,
+            bd.promotion_status || 'PENDING',
+            JSON.stringify(bd.term_averages || []),
+            JSON.stringify(bd.attendance_summary || {}),
+            JSON.stringify(bd.behaviour_summary || {}),
+            bd.teacher_remark || null,
+            verCode,
+            JSON.stringify(bd),
+            actorId,
+            actorId,
+          ]
+        );
+        sessionReportsUpdated += 1;
+      }
+    }
+  }
+
+  return { termReportsUpdated, termReportsDeleted, sessionReportsUpdated, sessionReportsDeleted };
+}
+
+// 6a. GET /api/v1/school/results/manage — Filterable Score Ledger & Uploaded Exam Batches
+courseAndBacklogRouter.get(
+  '/results/manage',
+  requireAuth,
+  requireTenant,
+  requireRole(ACADEMIC_READ_ROLES),
+  async (req: AuthenticatedRequest, res) => {
+    try {
+      const schoolId = req.targetSchoolId!;
+      const {
+        academic_session_id,
+        term_id,
+        class_id,
+        subject_id,
+        examination_id,
+        department,
+        search,
+        limit: limitParam,
+      } = req.query as Record<string, string>;
+
+      const limit = Math.max(1, Math.min(2000, Number(limitParam) || 500));
+
+      const params: any[] = [schoolId];
+      let pgWhere = `WHERE ss.school_id = $1 AND (ex.is_deleted = 0 OR ex.is_deleted IS NULL) AND (s.is_deleted = 0 OR s.is_deleted IS NULL)`;
+      let sqWhere = `WHERE ss.school_id = ? AND (ex.is_deleted = 0 OR ex.is_deleted IS NULL) AND (s.is_deleted = 0 OR s.is_deleted IS NULL)`;
+      let idx = 2;
+
+      if (academic_session_id) {
+        pgWhere += ` AND ss.academic_session_id = $${idx++}`;
+        sqWhere += ` AND ss.academic_session_id = ?`;
+        params.push(academic_session_id);
+      }
+      if (term_id) {
+        pgWhere += ` AND ss.term_id = $${idx++}`;
+        sqWhere += ` AND ss.term_id = ?`;
+        params.push(term_id);
+      }
+      if (class_id) {
+        const c1 = idx++;
+        const c2 = idx++;
+        pgWhere += ` AND (ss.class_id = $${c1} OR ex.class_id = $${c2})`;
+        sqWhere += ` AND (ss.class_id = ? OR ex.class_id = ?)`;
+        params.push(class_id, class_id);
+      }
+      if (subject_id) {
+        pgWhere += ` AND ss.subject_id = $${idx++}`;
+        sqWhere += ` AND ss.subject_id = ?`;
+        params.push(subject_id);
+      }
+      if (examination_id) {
+        pgWhere += ` AND ss.examination_id = $${idx++}`;
+        sqWhere += ` AND ss.examination_id = ?`;
+        params.push(examination_id);
+      }
+      if (department && department.trim()) {
+        const d1 = idx++;
+        const d2 = idx++;
+        pgWhere += ` AND (LOWER(TRIM(COALESCE(ex.department, ''))) = LOWER(TRIM($${d1})) OR LOWER(TRIM(COALESCE(s.class_arm_name, ''))) = LOWER(TRIM($${d2})))`;
+        sqWhere += ` AND (LOWER(TRIM(COALESCE(ex.department, ''))) = LOWER(TRIM(?)) OR LOWER(TRIM(COALESCE(s.class_arm_name, ''))) = LOWER(TRIM(?)))`;
+        params.push(department.trim(), department.trim());
+      }
+      if (search && search.trim()) {
+        const q = `%${search.trim().toLowerCase()}%`;
+        const s1 = idx++;
+        const s2 = idx++;
+        const s3 = idx++;
+        const s4 = idx++;
+        pgWhere += ` AND (LOWER(s.full_name) LIKE $${s1} OR LOWER(COALESCE(s.admission_number, '')) LIKE $${s2} OR LOWER(sub.name) LIKE $${s3} OR LOWER(COALESCE(sub.code, '')) LIKE $${s4})`;
+        sqWhere += ` AND (LOWER(s.full_name) LIKE ? OR LOWER(COALESCE(s.admission_number, '')) LIKE ? OR LOWER(sub.name) LIKE ? OR LOWER(COALESCE(sub.code, '')) LIKE ?)`;
+        params.push(q, q, q, q);
+      }
+
+      const limitIdx = idx++;
+      const scoreParams = [...params, limit];
+
+      const scores = await dbAll(
+        `SELECT ss.id, ss.examination_id, ss.student_id, ss.class_id, ss.subject_id,
+                ss.academic_session_id, ss.term_id, ss.ca_score, ss.exam_score, ss.total_score,
+                ss.grade, ss.grade_remark, ss.subject_remark, ss.status, ss.updated_at,
+                ex.title as exam_title, ex.exam_type, ex.status as exam_status, ex.department as exam_department,
+                ex.ca_max_score, ex.exam_max_score, ex.total_max_score,
+                s.full_name as student_name, s.admission_number, s.class_arm_name as student_department,
+                COALESCE(c.name, ec.name, s.class_name) as class_name,
+                sub.code as subject_code, sub.name as subject_name,
+                ses.name as session_name, t.name as term_name
+         FROM student_scores ss
+         JOIN examinations ex ON ss.examination_id = ex.id
+         JOIN students s ON ss.student_id = s.id
+         JOIN subjects sub ON ss.subject_id = sub.id
+         LEFT JOIN classes c ON ss.class_id = c.id
+         LEFT JOIN classes ec ON ex.class_id = ec.id
+         LEFT JOIN academic_sessions ses ON ss.academic_session_id = ses.id
+         LEFT JOIN terms t ON ss.term_id = t.id
+         ${pgWhere}
+         ORDER BY ses.name DESC, t.name ASC, c.name ASC, s.full_name ASC, sub.name ASC
+         LIMIT $${limitIdx}`,
+        `SELECT ss.id, ss.examination_id, ss.student_id, ss.class_id, ss.subject_id,
+                ss.academic_session_id, ss.term_id, ss.ca_score, ss.exam_score, ss.total_score,
+                ss.grade, ss.grade_remark, ss.subject_remark, ss.status, ss.updated_at,
+                ex.title as exam_title, ex.exam_type, ex.status as exam_status, ex.department as exam_department,
+                ex.ca_max_score, ex.exam_max_score, ex.total_max_score,
+                s.full_name as student_name, s.admission_number, s.class_arm_name as student_department,
+                COALESCE(c.name, ec.name, s.class_name) as class_name,
+                sub.code as subject_code, sub.name as subject_name,
+                ses.name as session_name, t.name as term_name
+         FROM student_scores ss
+         JOIN examinations ex ON ss.examination_id = ex.id
+         JOIN students s ON ss.student_id = s.id
+         JOIN subjects sub ON ss.subject_id = sub.id
+         LEFT JOIN classes c ON ss.class_id = c.id
+         LEFT JOIN classes ec ON ex.class_id = ec.id
+         LEFT JOIN academic_sessions ses ON ss.academic_session_id = ses.id
+         LEFT JOIN terms t ON ss.term_id = t.id
+         ${sqWhere}
+         ORDER BY ses.name DESC, t.name ASC, c.name ASC, s.full_name ASC, sub.name ASC
+         LIMIT ?`,
+        scoreParams
+      );
+
+      // Also return all non-deleted examinations as manageable upload batches (including counts)
+      const batchParams: any[] = [schoolId];
+      let bPg = `WHERE ex.school_id = $1 AND (ex.is_deleted = 0 OR ex.is_deleted IS NULL)`;
+      let bSq = `WHERE ex.school_id = ? AND (ex.is_deleted = 0 OR ex.is_deleted IS NULL)`;
+      let bIdx = 2;
+      if (academic_session_id) {
+        bPg += ` AND ex.academic_session_id = $${bIdx++}`;
+        bSq += ` AND ex.academic_session_id = ?`;
+        batchParams.push(academic_session_id);
+      }
+      if (term_id) {
+        bPg += ` AND ex.term_id = $${bIdx++}`;
+        bSq += ` AND ex.term_id = ?`;
+        batchParams.push(term_id);
+      }
+      if (class_id) {
+        bPg += ` AND ex.class_id = $${bIdx++}`;
+        bSq += ` AND ex.class_id = ?`;
+        batchParams.push(class_id);
+      }
+      if (examination_id) {
+        bPg += ` AND ex.id = $${bIdx++}`;
+        bSq += ` AND ex.id = ?`;
+        batchParams.push(examination_id);
+      }
+
+      const batches = await dbAll(
+        `SELECT ex.id as examination_id, ex.title, ex.exam_type, ex.status,
+                ex.academic_session_id, ses.name as session_name,
+                ex.term_id, t.name as term_name,
+                ex.class_id, c.name as class_name,
+                ex.department, ex.created_at, ex.updated_at,
+                COUNT(ss.id) as scores_count,
+                COUNT(DISTINCT ss.student_id) as students_count,
+                COUNT(DISTINCT ss.subject_id) as subjects_count
+         FROM examinations ex
+         LEFT JOIN student_scores ss ON ss.examination_id = ex.id AND ss.school_id = ex.school_id
+         LEFT JOIN academic_sessions ses ON ex.academic_session_id = ses.id
+         LEFT JOIN terms t ON ex.term_id = t.id
+         LEFT JOIN classes c ON ex.class_id = c.id
+         ${bPg}
+         GROUP BY ex.id, ex.title, ex.exam_type, ex.status, ex.academic_session_id, ses.name,
+                  ex.term_id, t.name, ex.class_id, c.name, ex.department, ex.created_at, ex.updated_at
+         ORDER BY ex.created_at DESC`,
+        `SELECT ex.id as examination_id, ex.title, ex.exam_type, ex.status,
+                ex.academic_session_id, ses.name as session_name,
+                ex.term_id, t.name as term_name,
+                ex.class_id, c.name as class_name,
+                ex.department, ex.created_at, ex.updated_at,
+                COUNT(ss.id) as scores_count,
+                COUNT(DISTINCT ss.student_id) as students_count,
+                COUNT(DISTINCT ss.subject_id) as subjects_count
+         FROM examinations ex
+         LEFT JOIN student_scores ss ON ss.examination_id = ex.id AND ss.school_id = ex.school_id
+         LEFT JOIN academic_sessions ses ON ex.academic_session_id = ses.id
+         LEFT JOIN terms t ON ex.term_id = t.id
+         LEFT JOIN classes c ON ex.class_id = c.id
+         ${bSq}
+         GROUP BY ex.id, ex.title, ex.exam_type, ex.status, ex.academic_session_id, ses.name,
+                  ex.term_id, t.name, ex.class_id, c.name, ex.department, ex.created_at, ex.updated_at
+         ORDER BY ex.created_at DESC`,
+        batchParams
+      );
+
+      return res.json({
+        success: true,
+        scores,
+        batches: batches.map((b: any) => ({
+          ...b,
+          scores_count: Number(b.scores_count || 0),
+          students_count: Number(b.students_count || 0),
+          subjects_count: Number(b.subjects_count || 0),
+        })),
+      });
+    } catch (err: any) {
+      console.error('[Results Manage Fetch Error]', err);
+      return res.status(500).json({ error: 'MANAGE_RESULTS_FAILED', message: safeClientError(err) });
+    }
+  }
+);
+
+// 6b. POST /api/v1/school/results/bulk-reassign
+// Atomically moves mistakenly uploaded results/exams from wrong Class/Level/Session/Term/Department
+// (e.g. HND 1 -> Year 1 (100L), or JSS 3 -> Primary 1) and syncs registrations, enrollment history & report cards.
+courseAndBacklogRouter.post(
+  '/results/bulk-reassign',
+  requireAuth,
+  requireTenant,
+  requireRole(ADMIN_ONLY_ROLES),
+  async (req: AuthenticatedRequest, res) => {
+    try {
+      const schoolId = req.targetSchoolId!;
+      const actorId = req.user?.id || null;
+      const {
+        score_ids,
+        examination_ids,
+        target_class_id,
+        target_academic_session_id,
+        target_term_id,
+        target_department,
+        new_exam_title,
+        reason,
+      } = req.body || {};
+
+      const cleanScoreIds: string[] = Array.isArray(score_ids)
+        ? Array.from(new Set(score_ids.map((id: any) => String(id || '').trim()).filter(Boolean)))
+        : [];
+      const cleanExamIds: string[] = Array.isArray(examination_ids)
+        ? Array.from(new Set(examination_ids.map((id: any) => String(id || '').trim()).filter(Boolean)))
+        : [];
+
+      if (cleanScoreIds.length === 0 && cleanExamIds.length === 0) {
+        return res.status(400).json({
+          error: 'NOTHING_SELECTED',
+          message: 'Select at least one examination batch or score row to reassign.',
+        });
+      }
+
+      const hasTargetClass = Boolean(target_class_id && String(target_class_id).trim());
+      const hasTargetSession = Boolean(target_academic_session_id && String(target_academic_session_id).trim());
+      const hasTargetTerm = Boolean(target_term_id && String(target_term_id).trim());
+      const hasTargetDept = target_department !== undefined && target_department !== null && String(target_department).trim() !== '';
+      const hasNewTitle = Boolean(new_exam_title && String(new_exam_title).trim());
+
+      if (!hasTargetClass && !hasTargetSession && !hasTargetTerm && !hasTargetDept && !hasNewTitle) {
+        return res.status(400).json({
+          error: 'NO_CHANGES_SPECIFIED',
+          message: 'Select at least one new Class/Level, Session, Term/Semester, Department, or Title to apply.',
+        });
+      }
+
+      // Verify tenant ownership of every target entity
+      let targetClass: any = null;
+      if (hasTargetClass) {
+        targetClass = await dbGet(
+          `SELECT id, name FROM classes WHERE id = $1 AND school_id = $2 LIMIT 1`,
+          `SELECT id, name FROM classes WHERE id = ? AND school_id = ? LIMIT 1`,
+          [String(target_class_id).trim(), schoolId]
+        );
+        if (!targetClass) {
+          return res.status(404).json({ error: 'CLASS_NOT_FOUND', message: 'Selected target class/level was not found.' });
+        }
+      }
+
+      let targetSession: any = null;
+      if (hasTargetSession) {
+        targetSession = await dbGet(
+          `SELECT id, name FROM academic_sessions WHERE id = $1 AND school_id = $2 LIMIT 1`,
+          `SELECT id, name FROM academic_sessions WHERE id = ? AND school_id = ? LIMIT 1`,
+          [String(target_academic_session_id).trim(), schoolId]
+        );
+        if (!targetSession) {
+          return res.status(404).json({ error: 'SESSION_NOT_FOUND', message: 'Selected target academic session was not found.' });
+        }
+      }
+
+      let targetTerm: any = null;
+      if (hasTargetTerm) {
+        targetTerm = await dbGet(
+          `SELECT id, name, academic_session_id FROM terms WHERE id = $1 AND school_id = $2 LIMIT 1`,
+          `SELECT id, name, academic_session_id FROM terms WHERE id = ? AND school_id = ? LIMIT 1`,
+          [String(target_term_id).trim(), schoolId]
+        );
+        if (!targetTerm) {
+          return res.status(404).json({ error: 'TERM_NOT_FOUND', message: 'Selected target term/semester was not found.' });
+        }
+        if (targetSession && targetTerm.academic_session_id && targetTerm.academic_session_id !== targetSession.id) {
+          return res.status(400).json({
+            error: 'TERM_SESSION_MISMATCH',
+            message: 'The selected term/semester does not belong to the selected target academic session.',
+          });
+        }
+        if (!targetSession && targetTerm.academic_session_id) {
+          targetSession = await dbGet(
+            `SELECT id, name FROM academic_sessions WHERE id = $1 AND school_id = $2 LIMIT 1`,
+            `SELECT id, name FROM academic_sessions WHERE id = ? AND school_id = ? LIMIT 1`,
+            [targetTerm.academic_session_id, schoolId]
+          );
+        }
+      }
+
+      const cleanDept = hasTargetDept ? String(target_department).trim().slice(0, 120) : null;
+      const cleanTitle = hasNewTitle ? String(new_exam_title).trim().slice(0, 200) : null;
+      const cleanReason = String(reason || 'Corrected mistakenly assigned class/level/session/term').trim().slice(0, 500);
+
+      // Load all targeted examinations belonging to this tenant
+      const examMap = new Map<string, any>();
+      for (const exId of cleanExamIds) {
+        const ex = await dbGet(
+          `SELECT ex.*, c.name as old_class_name, ses.name as old_session_name, t.name as old_term_name
+           FROM examinations ex
+           LEFT JOIN classes c ON ex.class_id = c.id
+           LEFT JOIN academic_sessions ses ON ex.academic_session_id = ses.id
+           LEFT JOIN terms t ON ex.term_id = t.id
+           WHERE ex.id = $1 AND ex.school_id = $2 AND (ex.is_deleted = 0 OR ex.is_deleted IS NULL) LIMIT 1`,
+          `SELECT ex.*, c.name as old_class_name, ses.name as old_session_name, t.name as old_term_name
+           FROM examinations ex
+           LEFT JOIN classes c ON ex.class_id = c.id
+           LEFT JOIN academic_sessions ses ON ex.academic_session_id = ses.id
+           LEFT JOIN terms t ON ex.term_id = t.id
+           WHERE ex.id = ? AND ex.school_id = ? AND (ex.is_deleted = 0 OR ex.is_deleted IS NULL) LIMIT 1`,
+          [exId, schoolId]
+        );
+        if (ex) examMap.set(ex.id, ex);
+      }
+
+      // Collect all targeted student_scores (from examination_ids + explicit score_ids)
+      const scoreById = new Map<string, any>();
+      for (const exId of examMap.keys()) {
+        const rows = await dbAll(
+          `SELECT * FROM student_scores WHERE school_id = $1 AND examination_id = $2`,
+          `SELECT * FROM student_scores WHERE school_id = ? AND examination_id = ?`,
+          [schoolId, exId]
+        );
+        for (const r of rows) scoreById.set(r.id, r);
+      }
+      for (const scId of cleanScoreIds) {
+        if (scoreById.has(scId)) continue;
+        const sc = await dbGet(
+          `SELECT ss.* FROM student_scores ss
+           JOIN examinations ex ON ss.examination_id = ex.id
+           WHERE ss.id = $1 AND ss.school_id = $2 AND (ex.is_deleted = 0 OR ex.is_deleted IS NULL) LIMIT 1`,
+          `SELECT ss.* FROM student_scores ss
+           JOIN examinations ex ON ss.examination_id = ex.id
+           WHERE ss.id = ? AND ss.school_id = ? AND (ex.is_deleted = 0 OR ex.is_deleted IS NULL) LIMIT 1`,
+          [scId, schoolId]
+        );
+        if (sc) scoreById.set(sc.id, sc);
+      }
+
+      const targetedScores = Array.from(scoreById.values());
+      if (targetedScores.length === 0 && examMap.size === 0) {
+        return res.status(404).json({
+          error: 'NO_MATCHING_RECORDS',
+          message: 'No matching examinations or score records were found for your school.',
+        });
+      }
+
+      // Group targeted scores by examination_id
+      const scoresByExam = new Map<string, any[]>();
+      for (const sc of targetedScores) {
+        if (!scoresByExam.has(sc.examination_id)) scoresByExam.set(sc.examination_id, []);
+        scoresByExam.get(sc.examination_id)!.push(sc);
+        if (!examMap.has(sc.examination_id)) {
+          const ex = await dbGet(
+            `SELECT ex.*, c.name as old_class_name, ses.name as old_session_name, t.name as old_term_name
+             FROM examinations ex
+             LEFT JOIN classes c ON ex.class_id = c.id
+             LEFT JOIN academic_sessions ses ON ex.academic_session_id = ses.id
+             LEFT JOIN terms t ON ex.term_id = t.id
+             WHERE ex.id = $1 AND ex.school_id = $2 LIMIT 1`,
+            `SELECT ex.*, c.name as old_class_name, ses.name as old_session_name, t.name as old_term_name
+             FROM examinations ex
+             LEFT JOIN classes c ON ex.class_id = c.id
+             LEFT JOIN academic_sessions ses ON ex.academic_session_id = ses.id
+             LEFT JOIN terms t ON ex.term_id = t.id
+             WHERE ex.id = ? AND ex.school_id = ? LIMIT 1`,
+            [sc.examination_id, schoolId]
+          );
+          if (ex) examMap.set(ex.id, ex);
+        }
+      }
+
+      const touchedTerms = new Map<string, { sessionId: string; termId: string; studentIds: Set<string> }>();
+      const touchedSessions = new Map<string, Set<string>>();
+      const markTouched = (studentId: string, sesId: string | null, tId: string | null) => {
+        if (sesId && tId) {
+          const k = `${sesId}::${tId}`;
+          if (!touchedTerms.has(k)) touchedTerms.set(k, { sessionId: sesId, termId: tId, studentIds: new Set() });
+          touchedTerms.get(k)!.studentIds.add(studentId);
+        }
+        if (sesId) {
+          if (!touchedSessions.has(sesId)) touchedSessions.set(sesId, new Set());
+          touchedSessions.get(sesId)!.add(studentId);
+        }
+      };
+
+      let examsUpdated = 0;
+      let scoresMoved = 0;
+      let registrationsUpdated = 0;
+      let enrollmentHistoryUpdated = 0;
+
+      for (const [examId, ex] of examMap) {
+        const subsetScores = scoresByExam.get(examId) || [];
+        const totalInExamRow = await dbGet(
+          `SELECT COUNT(*) as cnt FROM student_scores WHERE school_id = $1 AND examination_id = $2`,
+          `SELECT COUNT(*) as cnt FROM student_scores WHERE school_id = ? AND examination_id = ?`,
+          [schoolId, examId]
+        );
+        const totalInExam = Number(totalInExamRow?.cnt || 0);
+        const isWholeExam = cleanExamIds.includes(examId) || subsetScores.length >= totalInExam;
+
+        const nextSessionId = targetSession?.id || ex.academic_session_id;
+        // If session changed without explicit targetTerm, pick first matching term in new session (by canonical rank or first term)
+        let nextTermId = targetTerm?.id || ex.term_id;
+        let nextTermName = targetTerm?.name || ex.old_term_name || '';
+        if (targetSession && !targetTerm && nextSessionId !== ex.academic_session_id) {
+          const sesTerms = await dbAll(
+            `SELECT id, name, academic_session_id FROM terms WHERE school_id = $1 AND academic_session_id = $2 ORDER BY name ASC`,
+            `SELECT id, name, academic_session_id FROM terms WHERE school_id = ? AND academic_session_id = ? ORDER BY name ASC`,
+            [schoolId, nextSessionId]
+          );
+          const matchedTerm = findMatchingTermInSession(sesTerms, nextSessionId, ex.old_term_name || '') || sesTerms[0] || null;
+          if (matchedTerm) {
+            nextTermId = matchedTerm.id;
+            nextTermName = matchedTerm.name;
+          }
+        }
+        const nextClassId = targetClass?.id || ex.class_id;
+        const nextDept = cleanDept !== null ? cleanDept : ex.department || null;
+
+        // Build clean updated title (swap old class/session/term labels automatically if present)
+        let computedTitle = cleanTitle || ex.title || 'Examination';
+        if (!cleanTitle) {
+          if (targetClass && ex.old_class_name && ex.old_class_name !== targetClass.name) {
+            computedTitle = computedTitle.split(ex.old_class_name).join(targetClass.name);
+          }
+          if (targetSession && ex.old_session_name && ex.old_session_name !== targetSession.name) {
+            computedTitle = computedTitle.split(ex.old_session_name).join(targetSession.name);
+          }
+          if (nextTermName && ex.old_term_name && ex.old_term_name !== nextTermName) {
+            computedTitle = computedTitle.split(ex.old_term_name).join(nextTermName);
+          }
+        }
+
+        if (isWholeExam) {
+          // Update the examination record directly
+          await dualWrite(
+            `UPDATE examinations
+             SET class_id = $1, academic_session_id = $2, term_id = $3, department = $4, title = $5, updated_at = CURRENT_TIMESTAMP
+             WHERE id = $6 AND school_id = $7`,
+            `UPDATE examinations
+             SET class_id = ?, academic_session_id = ?, term_id = ?, department = ?, title = ?, updated_at = CURRENT_TIMESTAMP
+             WHERE id = ? AND school_id = ?`,
+            [nextClassId || null, nextSessionId || null, nextTermId || null, nextDept, computedTitle, examId, schoolId]
+          );
+          examsUpdated += 1;
+
+          for (const sc of subsetScores) {
+            markTouched(sc.student_id, sc.academic_session_id, sc.term_id);
+            markTouched(sc.student_id, nextSessionId, nextTermId);
+
+            await dualWrite(
+              `UPDATE student_scores
+               SET class_id = $1, academic_session_id = $2, term_id = $3, updated_by = $4, updated_at = CURRENT_TIMESTAMP
+               WHERE id = $5 AND school_id = $6`,
+              `UPDATE student_scores
+               SET class_id = ?, academic_session_id = ?, term_id = ?, updated_by = ?, updated_at = CURRENT_TIMESTAMP
+               WHERE id = ? AND school_id = ?`,
+              [nextClassId || null, nextSessionId || null, nextTermId || null, actorId, sc.id, schoolId]
+            );
+            scoresMoved += 1;
+          }
+        } else {
+          // Partial subset of scores from this exam: move them into a matching destination examination
+          const existingDestExam = await dbGet(
+            `SELECT id FROM examinations
+             WHERE school_id = $1 AND academic_session_id = $2 AND term_id = $3
+               AND COALESCE(class_id, '') = COALESCE($4, '')
+               AND LOWER(TRIM(COALESCE(department, ''))) = LOWER(TRIM(COALESCE($5, '')))
+               AND (is_deleted = 0 OR is_deleted IS NULL) AND id != $6
+             ORDER BY created_at DESC LIMIT 1`,
+            `SELECT id FROM examinations
+             WHERE school_id = ? AND academic_session_id = ? AND term_id = ?
+               AND COALESCE(class_id, '') = COALESCE(?, '')
+               AND LOWER(TRIM(COALESCE(department, ''))) = LOWER(TRIM(COALESCE(?, '')))
+               AND (is_deleted = 0 OR is_deleted IS NULL) AND id != ?
+             ORDER BY created_at DESC LIMIT 1`,
+            [schoolId, nextSessionId || '', nextTermId || '', nextClassId || '', nextDept || '', examId]
+          );
+
+          let destExamId = existingDestExam?.id || null;
+          if (!destExamId) {
+            destExamId = newId('exm');
+            const autoDestTitle =
+              cleanTitle ||
+              [targetSession?.name || ex.old_session_name, nextTermName, targetClass?.name || ex.old_class_name, nextDept ? `(${nextDept})` : null, 'Results']
+                .filter(Boolean)
+                .join(' ');
+            await dualWrite(
+              `INSERT INTO examinations (
+                 id, school_id, academic_session_id, term_id, class_id, department, title, exam_type,
+                 ca_max_score, exam_max_score, total_max_score, status, created_by, published_by, published_at,
+                 is_deleted, created_at, updated_at
+               ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,${ex.status === 'PUBLISHED' ? 'CURRENT_TIMESTAMP' : 'NULL'},0,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)`,
+              `INSERT INTO examinations (
+                 id, school_id, academic_session_id, term_id, class_id, department, title, exam_type,
+                 ca_max_score, exam_max_score, total_max_score, status, created_by, published_by, published_at,
+                 is_deleted, created_at, updated_at
+               ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,${ex.status === 'PUBLISHED' ? 'CURRENT_TIMESTAMP' : 'NULL'},0,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)`,
+              [
+                destExamId,
+                schoolId,
+                nextSessionId || null,
+                nextTermId || null,
+                nextClassId || null,
+                nextDept,
+                autoDestTitle,
+                ex.exam_type || 'END_OF_TERM',
+                ex.ca_max_score ?? 40,
+                ex.exam_max_score ?? 60,
+                ex.total_max_score ?? 100,
+                ex.status || 'DRAFT',
+                actorId,
+                ex.status === 'PUBLISHED' ? actorId : null,
+              ]
+            );
+            examsUpdated += 1;
+          }
+
+          for (const sc of subsetScores) {
+            markTouched(sc.student_id, sc.academic_session_id, sc.term_id);
+            markTouched(sc.student_id, nextSessionId, nextTermId);
+
+            // Prevent UNIQUE (examination_id, student_id, subject_id) conflict in destination exam
+            await dualWrite(
+              `DELETE FROM student_scores WHERE school_id = $1 AND examination_id = $2 AND student_id = $3 AND subject_id = $4 AND id != $5`,
+              `DELETE FROM student_scores WHERE school_id = ? AND examination_id = ? AND student_id = ? AND subject_id = ? AND id != ?`,
+              [schoolId, destExamId, sc.student_id, sc.subject_id, sc.id]
+            );
+            await dualWrite(
+              `UPDATE student_scores
+               SET examination_id = $1, class_id = $2, academic_session_id = $3, term_id = $4, updated_by = $5, updated_at = CURRENT_TIMESTAMP
+               WHERE id = $6 AND school_id = $7`,
+              `UPDATE student_scores
+               SET examination_id = ?, class_id = ?, academic_session_id = ?, term_id = ?, updated_by = ?, updated_at = CURRENT_TIMESTAMP
+               WHERE id = ? AND school_id = ?`,
+              [destExamId, nextClassId || null, nextSessionId || null, nextTermId || null, actorId, sc.id, schoolId]
+            );
+            scoresMoved += 1;
+          }
+
+          // If source exam now has 0 scores left, soft-delete it
+          const remSrc = await dbGet(
+            `SELECT COUNT(*) as cnt FROM student_scores WHERE school_id = $1 AND examination_id = $2`,
+            `SELECT COUNT(*) as cnt FROM student_scores WHERE school_id = ? AND examination_id = ?`,
+            [schoolId, examId]
+          );
+          if (Number(remSrc?.cnt || 0) === 0) {
+            await dualWrite(
+              `UPDATE examinations SET is_deleted = 1, updated_at = CURRENT_TIMESTAMP WHERE id = $1 AND school_id = $2`,
+              `UPDATE examinations SET is_deleted = 1, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND school_id = ?`,
+              [examId, schoolId]
+            );
+          }
+        }
+
+        // Update matching student_course_registrations & student_enrollment_history for moved scores
+        const seenEnrKeys = new Set<string>();
+        for (const sc of subsetScores) {
+          const oldSesId = sc.academic_session_id;
+          const oldTermId = sc.term_id;
+          const oldClassId = sc.class_id || ex.class_id;
+
+          if (oldSesId && oldTermId && nextSessionId && nextTermId) {
+            const oldReg = await dbGet(
+              `SELECT id FROM student_course_registrations
+               WHERE school_id = $1 AND student_id = $2 AND academic_session_id = $3 AND term_id = $4 AND subject_id = $5 LIMIT 1`,
+              `SELECT id FROM student_course_registrations
+               WHERE school_id = ? AND student_id = ? AND academic_session_id = ? AND term_id = ? AND subject_id = ? LIMIT 1`,
+              [schoolId, sc.student_id, oldSesId, oldTermId, sc.subject_id]
+            );
+            if (oldReg) {
+              if (oldSesId === nextSessionId && oldTermId === nextTermId) {
+                await dualWrite(
+                  `UPDATE student_course_registrations SET class_id = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2 AND school_id = $3`,
+                  `UPDATE student_course_registrations SET class_id = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND school_id = ?`,
+                  [nextClassId || null, oldReg.id, schoolId]
+                );
+              } else {
+                const dupDestReg = await dbGet(
+                  `SELECT id FROM student_course_registrations
+                   WHERE school_id = $1 AND student_id = $2 AND academic_session_id = $3 AND term_id = $4 AND subject_id = $5 AND id != $6 LIMIT 1`,
+                  `SELECT id FROM student_course_registrations
+                   WHERE school_id = ? AND student_id = ? AND academic_session_id = ? AND term_id = ? AND subject_id = ? AND id != ? LIMIT 1`,
+                  [schoolId, sc.student_id, nextSessionId, nextTermId, sc.subject_id, oldReg.id]
+                );
+                if (dupDestReg) {
+                  await dualWrite(
+                    `UPDATE student_course_registrations SET class_id = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2 AND school_id = $3`,
+                    `UPDATE student_course_registrations SET class_id = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND school_id = ?`,
+                    [nextClassId || null, dupDestReg.id, schoolId]
+                  );
+                  await dualWrite(
+                    `DELETE FROM student_course_registrations WHERE id = $1 AND school_id = $2`,
+                    `DELETE FROM student_course_registrations WHERE id = ? AND school_id = ?`,
+                    [oldReg.id, schoolId]
+                  );
+                } else {
+                  await dualWrite(
+                    `UPDATE student_course_registrations
+                     SET academic_session_id = $1, term_id = $2, class_id = $3, updated_at = CURRENT_TIMESTAMP
+                     WHERE id = $4 AND school_id = $5`,
+                    `UPDATE student_course_registrations
+                     SET academic_session_id = ?, term_id = ?, class_id = ?, updated_at = CURRENT_TIMESTAMP
+                     WHERE id = ? AND school_id = ?`,
+                    [nextSessionId, nextTermId, nextClassId || null, oldReg.id, schoolId]
+                  );
+                }
+              }
+              registrationsUpdated += 1;
+            }
+          }
+
+          const enrKey = `${sc.student_id}::${oldSesId || ''}::${oldClassId || ''}`;
+          if (!seenEnrKeys.has(enrKey) && oldSesId && oldClassId) {
+            seenEnrKeys.add(enrKey);
+            const enrRow = await dbGet(
+              `SELECT id, session_name, class_name FROM student_enrollment_history
+               WHERE school_id = $1 AND student_id = $2 AND academic_session_id = $3 AND class_id = $4 LIMIT 1`,
+              `SELECT id, session_name, class_name FROM student_enrollment_history
+               WHERE school_id = ? AND student_id = ? AND academic_session_id = ? AND class_id = ? LIMIT 1`,
+              [schoolId, sc.student_id, oldSesId, oldClassId]
+            );
+            if (enrRow) {
+              const newSesName = targetSession?.name || enrRow.session_name;
+              const newClsName = targetClass?.name || enrRow.class_name;
+              await dualWrite(
+                `UPDATE student_enrollment_history
+                 SET academic_session_id = $1, session_name = $2, class_id = $3, class_name = $4,
+                     class_arm_name = COALESCE($5, class_arm_name)
+                 WHERE id = $6 AND school_id = $7`,
+                `UPDATE student_enrollment_history
+                 SET academic_session_id = ?, session_name = ?, class_id = ?, class_name = ?,
+                     class_arm_name = COALESCE(?, class_arm_name)
+                 WHERE id = ? AND school_id = ?`,
+                [nextSessionId || oldSesId, newSesName, nextClassId || oldClassId, newClsName, cleanDept, enrRow.id, schoolId]
+              );
+              enrollmentHistoryUpdated += 1;
+            }
+          }
+        }
+      }
+
+      const reportSync = await syncAffectedReportCards(schoolId, actorId, touchedTerms, touchedSessions);
+
+      logAudit({
+        actorId,
+        actorEmail: req.user?.email,
+        schoolId,
+        action: 'BULK_REASSIGN_RESULTS',
+        entity: 'STUDENT_SCORES',
+        metadata: {
+          examsUpdated,
+          scoresMoved,
+          registrationsUpdated,
+          enrollmentHistoryUpdated,
+          targetClass: targetClass?.name || null,
+          targetSession: targetSession?.name || null,
+          targetTerm: targetTerm?.name || null,
+          targetDepartment: cleanDept,
+          reason: cleanReason,
+          ...reportSync,
+        },
+      });
+
+      const destSummary = [targetClass?.name, targetSession?.name, targetTerm?.name, cleanDept].filter(Boolean).join(' · ');
+      return res.json({
+        success: true,
+        message: `Reassigned ${scoresMoved} score(s) across ${examsUpdated} examination batch(es)${destSummary ? ` to ${destSummary}` : ''}. Report cards and records have been synchronized.`,
+        summary: {
+          examsUpdated,
+          scoresMoved,
+          registrationsUpdated,
+          enrollmentHistoryUpdated,
+          ...reportSync,
+        },
+      });
+    } catch (err: any) {
+      console.error('[Bulk Reassign Results Error]', err);
+      return res.status(500).json({
+        error: 'BULK_REASSIGN_FAILED',
+        message: safeClientError(err, 'Failed to reassign results.'),
+      });
+    }
+  }
+);
+
+// 6c. POST /api/v1/school/results/bulk-edit
+// Bulk inline edit of CA/Exam/Total scores & remarks (supports both Draft and Published with audit logs + report card refresh).
+courseAndBacklogRouter.post(
+  '/results/bulk-edit',
+  requireAuth,
+  requireTenant,
+  requireRole(ADMIN_ONLY_ROLES),
+  async (req: AuthenticatedRequest, res) => {
+    try {
+      const schoolId = req.targetSchoolId!;
+      const actorId = req.user?.id || null;
+      const actorEmail = req.user?.email || null;
+      const { edits, reason } = req.body || {};
+
+      if (!Array.isArray(edits) || edits.length === 0) {
+        return res.status(400).json({ error: 'EMPTY_EDITS', message: 'Provide at least one score edit to save.' });
+      }
+      if (edits.length > 500) {
+        return res.status(400).json({ error: 'TOO_MANY_EDITS', message: 'Maximum 500 score edits per batch.' });
+      }
+
+      const cleanReason = String(reason || 'Admin score correction').trim().slice(0, 500) || 'Admin score correction';
+      const settings: any = await getSchoolAcademicSettings(schoolId);
+      let gradingScale: any[] = [];
+      try {
+        gradingScale = Array.isArray(settings.grading_scale)
+          ? settings.grading_scale
+          : JSON.parse(settings.grading_scale_json || '[]');
+      } catch {
+        gradingScale = [];
+      }
+
+      const touchedTerms = new Map<string, { sessionId: string; termId: string; studentIds: Set<string> }>();
+      const touchedSessions = new Map<string, Set<string>>();
+
+      let updatedCount = 0;
+      let correctionLogsCreated = 0;
+
+      for (const item of edits) {
+        const scoreId = String(item?.score_id || item?.id || '').trim();
+        if (!scoreId) continue;
+
+        const existing = await dbGet(
+          `SELECT ss.*, ex.status as exam_status, ex.total_max_score, ex.ca_max_score, ex.exam_max_score
+           FROM student_scores ss
+           JOIN examinations ex ON ss.examination_id = ex.id
+           WHERE ss.id = $1 AND ss.school_id = $2 AND (ex.is_deleted = 0 OR ex.is_deleted IS NULL) LIMIT 1`,
+          `SELECT ss.*, ex.status as exam_status, ex.total_max_score, ex.ca_max_score, ex.exam_max_score
+           FROM student_scores ss
+           JOIN examinations ex ON ss.examination_id = ex.id
+           WHERE ss.id = ? AND ss.school_id = ? AND (ex.is_deleted = 0 OR ex.is_deleted IS NULL) LIMIT 1`,
+          [scoreId, schoolId]
+        );
+        if (!existing) continue;
+
+        const parseOpt = (v: any, fallback: number | null) => {
+          if (v === undefined) return fallback;
+          if (v === null || String(v).trim() === '') return null;
+          const n = Number(v);
+          return Number.isFinite(n) ? n : NaN;
+        };
+
+        const newCa = parseOpt(item.ca_score, existing.ca_score !== null && existing.ca_score !== undefined ? Number(existing.ca_score) : null);
+        const newExam = parseOpt(item.exam_score, existing.exam_score !== null && existing.exam_score !== undefined ? Number(existing.exam_score) : null);
+        const explicitTotal = item.total_score !== undefined ? parseOpt(item.total_score, null) : undefined;
+
+        if (Number.isNaN(newCa) || Number.isNaN(newExam) || Number.isNaN(explicitTotal)) {
+          return res.status(400).json({ error: 'INVALID_SCORE', message: 'All edited scores must be valid numbers.' });
+        }
+
+        const maxTotal = Number(existing.total_max_score) > 0 ? Number(existing.total_max_score) : 100;
+        if ((newCa !== null && (newCa < 0 || newCa > maxTotal)) || (newExam !== null && (newExam < 0 || newExam > maxTotal))) {
+          return res.status(400).json({ error: 'SCORE_OUT_OF_RANGE', message: `Scores must be between 0 and ${maxTotal}.` });
+        }
+
+        const newTotal =
+          explicitTotal !== undefined && explicitTotal !== null
+            ? Math.round(explicitTotal * 100) / 100
+            : Math.round((Number(newCa || 0) + Number(newExam || 0)) * 100) / 100;
+
+        if (newTotal < 0 || newTotal > maxTotal) {
+          return res.status(400).json({
+            error: 'TOTAL_OUT_OF_RANGE',
+            message: `Total score (${newTotal}) must be between 0 and ${maxTotal}.`,
+          });
+        }
+
+        const { grade: newGrade, remark: newGradeRemark } = computeGrade(newTotal, maxTotal, gradingScale);
+        const newSubjectRemark =
+          item.subject_remark !== undefined
+            ? String(item.subject_remark || '').trim().slice(0, 300) || null
+            : existing.subject_remark;
+
+        // If published, write immutable score_correction_logs entry
+        if ((existing.status === 'PUBLISHED' || existing.exam_status === 'PUBLISHED') && actorId) {
+          await dualWrite(
+            `INSERT INTO score_correction_logs (
+               id, school_id, score_id, examination_id, student_id, subject_id,
+               previous_ca_score, new_ca_score, previous_exam_score, new_exam_score,
+               previous_total, new_total, previous_grade, new_grade,
+               reason, corrected_by, corrected_by_email, created_at
+             ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,CURRENT_TIMESTAMP)`,
+            `INSERT INTO score_correction_logs (
+               id, school_id, score_id, examination_id, student_id, subject_id,
+               previous_ca_score, new_ca_score, previous_exam_score, new_exam_score,
+               previous_total, new_total, previous_grade, new_grade,
+               reason, corrected_by, corrected_by_email, created_at
+             ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)`,
+            [
+              newId('scl'),
+              schoolId,
+              existing.id,
+              existing.examination_id,
+              existing.student_id,
+              existing.subject_id,
+              existing.ca_score ?? null,
+              newCa,
+              existing.exam_score ?? null,
+              newExam,
+              existing.total_score ?? null,
+              newTotal,
+              existing.grade ?? null,
+              newGrade,
+              cleanReason,
+              actorId,
+              actorEmail,
+            ]
+          );
+          correctionLogsCreated += 1;
+        }
+
+        await dualWrite(
+          `UPDATE student_scores
+           SET ca_score = $1, exam_score = $2, total_score = $3, grade = $4, grade_remark = $5,
+               subject_remark = $6, updated_by = $7, updated_at = CURRENT_TIMESTAMP
+           WHERE id = $8 AND school_id = $9`,
+          `UPDATE student_scores
+           SET ca_score = ?, exam_score = ?, total_score = ?, grade = ?, grade_remark = ?,
+               subject_remark = ?, updated_by = ?, updated_at = CURRENT_TIMESTAMP
+           WHERE id = ? AND school_id = ?`,
+          [newCa, newExam, newTotal, newGrade, newGradeRemark, newSubjectRemark, actorId, existing.id, schoolId]
+        );
+        updatedCount += 1;
+
+        if (existing.academic_session_id && existing.term_id) {
+          const k = `${existing.academic_session_id}::${existing.term_id}`;
+          if (!touchedTerms.has(k)) {
+            touchedTerms.set(k, { sessionId: existing.academic_session_id, termId: existing.term_id, studentIds: new Set() });
+          }
+          touchedTerms.get(k)!.studentIds.add(existing.student_id);
+        }
+        if (existing.academic_session_id) {
+          if (!touchedSessions.has(existing.academic_session_id)) {
+            touchedSessions.set(existing.academic_session_id, new Set());
+          }
+          touchedSessions.get(existing.academic_session_id)!.add(existing.student_id);
+        }
+      }
+
+      const reportSync = await syncAffectedReportCards(schoolId, actorId, touchedTerms, touchedSessions);
+
+      logAudit({
+        actorId,
+        actorEmail,
+        schoolId,
+        action: 'BULK_EDIT_RESULTS',
+        entity: 'STUDENT_SCORES',
+        metadata: { updatedCount, correctionLogsCreated, reason: cleanReason, ...reportSync },
+      });
+
+      return res.json({
+        success: true,
+        message: `Updated ${updatedCount} result score(s) and refreshed affected report cards.`,
+        summary: { updatedCount, correctionLogsCreated, ...reportSync },
+      });
+    } catch (err: any) {
+      console.error('[Bulk Edit Results Error]', err);
+      return res.status(500).json({
+        error: 'BULK_EDIT_FAILED',
+        message: safeClientError(err, 'Failed to save edited scores.'),
+      });
+    }
+  }
+);
+
+// 6d. POST /api/v1/school/results/bulk-delete
+// Audited bulk deletion of mistakenly uploaded scores and/or whole examination batches (Draft OR Published)
+// with optional cleanup of linked registrations & automatic deletion/recompilation of affected report cards.
+courseAndBacklogRouter.post(
+  '/results/bulk-delete',
+  requireAuth,
+  requireTenant,
+  requireRole(ADMIN_ONLY_ROLES),
+  async (req: AuthenticatedRequest, res) => {
+    try {
+      const schoolId = req.targetSchoolId!;
+      const actorId = req.user?.id || null;
+      const actorEmail = req.user?.email || null;
+      const {
+        score_ids,
+        examination_ids,
+        also_delete_registrations = true,
+        reason,
+      } = req.body || {};
+
+      const cleanScoreIds: string[] = Array.isArray(score_ids)
+        ? Array.from(new Set(score_ids.map((id: any) => String(id || '').trim()).filter(Boolean)))
+        : [];
+      const cleanExamIds: string[] = Array.isArray(examination_ids)
+        ? Array.from(new Set(examination_ids.map((id: any) => String(id || '').trim()).filter(Boolean)))
+        : [];
+
+      if (cleanScoreIds.length === 0 && cleanExamIds.length === 0) {
+        return res.status(400).json({
+          error: 'NOTHING_SELECTED',
+          message: 'Select at least one examination batch or score row to delete.',
+        });
+      }
+
+      const cleanReason = String(reason || '').trim().slice(0, 500);
+
+      // Verify all targeted exams belong to this school
+      const validExamIds: string[] = [];
+      let includesPublished = false;
+      for (const exId of cleanExamIds) {
+        const ex = await dbGet(
+          `SELECT id, status FROM examinations WHERE id = $1 AND school_id = $2 AND (is_deleted = 0 OR is_deleted IS NULL) LIMIT 1`,
+          `SELECT id, status FROM examinations WHERE id = ? AND school_id = ? AND (is_deleted = 0 OR is_deleted IS NULL) LIMIT 1`,
+          [exId, schoolId]
+        );
+        if (ex) {
+          validExamIds.push(ex.id);
+          if (ex.status === 'PUBLISHED') includesPublished = true;
+        }
+      }
+
+      // Collect all targeted student_scores
+      const scoreMap = new Map<string, any>();
+      for (const exId of validExamIds) {
+        const rows = await dbAll(
+          `SELECT * FROM student_scores WHERE school_id = $1 AND examination_id = $2`,
+          `SELECT * FROM student_scores WHERE school_id = ? AND examination_id = ?`,
+          [schoolId, exId]
+        );
+        for (const r of rows) {
+          scoreMap.set(r.id, r);
+          if (r.status === 'PUBLISHED') includesPublished = true;
+        }
+      }
+      for (const scId of cleanScoreIds) {
+        if (scoreMap.has(scId)) continue;
+        const sc = await dbGet(
+          `SELECT * FROM student_scores WHERE id = $1 AND school_id = $2 LIMIT 1`,
+          `SELECT * FROM student_scores WHERE id = ? AND school_id = ? LIMIT 1`,
+          [scId, schoolId]
+        );
+        if (sc) {
+          scoreMap.set(sc.id, sc);
+          if (sc.status === 'PUBLISHED') includesPublished = true;
+        }
+      }
+
+      if (scoreMap.size === 0 && validExamIds.length === 0) {
+        return res.status(404).json({
+          error: 'NO_MATCHING_RECORDS',
+          message: 'No matching examinations or score rows were found to delete.',
+        });
+      }
+
+      if (includesPublished && cleanReason.length < 3) {
+        return res.status(400).json({
+          error: 'REASON_REQUIRED',
+          message: 'Provide a short audit reason (at least 3 characters) when deleting published results.',
+        });
+      }
+
+      const touchedTerms = new Map<string, { sessionId: string; termId: string; studentIds: Set<string> }>();
+      const touchedSessions = new Map<string, Set<string>>();
+      const touchedExamIds = new Set<string>(validExamIds);
+      const enrollmentCleanupCandidates = new Map<string, { studentId: string; sessionId: string; classId: string }>();
+
+      let scoresDeleted = 0;
+      let registrationsDeleted = 0;
+      let examsDeleted = 0;
+
+      for (const sc of scoreMap.values()) {
+        touchedExamIds.add(sc.examination_id);
+        if (sc.academic_session_id && sc.term_id) {
+          const k = `${sc.academic_session_id}::${sc.term_id}`;
+          if (!touchedTerms.has(k)) {
+            touchedTerms.set(k, { sessionId: sc.academic_session_id, termId: sc.term_id, studentIds: new Set() });
+          }
+          touchedTerms.get(k)!.studentIds.add(sc.student_id);
+        }
+        if (sc.academic_session_id) {
+          if (!touchedSessions.has(sc.academic_session_id)) {
+            touchedSessions.set(sc.academic_session_id, new Set());
+          }
+          touchedSessions.get(sc.academic_session_id)!.add(sc.student_id);
+          if (sc.class_id) {
+            enrollmentCleanupCandidates.set(`${sc.student_id}::${sc.academic_session_id}::${sc.class_id}`, {
+              studentId: sc.student_id,
+              sessionId: sc.academic_session_id,
+              classId: sc.class_id,
+            });
+          }
+        }
+
+        await dualWrite(
+          `DELETE FROM student_scores WHERE id = $1 AND school_id = $2`,
+          `DELETE FROM student_scores WHERE id = ? AND school_id = ?`,
+          [sc.id, schoolId]
+        );
+        scoresDeleted += 1;
+
+        if (also_delete_registrations && sc.academic_session_id && sc.term_id) {
+          // Only delete registration if no other remaining score uses this (student, session, term, subject)
+          const otherSc = await dbGet(
+            `SELECT id FROM student_scores
+             WHERE school_id = $1 AND student_id = $2 AND academic_session_id = $3 AND term_id = $4 AND subject_id = $5 LIMIT 1`,
+            `SELECT id FROM student_scores
+             WHERE school_id = ? AND student_id = ? AND academic_session_id = ? AND term_id = ? AND subject_id = ? LIMIT 1`,
+            [schoolId, sc.student_id, sc.academic_session_id, sc.term_id, sc.subject_id]
+          );
+          if (!otherSc) {
+            const existingReg = await dbGet(
+              `SELECT id FROM student_course_registrations
+               WHERE school_id = $1 AND student_id = $2 AND academic_session_id = $3 AND term_id = $4 AND subject_id = $5 LIMIT 1`,
+              `SELECT id FROM student_course_registrations
+               WHERE school_id = ? AND student_id = ? AND academic_session_id = ? AND term_id = ? AND subject_id = ? LIMIT 1`,
+              [schoolId, sc.student_id, sc.academic_session_id, sc.term_id, sc.subject_id]
+            );
+            if (existingReg) {
+              await dualWrite(
+                `DELETE FROM student_course_registrations WHERE id = $1 AND school_id = $2`,
+                `DELETE FROM student_course_registrations WHERE id = ? AND school_id = ?`,
+                [existingReg.id, schoolId]
+              );
+              registrationsDeleted += 1;
+            }
+          }
+        }
+      }
+
+      // Clean up orphaned HISTORICAL_BACKLOG enrollment history markers where student now has 0 scores & 0 registrations for that (session, class)
+      for (const cand of enrollmentCleanupCandidates.values()) {
+        const remSc = await dbGet(
+          `SELECT COUNT(*) as cnt FROM student_scores WHERE school_id = $1 AND student_id = $2 AND academic_session_id = $3 AND class_id = $4`,
+          `SELECT COUNT(*) as cnt FROM student_scores WHERE school_id = ? AND student_id = ? AND academic_session_id = ? AND class_id = ?`,
+          [schoolId, cand.studentId, cand.sessionId, cand.classId]
+        );
+        const remReg = await dbGet(
+          `SELECT COUNT(*) as cnt FROM student_course_registrations WHERE school_id = $1 AND student_id = $2 AND academic_session_id = $3 AND class_id = $4 AND status != 'DROPPED'`,
+          `SELECT COUNT(*) as cnt FROM student_course_registrations WHERE school_id = ? AND student_id = ? AND academic_session_id = ? AND class_id = ? AND status != 'DROPPED'`,
+          [schoolId, cand.studentId, cand.sessionId, cand.classId]
+        );
+        if (Number(remSc?.cnt || 0) === 0 && Number(remReg?.cnt || 0) === 0) {
+          await dualWrite(
+            `DELETE FROM student_enrollment_history
+             WHERE school_id = $1 AND student_id = $2 AND academic_session_id = $3 AND class_id = $4 AND outcome = 'HISTORICAL_BACKLOG'`,
+            `DELETE FROM student_enrollment_history
+             WHERE school_id = ? AND student_id = ? AND academic_session_id = ? AND class_id = ? AND outcome = 'HISTORICAL_BACKLOG'`,
+            [schoolId, cand.studentId, cand.sessionId, cand.classId]
+          );
+        }
+      }
+
+      // Soft-delete explicitly selected examinations AND any touched exam that now has 0 remaining scores
+      for (const exId of touchedExamIds) {
+        const explicitlySelected = validExamIds.includes(exId);
+        let shouldDeleteExam = explicitlySelected;
+        if (!shouldDeleteExam) {
+          const rem = await dbGet(
+            `SELECT COUNT(*) as cnt FROM student_scores WHERE school_id = $1 AND examination_id = $2`,
+            `SELECT COUNT(*) as cnt FROM student_scores WHERE school_id = ? AND examination_id = ?`,
+            [schoolId, exId]
+          );
+          shouldDeleteExam = Number(rem?.cnt || 0) === 0;
+        }
+        if (shouldDeleteExam) {
+          await dualWrite(
+            `UPDATE examinations SET is_deleted = 1, updated_at = CURRENT_TIMESTAMP WHERE id = $1 AND school_id = $2`,
+            `UPDATE examinations SET is_deleted = 1, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND school_id = ?`,
+            [exId, schoolId]
+          );
+          examsDeleted += 1;
+        }
+      }
+
+      const reportSync = await syncAffectedReportCards(schoolId, actorId, touchedTerms, touchedSessions);
+
+      logAudit({
+        actorId,
+        actorEmail,
+        schoolId,
+        action: 'BULK_DELETE_RESULTS',
+        entity: 'STUDENT_SCORES',
+        metadata: {
+          scoresDeleted,
+          examsDeleted,
+          registrationsDeleted,
+          includesPublished,
+          reason: cleanReason || 'Removed wrongly uploaded results',
+          ...reportSync,
+        },
+      });
+
+      return res.json({
+        success: true,
+        message: `Deleted ${scoresDeleted} score(s) and ${examsDeleted} examination batch(es). Affected report cards have been cleaned up and recalculated.`,
+        summary: {
+          scoresDeleted,
+          examsDeleted,
+          registrationsDeleted,
+          ...reportSync,
+        },
+      });
+    } catch (err: any) {
+      console.error('[Bulk Delete Results Error]', err);
+      return res.status(500).json({
+        error: 'BULK_DELETE_FAILED',
+        message: safeClientError(err, 'Failed to bulk delete results.'),
+      });
+    }
+  }
+);
+

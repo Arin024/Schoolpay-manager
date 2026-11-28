@@ -25,6 +25,7 @@ import {
   Download,
   ClipboardPaste,
   ArrowRight,
+  ArrowRightLeft,
   Tags,
 } from 'lucide-react';
 import { api } from '../../services/api.js';
@@ -49,6 +50,7 @@ import { PrintableReportCardModal } from './PrintableReportCardModal.js';
 import { BulkCoursesModal } from './BulkCoursesModal.js';
 import { CourseRegistrationPanel } from './CourseRegistrationPanel.js';
 import { HistoricalBacklogImportModal } from './HistoricalBacklogImportModal.js';
+import { BulkResultsManagerModal } from './BulkResultsManagerModal.js';
 import { ExamBroadsheetModal } from './ExamBroadsheetModal.js';
 import { resolveInstitutionProfile } from '../../utils/institutionMode.js';
 import {
@@ -106,7 +108,23 @@ export const SchoolPerformanceView: React.FC<SchoolPerformanceViewProps> = ({ re
     sessionId?: string;
   }>({});
   const [historicalBacklogOpen, setHistoricalBacklogOpen] = useState(false);
+  const [resultsManagerOpen, setResultsManagerOpen] = useState(false);
+  const [resultsManagerTab, setResultsManagerTab] = useState<'BATCHES' | 'SCORES'>('BATCHES');
+  const [resultsManagerExamIds, setResultsManagerExamIds] = useState<string[]>([]);
+  const [resultsManagerAction, setResultsManagerAction] = useState<'REASSIGN' | 'DELETE' | null>(null);
+  const [selectedExamsForBulk, setSelectedExamsForBulk] = useState<string[]>([]);
   const [broadsheetExamId, setBroadsheetExamId] = useState<string | null>(null);
+
+  const openResultsManager = (opts?: {
+    tab?: 'BATCHES' | 'SCORES';
+    examIds?: string[];
+    action?: 'REASSIGN' | 'DELETE' | null;
+  }) => {
+    setResultsManagerTab(opts?.tab || 'BATCHES');
+    setResultsManagerExamIds(opts?.examIds || []);
+    setResultsManagerAction(opts?.action ?? null);
+    setResultsManagerOpen(true);
+  };
   const [inlineUnitSavingId, setInlineUnitSavingId] = useState<string | null>(null);
   const [inlineSemSavingId, setInlineSemSavingId] = useState<string | null>(null);
   const [subjectFilterClassId, setSubjectFilterClassId] = useState('');
@@ -2086,6 +2104,14 @@ export const SchoolPerformanceView: React.FC<SchoolPerformanceViewProps> = ({ re
                     </button>
                     <button
                       type="button"
+                      onClick={() => openResultsManager({ tab: 'BATCHES' })}
+                      className="px-3.5 py-2 bg-white hover:bg-slate-50 text-slate-800 border border-slate-300 rounded-xl text-xs font-bold inline-flex items-center gap-1.5 cursor-pointer whitespace-nowrap"
+                    >
+                      <ArrowRightLeft className="w-3.5 h-3.5 text-slate-600" />
+                      <span>Manage / Fix Results</span>
+                    </button>
+                    <button
+                      type="button"
                       disabled={openingFromReg || !examForm.academic_session_id || !examForm.term_id}
                       onClick={() =>
                         handleLaunchGradingFromRegistrations({
@@ -2113,6 +2139,39 @@ export const SchoolPerformanceView: React.FC<SchoolPerformanceViewProps> = ({ re
               </div>
             </div>
 
+            {!readOnly && selectedExamsForBulk.length > 0 && (
+              <div className="px-4 py-2.5 rounded-xl bg-slate-900 text-white flex flex-wrap items-center justify-between gap-2 text-xs">
+                <span className="font-semibold tabular-nums">
+                  {selectedExamsForBulk.length} examination batch(es) selected
+                </span>
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => openResultsManager({ tab: 'BATCHES', examIds: selectedExamsForBulk, action: 'REASSIGN' })}
+                    className="px-3 py-1.5 bg-white hover:bg-slate-100 text-slate-900 rounded-lg font-bold inline-flex items-center gap-1.5 cursor-pointer whitespace-nowrap"
+                  >
+                    <ArrowRightLeft className="w-3.5 h-3.5 text-emerald-700" />
+                    <span>Fix {instLabels.classLabel} / Session ({selectedExamsForBulk.length})</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => openResultsManager({ tab: 'BATCHES', examIds: selectedExamsForBulk, action: 'DELETE' })}
+                    className="px-3 py-1.5 bg-rose-600 hover:bg-rose-700 text-white rounded-lg font-bold inline-flex items-center gap-1.5 cursor-pointer whitespace-nowrap"
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                    <span>Bulk Delete ({selectedExamsForBulk.length})</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setSelectedExamsForBulk([])}
+                    className="px-2.5 py-1.5 text-slate-300 hover:text-white font-medium cursor-pointer"
+                  >
+                    Clear
+                  </button>
+                </div>
+              </div>
+            )}
+
             {examsLoading ? (
               <p className="py-8 text-center text-xs text-slate-400">Loading examinations...</p>
             ) : exams.length === 0 ? (
@@ -2122,6 +2181,21 @@ export const SchoolPerformanceView: React.FC<SchoolPerformanceViewProps> = ({ re
                 <table className="w-full text-left text-xs">
                   <thead>
                     <tr className="border-b border-slate-200 text-slate-500 bg-slate-50/70">
+                      {!readOnly && (
+                        <th className="py-2.5 px-3 w-9">
+                          <input
+                            type="checkbox"
+                            aria-label="Select all examinations"
+                            checked={exams.length > 0 && selectedExamsForBulk.length === exams.length}
+                            onChange={() =>
+                              setSelectedExamsForBulk(
+                                selectedExamsForBulk.length === exams.length ? [] : exams.map((e) => e.id)
+                              )
+                            }
+                            className="w-4 h-4 rounded border-slate-300 text-emerald-600"
+                          />
+                        </th>
+                      )}
                       <th className="py-2.5 px-3">Examination</th>
                       <th className="py-2.5 px-3">Session / {instLabels.cycle}</th>
                       <th className="py-2.5 px-3">{instLabels.classLabel} / Department</th>
@@ -2136,6 +2210,21 @@ export const SchoolPerformanceView: React.FC<SchoolPerformanceViewProps> = ({ re
                         key={ex.id}
                         className={`hover:bg-slate-50/60 ${selectedExam?.id === ex.id ? 'bg-emerald-50/40' : ''}`}
                       >
+                        {!readOnly && (
+                          <td className="py-2.5 px-3">
+                            <input
+                              type="checkbox"
+                              aria-label={`Select examination ${ex.title}`}
+                              checked={selectedExamsForBulk.includes(ex.id)}
+                              onChange={() =>
+                                setSelectedExamsForBulk((prev) =>
+                                  prev.includes(ex.id) ? prev.filter((id) => id !== ex.id) : [...prev, ex.id]
+                                )
+                              }
+                              className="w-4 h-4 rounded border-slate-300 text-emerald-600"
+                            />
+                          </td>
+                        )}
                         <td className="py-2.5 px-3 font-semibold text-slate-900">
                           {ex.title}
                           <span className="block text-[11px] font-normal text-slate-500">
@@ -2148,9 +2237,7 @@ export const SchoolPerformanceView: React.FC<SchoolPerformanceViewProps> = ({ re
                         <td className="py-2.5 px-3 text-slate-600">
                           <span>{ex.class_name || `All ${instLabels.classPlural}`}</span>
                           {ex.department && (
-                            <span className="ml-1.5 inline-flex px-1.5 py-0.5 rounded bg-slate-100 border border-slate-200 text-[10px] font-semibold text-slate-700">
-                              {ex.department}
-                            </span>
+                            <span className="ml-1.5 text-slate-500">· {ex.department}</span>
                           )}
                         </td>
                         <td className="py-2.5 px-3 text-right tabular-nums text-slate-700">
@@ -2185,6 +2272,28 @@ export const SchoolPerformanceView: React.FC<SchoolPerformanceViewProps> = ({ re
                               <FileSpreadsheet className="w-3 h-3 text-emerald-700" />
                               <span>Broadsheet</span>
                             </button>
+                            {!readOnly && (
+                              <>
+                                <button
+                                  type="button"
+                                  onClick={() => openResultsManager({ tab: 'BATCHES', examIds: [ex.id], action: 'REASSIGN' })}
+                                  className="px-2 py-1 rounded-lg bg-white hover:bg-slate-100 text-slate-700 border border-slate-300 text-[11px] font-semibold inline-flex items-center gap-1 cursor-pointer"
+                                  title={`Reassign ${instLabels.classLabel}, Session, or ${instLabels.cycle}`}
+                                >
+                                  <ArrowRightLeft className="w-3 h-3 text-slate-500" />
+                                  <span>Fix {instLabels.classLabel}</span>
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => openResultsManager({ tab: 'BATCHES', examIds: [ex.id], action: 'DELETE' })}
+                                  className="px-2 py-1 rounded-lg bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 text-[11px] font-semibold inline-flex items-center gap-1 cursor-pointer"
+                                  title="Delete this examination batch and its scores"
+                                >
+                                  <Trash2 className="w-3 h-3" />
+                                  <span>Delete</span>
+                                </button>
+                              </>
+                            )}
                             {!readOnly && ex.status === 'DRAFT' && (
                               <button
                                 type="button"
@@ -2963,6 +3072,14 @@ export const SchoolPerformanceView: React.FC<SchoolPerformanceViewProps> = ({ re
                   </button>
                   <button
                     type="button"
+                    onClick={() => openResultsManager({ tab: 'BATCHES' })}
+                    className="px-3.5 py-2 bg-white hover:bg-slate-50 text-slate-800 border border-slate-300 rounded-xl text-xs font-bold inline-flex items-center gap-1.5 cursor-pointer whitespace-nowrap"
+                  >
+                    <ArrowRightLeft className="w-3.5 h-3.5 text-slate-600" />
+                    <span>Manage / Fix Results</span>
+                  </button>
+                  <button
+                    type="button"
                     disabled={generatingRc}
                     onClick={handleGenerateReportCards}
                     className="px-4 py-2 bg-slate-900 hover:bg-slate-800 text-white rounded-xl text-xs font-bold cursor-pointer disabled:opacity-50 whitespace-nowrap"
@@ -2989,6 +3106,14 @@ export const SchoolPerformanceView: React.FC<SchoolPerformanceViewProps> = ({ re
                   >
                     <Upload className="w-3.5 h-3.5 text-emerald-700" />
                     <span>Bulk Upload Results</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => openResultsManager({ tab: 'BATCHES' })}
+                    className="px-3.5 py-2 bg-white hover:bg-slate-50 text-slate-800 border border-slate-300 rounded-xl text-xs font-bold inline-flex items-center gap-1.5 cursor-pointer whitespace-nowrap"
+                  >
+                    <ArrowRightLeft className="w-3.5 h-3.5 text-slate-600" />
+                    <span>Manage / Fix Results</span>
                   </button>
                   <button
                     type="button"
@@ -4011,6 +4136,10 @@ export const SchoolPerformanceView: React.FC<SchoolPerformanceViewProps> = ({ re
           cycleLabel={instLabels.cycle}
           learnerLabel={isTertiary ? 'Student' : 'Learner'}
           onClose={() => setHistoricalBacklogOpen(false)}
+          onOpenManageResults={() => {
+            setHistoricalBacklogOpen(false);
+            openResultsManager({ tab: 'BATCHES' });
+          }}
           onImported={async (msg) => {
             setHistoricalBacklogOpen(false);
             showMsg('ok', msg);
@@ -4022,6 +4151,34 @@ export const SchoolPerformanceView: React.FC<SchoolPerformanceViewProps> = ({ re
           }}
         />
       )}
+
+      <BulkResultsManagerModal
+        isOpen={resultsManagerOpen}
+        onClose={() => setResultsManagerOpen(false)}
+        onChanged={async () => {
+          setSelectedExamsForBulk([]);
+          setSelectedExam(null);
+          await Promise.all([
+            loadBootstrap(),
+            loadExams(),
+            loadReportCards(rcFilters),
+            loadSessionReportCards(rcFilters),
+            loadOverview(filters),
+          ]);
+        }}
+        sessions={sessions}
+        classes={classes}
+        subjects={subjects}
+        departments={availableDepartmentNames}
+        classLabel={instLabels.classLabel}
+        cycleLabel={instLabels.cycle}
+        subjectLabel={instLabels.subject}
+        learnerLabel={isTertiary ? 'Student' : 'Learner'}
+        isTertiary={isTertiary}
+        initialTab={resultsManagerTab}
+        initialExamIds={resultsManagerExamIds}
+        initialAction={resultsManagerAction}
+      />
 
       {broadsheetExamId && (
         <ExamBroadsheetModal

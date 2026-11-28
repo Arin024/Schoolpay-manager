@@ -1921,4 +1921,54 @@ export interface CbtParentResultItem {
   can_review: boolean;
 }
 
+export interface ManagedResultRow {
+  id: string;
+  examination_id: string;
+  exam_title: string;
+  exam_type: string;
+  exam_status: string;
+  exam_department?: string | null;
+  ca_max_score: number;
+  exam_max_score: number;
+  total_max_score: number;
+  student_id: string;
+  student_name: string;
+  admission_number?: string | null;
+  student_department?: string | null;
+  class_id?: string | null;
+  class_name?: string | null;
+  subject_id: string;
+  subject_code?: string | null;
+  subject_name: string;
+  academic_session_id?: string | null;
+  session_name?: string | null;
+  term_id?: string | null;
+  term_name?: string | null;
+  ca_score: number | null;
+  exam_score: number | null;
+  total_score: number | null;
+  grade?: string | null;
+  grade_remark?: string | null;
+  subject_remark?: string | null;
+  status: string;
+  updated_at?: string | null;
+}
 
+export interface ManagedResultBatch {
+  examination_id: string;
+  title: string;
+  exam_type: string;
+  status: string;
+  academic_session_id?: string | null;
+  session_name?: string | null;
+  term_id?: string | null;
+  term_name?: string | null;
+  class_id?: string | null;
+  class_name?: string | null;
+  department?: string | null;
+  scores_count: number;
+  students_count: number;
+  subjects_count: number;
+  created_at?: string | null;
+  updated_at?: string | null;
+}

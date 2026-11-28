@@ -3785,9 +3785,116 @@ export const api = {
       headers: getAuthHeaders(),
     });
   },
+
+  async getManagedResults(params?: {
+    academic_session_id?: string;
+    term_id?: string;
+    class_id?: string;
+    subject_id?: string;
+    examination_id?: string;
+    department?: string;
+    search?: string;
+    limit?: number;
+  }): Promise<{
+    success: boolean;
+    scores: import('../types').ManagedResultRow[];
+    batches: import('../types').ManagedResultBatch[];
+  }> {
+    const qs = new URLSearchParams();
+    if (params?.academic_session_id) qs.set('academic_session_id', params.academic_session_id);
+    if (params?.term_id) qs.set('term_id', params.term_id);
+    if (params?.class_id) qs.set('class_id', params.class_id);
+    if (params?.subject_id) qs.set('subject_id', params.subject_id);
+    if (params?.examination_id) qs.set('examination_id', params.examination_id);
+    if (params?.department) qs.set('department', params.department);
+    if (params?.search) qs.set('search', params.search);
+    if (params?.limit) qs.set('limit', String(params.limit));
+    const qStr = qs.toString() ? `?${qs.toString()}` : '';
+    return safeFetch(`${API_BASE}/school/results/manage${qStr}`, {
+      headers: getAuthHeaders(),
+    });
+  },
+
+  async bulkReassignResults(payload: {
+    score_ids?: string[];
+    examination_ids?: string[];
+    target_class_id?: string | null;
+    target_academic_session_id?: string | null;
+    target_term_id?: string | null;
+    target_department?: string | null;
+    new_exam_title?: string | null;
+    reason?: string;
+  }): Promise<{
+    success: boolean;
+    message: string;
+    summary: {
+      examsUpdated: number;
+      scoresMoved: number;
+      registrationsUpdated: number;
+      enrollmentHistoryUpdated: number;
+      termReportsUpdated: number;
+      termReportsDeleted: number;
+      sessionReportsUpdated: number;
+      sessionReportsDeleted: number;
+    };
+  }> {
+    return safeFetch(`${API_BASE}/school/results/bulk-reassign`, {
+      method: 'POST',
+      headers: getAuthHeaders(),
+      body: JSON.stringify(payload),
+    });
+  },
+
+  async bulkEditResults(payload: {
+    edits: Array<{
+      score_id: string;
+      ca_score?: number | null;
+      exam_score?: number | null;
+      total_score?: number | null;
+      subject_remark?: string | null;
+    }>;
+    reason?: string;
+  }): Promise<{
+    success: boolean;
+    message: string;
+    summary: {
+      updatedCount: number;
+      correctionLogsCreated: number;
+      termReportsUpdated: number;
+      termReportsDeleted: number;
+      sessionReportsUpdated: number;
+      sessionReportsDeleted: number;
+    };
+  }> {
+    return safeFetch(`${API_BASE}/school/results/bulk-edit`, {
+      method: 'POST',
+      headers: getAuthHeaders(),
+      body: JSON.stringify(payload),
+    });
+  },
+
+  async bulkDeleteResults(payload: {
+    score_ids?: string[];
+    examination_ids?: string[];
+    also_delete_registrations?: boolean;
+    reason?: string;
+  }): Promise<{
+    success: boolean;
+    message: string;
+    summary: {
+      scoresDeleted: number;
+      examsDeleted: number;
+      registrationsDeleted: number;
+      termReportsUpdated: number;
+      termReportsDeleted: number;
+      sessionReportsUpdated: number;
+      sessionReportsDeleted: number;
+    };
+  }> {
+    return safeFetch(`${API_BASE}/school/results/bulk-delete`, {
+      method: 'POST',
+      headers: getAuthHeaders(),
+      body: JSON.stringify(payload),
+    });
+  },
 };
-
-
-
-
-
